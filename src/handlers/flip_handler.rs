@@ -294,8 +294,6 @@ impl FlipHandler {
         action
     }
 
-
-
     /// Handle a flip recommendation
     /// 
     /// This is the main entry point for processing auction flips.
@@ -568,8 +566,6 @@ mod tests {
         assert!(FlipHandler::is_skin("skin of something"));
         assert!(!FlipHandler::is_skin("Gold Nugget"));
     }
-
-
 
     #[test]
     fn test_should_skip_flip() {
