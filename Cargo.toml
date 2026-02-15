@@ -1,0 +1,51 @@
+[package]
+name = "frikadellen_baf"
+version = "3.0.0"
+edition = "2021"
+authors = ["TreXito"]
+description = "Frikadellen BAF (Bazaar Auction Flipper) for Hypixel Skyblock - Rust port using Azalea"
+license = "MIT"
+
+[dependencies]
+# Azalea Minecraft bot framework
+azalea = "0.10"
+azalea-protocol = "0.10"
+azalea-inventory = "0.10"
+azalea-client = "0.10"
+azalea-chat = "0.10"
+
+# Async runtime
+tokio = { version = "1.40", features = ["full"] }
+tokio-tungstenite = "0.24"
+futures = "0.3"
+
+# Networking
+reqwest = { version = "0.12", features = ["json"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.8"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "ansi"] }
+tracing-appender = "0.2"
+
+# Utilities
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1.0"
+thiserror = "1.0"
+uuid = { version = "1.10", features = ["v4", "serde"] }
+once_cell = "1.19"
+parking_lot = "0.12"
+regex = "1.10"
+
+# CLI interaction
+dialoguer = "0.11"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
