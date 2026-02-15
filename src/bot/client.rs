@@ -48,8 +48,6 @@ pub struct BotClient {
     event_tx: mpsc::UnboundedSender<BotEvent>,
     /// Event receiver channel
     event_rx: Arc<RwLock<mpsc::UnboundedReceiver<BotEvent>>>,
-    /// Azalea client instance (set after connection)
-    client: Arc<RwLock<Option<Client>>>,
 }
 
 /// Events that can be emitted by the bot
@@ -83,7 +81,6 @@ impl BotClient {
             handlers: Arc::new(BotEventHandlers::new()),
             event_tx,
             event_rx: Arc::new(RwLock::new(event_rx)),
-            client: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -204,63 +201,54 @@ impl BotClient {
         *self.last_window_id.write() = id;
     }
 
-    /// Send a chat message
+    /// Documentation for sending chat messages
     /// 
-    /// **Note**: This method requires access to the azalea Client which is only available
-    /// within event handlers. To send chat messages, use the Client directly in your
-    /// event handler with `bot.ecs.lock().write_message(SendChatEvent {...})`.
+    /// **Important**: This method cannot be called directly because the azalea Client
+    /// is not accessible from outside event handlers. Chat messages must be sent from
+    /// within the event_handler where the Client is available.
     /// 
-    /// # Example
+    /// # Example (within event_handler)
     /// 
     /// ```no_run
     /// # use azalea::prelude::*;
     /// # use azalea::chat::SendChatEvent;
     /// # async fn example(bot: Client) {
-    /// // Inside an event handler:
+    /// // Inside the event handler:
     /// bot.ecs.lock().write_message(SendChatEvent {
     ///     entity: bot.entity,
     ///     content: "/bz".to_string(),
     /// });
     /// # }
     /// ```
-    pub async fn chat(&self, message: &str) -> Result<()> {
-        // This method is a placeholder. In practice, chat messages should be sent
-        // from within event handlers where the Client is available.
-        let client = self.client.read();
-        if let Some(bot) = client.as_ref() {
-            bot.ecs.lock().write_message(SendChatEvent {
-                entity: bot.entity,
-                content: message.to_string(),
-            });
-            debug!("Sent chat message: {}", message);
-            Ok(())
-        } else {
-            Err(anyhow!("Bot not connected - chat() requires Client access from event handler"))
-        }
+    #[deprecated(note = "Cannot be called from outside event handlers. Use the Client directly within event_handler. See method documentation for example.")]
+    pub async fn chat(&self, _message: &str) -> Result<()> {
+        Err(anyhow!(
+            "chat() cannot be called from outside event handlers. \
+             The azalea Client is only accessible within event_handler. \
+             See the method documentation for how to send chat messages."
+        ))
     }
 
-    /// Click a window slot
+    /// Documentation for clicking window slots
     /// 
-    /// Sends a container click packet with the current action counter.
-    /// The action counter is automatically incremented to prevent anti-cheat detection.
-    /// 
-    /// **Note**: This method requires access to the azalea Client. In practice, window
-    /// clicking should be done from within event handlers where the Client is available.
+    /// **Important**: This method cannot be called directly because the azalea Client
+    /// is not accessible from outside event handlers. Window clicks must be sent from
+    /// within the event_handler where the Client is available.
     /// 
     /// # Arguments
     /// 
     /// * `slot` - The slot number to click (0-indexed)
     /// * `button` - Mouse button (0 = left, 1 = right, 2 = middle)
-    /// * `mode` - Click mode (0 = normal click, 1 = shift click, etc.)
+    /// * `click_type` - Click operation type (Pickup, ShiftClick, etc.)
     /// 
-    /// # Example
+    /// # Example (within event_handler)
     /// 
     /// ```no_run
     /// # use azalea::prelude::*;
     /// # use azalea_protocol::packets::game::s_container_click::ServerboundContainerClick;
     /// # use azalea_inventory::operations::ClickType;
     /// # async fn example(bot: Client, window_id: i32, slot: i16) {
-    /// // Inside an event handler:
+    /// // Inside the event handler:
     /// let packet = ServerboundContainerClick {
     ///     container_id: window_id,
     ///     state_id: 0,
@@ -273,65 +261,41 @@ impl BotClient {
     /// bot.write_packet(packet);
     /// # }
     /// ```
-    pub async fn click_window(&self, slot: i16, button: u8, _mode: u8) -> Result<()> {
-        let client = self.client.read();
-        if let Some(bot) = client.as_ref() {
-            let window_id = self.last_window_id() as i32;
-            let action = self.action_counter();
-            
-            // Create the container click packet
-            let packet = ServerboundContainerClick {
-                container_id: window_id,
-                state_id: 0, // State ID is tracked by the server; always send 0 from client
-                slot_num: slot,
-                button_num: button,
-                click_type: ClickType::Pickup,
-                changed_slots: Default::default(),
-                carried_item: azalea_protocol::packets::game::s_container_click::HashedStack(None),
-            };
-            
-            // Send the packet through write_packet
-            bot.write_packet(packet);
-            
-            // Increment action counter for anti-cheat
-            self.increment_action_counter();
-            
-            debug!(
-                "Clicked window {} slot {} (action: {}, button: {})",
-                window_id, slot, action, button
-            );
-            
-            Ok(())
-        } else {
-            Err(anyhow!("Bot not connected - click_window() requires Client access from event handler"))
-        }
+    #[deprecated(note = "Cannot be called from outside event handlers. Use the Client directly within event_handler. See method documentation for example.")]
+    pub async fn click_window(&self, _slot: i16, _button: u8, _click_type: ClickType) -> Result<()> {
+        Err(anyhow!(
+            "click_window() cannot be called from outside event handlers. \
+             The azalea Client is only accessible within event_handler. \
+             See the method documentation for how to send window click packets."
+        ))
     }
 
     /// Click the purchase button (slot 31) in BIN Auction View
     /// 
-    /// This is the standard slot for the "Buy Now" button in auction houses.
-    /// The TypeScript version clicks the gold ingot at slot 31.
+    /// **Important**: See `click_window()` documentation. This method cannot be called
+    /// from outside event handlers. Use the pattern shown there within event_handler.
     /// 
-    /// # Arguments
-    /// 
-    /// * `price` - The expected price (for validation/logging)
-    pub async fn click_purchase(&self, price: u64) -> Result<()> {
-        info!("Clicking purchase button for {} coins", price);
-        self.click_window(31, 0, 0).await
+    /// The purchase button is at slot 31 (gold ingot) in Hypixel's BIN Auction View.
+    #[deprecated(note = "Cannot be called from outside event handlers. See click_window() documentation.")]
+    pub async fn click_purchase(&self, _price: u64) -> Result<()> {
+        Err(anyhow!(
+            "click_purchase() cannot be called from outside event handlers. \
+             See click_window() documentation for how to send window click packets."
+        ))
     }
 
     /// Click the confirm button (slot 11) in Confirm Purchase window
     /// 
-    /// This is the standard slot for the "Confirm" button (green stained clay).
-    /// The TypeScript version clicks slot 11 to confirm purchases.
+    /// **Important**: See `click_window()` documentation. This method cannot be called
+    /// from outside event handlers. Use the pattern shown there within event_handler.
     /// 
-    /// # Arguments
-    /// 
-    /// * `price` - The price being confirmed
-    /// * `item_name` - Name of the item being purchased
-    pub async fn click_confirm(&self, price: u64, item_name: &str) -> Result<()> {
-        info!("Confirming purchase of {} for {} coins", item_name, price);
-        self.click_window(11, 0, 0).await
+    /// The confirm button is at slot 11 (green stained clay) in Hypixel's Confirm Purchase window.
+    #[deprecated(note = "Cannot be called from outside event handlers. See click_window() documentation.")]
+    pub async fn click_confirm(&self, _price: u64, _item_name: &str) -> Result<()> {
+        Err(anyhow!(
+            "click_confirm() cannot be called from outside event handlers. \
+             See click_window() documentation for how to send window click packets."
+        ))
     }
 }
 
