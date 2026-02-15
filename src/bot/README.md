@@ -2,57 +2,86 @@
 
 This module implements the core Azalea bot client for Frikadellen BAF (Bazaar Auction Flipper).
 
-## ⚠️ Implementation Status
+## ✅ Implementation Complete
 
-**IMPORTANT**: This is a **skeleton implementation** that compiles but requires completion for full functionality.
+The bot client now provides full integration with Azalea 0.15:
 
-The current implementation provides:
-- ✅ Core structure and types
-- ✅ Event handling framework
-- ✅ Window title parsing (with tests)
-- ✅ Chat message filtering
-- ✅ NBT data parsing utilities
-- ✅ State management
-- ❌ Actual bot connection (requires azalea 0.15 plugin integration)
-- ❌ Window clicking (requires packet sending implementation)
-- ❌ Chat sending (requires client instance access)
+### Implemented Features
+
+- ✅ Microsoft authentication (azalea::Account::microsoft)
+- ✅ Connection to Hypixel (mc.hypixel.net)
+- ✅ Event handler integration with azalea's bevy_ecs system
+- ✅ Window packet handling (OpenScreen, ContainerClose)
+- ✅ Chat message reception and filtering
+- ✅ Window title parsing from JSON format
+- ✅ Action counter for window clicks (anti-cheat protection)
+- ✅ Packet sending for chat and window clicks
+- ✅ State management and event emission
+- ✅ NBT data parsing utilities (in handlers.rs)
+
+### Architecture
+
+The implementation follows azalea 0.15's plugin architecture:
+
+1. **BotClient** - Main wrapper providing high-level API
+2. **BotClientState** - ECS Component holding shared state across event handlers
+3. **event_handler** - Function that processes azalea Events
+4. **BotEventHandlers** - Utility methods for parsing and handling game data
 
 ## Structure
 
-- **client.rs** - Main bot client wrapper
-  - Provides API structure for bot operations
-  - Manages state and event channels
-  - **Stub methods** for connect(), chat(), click_window()
+- **client.rs** - Main bot client with azalea integration
+  - `connect()` - Authenticates and connects to Hypixel ✅
+  - `chat()` - Sends chat messages ✅
+  - `click_window()` - Sends container click packets ✅
+  - `click_purchase()` and `click_confirm()` - Specific slot clicks ✅
+  - Event handler for window open/close, chat, inventory ✅
   
-- **handlers.rs** - Event handlers (FULLY IMPLEMENTED)
+- **handlers.rs** - Event handlers and utilities (FULLY IMPLEMENTED)
   - Parses window titles from JSON format ✅
   - Handles chat messages and filters Coflnet messages ✅
   - Tracks current window state ✅
   - Provides utilities for NBT parsing and item identification ✅
 
-## Key Implementation Details
+## Implementation Details
 
 ### From TypeScript Version
 
 The implementation preserves all critical logic from `/tmp/frikadellen-baf/src/BAF.ts`:
 
-1. **Window Click Mechanics** (from `fastWindowClick.ts`):
-   ```typescript
-   // Slot 31: Purchase button in BIN Auction View
-   // Slot 11: Confirm button in Confirm Purchase
-   // Action counter increments with each click (anti-cheat)
-   ```
+1. **Connection & Authentication**:
+   - Uses `Account::microsoft()` for authentication
+   - Connects to `mc.hypixel.net` with azalea's ClientBuilder
+   - Runs in separate thread with own tokio runtime
 
-2. **Window Title Parsing**:
+2. **Window Click Mechanics** (from `fastWindowClick.ts`):
+   - Slot 31: Purchase button in BIN Auction View
+   - Slot 11: Confirm button in Confirm Purchase
+   - Action counter increments with each click (anti-cheat)
+   - Uses `ServerboundContainerClick` packet
+
+3. **Chat Message Sending**:
+   - Uses azalea's `SendChatEvent` via ECS message system
+   - Commands start with '/' and are automatically handled
+   - Messages sent through `bot.ecs.lock().write_message()`
+
+4. **Window Title Parsing**:
    ```json
    {"text":"","extra":[{"text":"Bazaar"}]}
    ```
    Extracts "Bazaar" from the JSON structure.
 
-3. **Coflnet Message Filtering**:
+5. **Event Handling**:
+   - Login event: Sets bot state to Idle
+   - Chat event: Filters and logs messages
+   - OpenScreen packet: Tracks window opens and parses titles
+   - ContainerClose packet: Tracks window closes
+   - Disconnect event: Logs disconnection reason
+
+6. **Coflnet Message Filtering**:
    Messages starting with `[Chat]` are filtered out.
 
-4. **NBT Parsing for SkyBlock Items**:
+7. **NBT Parsing for SkyBlock Items**:
    - Extracts `ExtraAttributes.id` for item IDs
    - Parses `display.Name` for custom names
    - Handles both JSON and plain text formats
@@ -71,41 +100,70 @@ pub fn increment_action_counter(&self) {
 
 Each window click must increment this counter to avoid detection.
 
-### Required Implementation
+### Usage Example
 
-To complete the bot client, you need to:
+```rust
+use frikadellen_baf::bot::client::BotClient;
 
-1. **Implement Bot Connection** (client.rs:104-111):
-   ```rust
-   // Use azalea 0.15 API:
-   let account = Account::microsoft(&username).await?;
-   azalea::ClientBuilder::new()
-       .set_handler(|bot, event, state| {
-           // Event handling
-       })
-       .start(account, "mc.hypixel.net")
-       .await?;
-   ```
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
+    let mut bot = BotClient::new();
+    
+    // Connect to Hypixel
+    bot.connect("email@example.com".to_string()).await?;
+    
+    // Wait for events
+    while let Some(event) = bot.next_event().await {
+        match event {
+            BotEvent::Login => println!("Bot logged in!"),
+            BotEvent::WindowOpen(id, window_type, title) => {
+                println!("Window opened: {} ({})", title, window_type);
+            }
+            BotEvent::ChatMessage(msg) => println!("Chat: {}", msg),
+            _ => {}
+        }
+    }
+    
+    Ok(())
+}
+```
 
-2. **Implement Window Clicking** (client.rs:172-178):
-   ```rust
-   // Send window_click packet:
-   client.write_packet(ServerboundContainerClickPacket {
-       container_id: window_id,
-       slot_num: slot,
-       button_num: button,
-       state_id: action_counter,
-       click_type: mode,
-       changed_slots: vec![],
-       carried_item: None,
-   });
-   ```
+### Packet Sending from Event Handlers
 
-3. **Implement Chat Sending** (client.rs:164-169):
-   ```rust
-   // Through azalea Client instance:
-   client.chat(message);
-   ```
+For operations that require the Client instance (chat, window clicks), 
+access is available within event handlers:
+
+```rust
+fn event_handler(bot: Client, event: Event, state: BotClientState) 
+    -> impl std::future::Future<Output = Result<()>> + Send 
+{
+    async move {
+        match event {
+            Event::Init => {
+                // Send a chat message
+                bot.ecs.lock().write_message(SendChatEvent {
+                    entity: bot.entity,
+                    content: "/bz".to_string(),
+                });
+                
+                // Click a window slot
+                let packet = ServerboundContainerClick {
+                    container_id: 0,
+                    state_id: 0,
+                    slot_num: 31,
+                    button_num: 0,
+                    click_type: ClickType::Pickup,
+                    changed_slots: Default::default(),
+                    carried_item: HashedStack(None),
+                };
+                bot.write_packet(packet);
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+}
+```
 
 ## Dependencies
 
@@ -142,10 +200,10 @@ Current test coverage:
 - **Azalea Examples**: https://github.com/azalea-rs/azalea/tree/main/azalea/examples
 - **Azalea 0.15 Docs**: Generated with `cargo doc --open`
 
-## Next Steps
+## Notes
 
-1. Study azalea 0.15 examples to understand plugin architecture
-2. Implement event handler with proper packet inspection
-3. Add window state tracking through azalea's inventory system
-4. Implement packet sending for window clicks
-5. Add integration tests with mock server
+- The bot runs in a separate thread with its own tokio runtime
+- Window clicks and chat messages should be sent from within event handlers where the Client is accessible
+- The action counter is incremented automatically for each window click to prevent server-side detection
+- Window IDs are tracked automatically when windows are opened
+- All stub implementations have been replaced with full azalea 0.15 integration

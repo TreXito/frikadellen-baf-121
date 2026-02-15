@@ -1495,6 +1495,8 @@ dependencies = [
  "azalea-client",
  "azalea-inventory",
  "azalea-protocol",
+ "bevy_app",
+ "bevy_ecs",
  "chrono",
  "dialoguer",
  "dirs",
