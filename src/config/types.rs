@@ -114,7 +114,7 @@ fn default_web_gui_port() -> u16 {
 }
 
 fn default_flip_action_delay() -> u64 {
-    3000
+    150 // TypeScript FLIP_ACTION_DELAY
 }
 
 fn default_bed_spam_click_delay() -> u64 {

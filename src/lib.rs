@@ -5,9 +5,13 @@
 
 pub mod bot;
 pub mod config;
+pub mod gui;
+pub mod handlers;
+pub mod inventory;
 pub mod logging;
 pub mod state;
 pub mod types;
+pub mod utils;
 pub mod websocket;
 
 pub use bot::{BotClient, BotEvent, BotEventHandlers};
