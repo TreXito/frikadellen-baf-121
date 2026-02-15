@@ -8,11 +8,11 @@ license = "MIT"
 
 [dependencies]
 # Azalea Minecraft bot framework
-azalea = "0.10"
-azalea-protocol = "0.10"
-azalea-inventory = "0.10"
-azalea-client = "0.10"
-azalea-chat = "0.10"
+azalea = "0.15"
+azalea-protocol = "0.15"
+azalea-inventory = "0.15"
+azalea-client = "0.15"
+azalea-chat = "0.15"
 
 # Async runtime
 tokio = { version = "1.40", features = ["full"] }
@@ -40,6 +40,7 @@ uuid = { version = "1.10", features = ["v4", "serde"] }
 once_cell = "1.19"
 parking_lot = "0.12"
 regex = "1.10"
+dirs = "5.0"
 
 # CLI interaction
 dialoguer = "0.11"

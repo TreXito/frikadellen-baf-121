@@ -1,5 +1,5 @@
-pub mod client;
-pub mod handlers;
+mod client;
+mod handlers;
 
-pub use client::*;
-pub use handlers::*;
+pub use client::{BotClient, BotEvent};
+pub use handlers::BotEventHandlers;
