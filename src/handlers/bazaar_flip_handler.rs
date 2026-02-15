@@ -22,26 +22,37 @@ use crate::types::{BazaarFlipRecommendation, BotState};
 use crate::utils::to_title_case;
 
 /// Configuration constants
+#[allow(dead_code)]
 const RETRY_DELAY_MS: u64 = 1100;
+#[allow(dead_code)]
 const OPERATION_TIMEOUT_MS: u64 = 20000;
+#[allow(dead_code)]
 const MAX_LOGGED_SLOTS: usize = 15;
+#[allow(dead_code)]
 const MINEFLAYER_WINDOW_PROCESS_DELAY_MS: u64 = 300;
+#[allow(dead_code)]
 const BAZAAR_RETRY_DELAY_MS: u64 = 2000;
 const MAX_ORDER_PLACEMENT_RETRIES: usize = 3;
 const RETRY_BACKOFF_BASE_MS: u64 = 1000;
+#[allow(dead_code)]
 const FIRST_SEARCH_RESULT_SLOT: usize = 11;
 
 /// Price failsafe thresholds
+#[allow(dead_code)]
 const PRICE_FAILSAFE_BUY_THRESHOLD: f64 = 0.9;  // Reject buy orders if sign price < 90% of order price
+#[allow(dead_code)]
 const PRICE_FAILSAFE_SELL_THRESHOLD: f64 = 1.1; // Reject sell orders if sign price > 110% of order price
 
 /// Rate limiting
+#[allow(dead_code)]
 const LIMIT_WARNING_COOLDOWN_MS: u64 = 60000;
 
 /// Order placement confirmation
+#[allow(dead_code)]
 const ORDER_REJECTION_WAIT_MS: u64 = 1000;
 
 /// Stale command detection (60 seconds)
+#[allow(dead_code)]
 const COMMAND_STALE_THRESHOLD_MS: u64 = 60000;
 
 /// Configuration for bazaar flip handler
@@ -66,6 +77,7 @@ impl Default for BazaarFlipConfig {
 
 /// Bazaar order step in the placement flow
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)]
 enum BazaarStep {
     Initial,
     SearchResults,
@@ -80,8 +92,10 @@ pub struct BazaarFlipHandler {
     /// Configuration
     config: Arc<RwLock<BazaarFlipConfig>>,
     /// Window handler
+    #[allow(dead_code)]
     window_handler: WindowHandler,
     /// Last time we showed "slots full" warning
+    #[allow(dead_code)]
     last_limit_warning_time: Arc<RwLock<Instant>>,
 }
 
@@ -416,6 +430,7 @@ impl BazaarFlipHandler {
     }
 
     /// Find item in search results with exact match priority, then fuzzy fallback
+    #[allow(dead_code)]
     fn find_item_in_search_results(
         &self,
         slots: &[WindowSlot],
@@ -495,6 +510,7 @@ impl BazaarFlipHandler {
     }
 
     /// Calculate Levenshtein distance between two strings
+    #[allow(dead_code)]
     fn levenshtein_distance(a: &str, b: &str) -> usize {
         let len_a = a.len();
         let len_b = b.len();
@@ -535,6 +551,7 @@ impl BazaarFlipHandler {
     }
 
     /// Check for bazaar errors in window slots
+    #[allow(dead_code)]
     fn check_for_bazaar_errors(&self, slots: &[WindowSlot]) -> Option<String> {
         let known_error_patterns = [
             "cannot place any more",

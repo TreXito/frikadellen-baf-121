@@ -2,7 +2,7 @@ use parking_lot::RwLock;
 use regex::Regex;
 use serde_json::Value as JsonValue;
 use std::sync::Arc;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 use crate::types::WindowType;
 
@@ -15,6 +15,7 @@ pub struct BotEventHandlers {
     /// Current window ID
     current_window_id: Arc<RwLock<Option<u8>>>,
     /// Regex for Coflnet chat messages
+    #[allow(dead_code)]
     cofl_chat_regex: Regex,
 }
 

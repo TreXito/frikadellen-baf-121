@@ -15,13 +15,14 @@ use parking_lot::RwLock;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
-use tracing::{debug, error, info, warn};
+use tracing::{debug, info, warn};
 
-use crate::gui::{StandardSlot, WindowConfig, WindowHandler, WindowSlot};
+use crate::gui::{WindowConfig, WindowHandler, WindowSlot};
 use crate::types::{BotState, Flip};
 use crate::utils::format_number_with_separators;
 
 /// Maximum failed clicks before stopping bed spam
+#[allow(dead_code)]
 const BED_SPAM_MAX_FAILED_CLICKS: usize = 5;
 
 /// Configuration for flip handler
@@ -308,7 +309,7 @@ impl FlipHandler {
         flip: Flip,
         bot_state: Arc<RwLock<BotState>>,
         send_command: F,
-        window_opened: G,
+        _window_opened: G,
     ) -> Result<()>
     where
         F: Fn(&str) -> Result<()>,
@@ -344,7 +345,7 @@ impl FlipHandler {
         // Set bot state to purchasing
         *bot_state.write() = BotState::Purchasing;
 
-        let profit = flip.target - flip.starting_bid;
+        let _profit = flip.target - flip.starting_bid;
         
         info!(
             "Trying to purchase flip: {} for {} coins (Target: {})",

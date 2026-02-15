@@ -7,6 +7,7 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 const BAZAAR_RECOMMENDATION_MAX_AGE_MS: u64 = 60_000; // 60 seconds
+#[allow(dead_code)]
 const COMMAND_TIMEOUT_MS: u64 = 30_000; // 30 seconds
 
 #[derive(Clone)]

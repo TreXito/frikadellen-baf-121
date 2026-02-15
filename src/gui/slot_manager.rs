@@ -5,7 +5,7 @@
 /// the TypeScript implementation to ensure packet compatibility.
 
 use std::collections::HashMap;
-use tracing::{debug, warn};
+use tracing::warn;
 
 /// Standard slot positions used in various GUIs
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

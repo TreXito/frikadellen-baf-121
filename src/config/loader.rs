@@ -2,7 +2,7 @@ use super::types::Config;
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::PathBuf;
-use tracing::{info, warn};
+use tracing::info;
 
 pub struct ConfigLoader {
     config_path: PathBuf,

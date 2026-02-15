@@ -13,8 +13,6 @@ use std::time::Duration;
 use tokio::time::{sleep, timeout};
 use tracing::{debug, info, warn};
 
-use crate::gui::slot_manager::{StandardSlot, WindowKind};
-
 /// Configuration for window operations
 #[derive(Debug, Clone)]
 pub struct WindowConfig {

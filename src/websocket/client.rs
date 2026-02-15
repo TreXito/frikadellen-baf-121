@@ -1,7 +1,7 @@
 use super::messages::{parse_message_data, ChatMessage, WebSocketMessage};
 use crate::types::{BazaarFlipRecommendation, Flip};
 use anyhow::{Context, Result};
-use futures::{SinkExt, StreamExt};
+use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{debug, error, info, warn};
@@ -14,6 +14,7 @@ pub enum CoflEvent {
 }
 
 pub struct CoflWebSocket {
+    #[allow(dead_code)]
     tx: mpsc::UnboundedSender<CoflEvent>,
 }
 
@@ -37,7 +38,7 @@ impl CoflWebSocket {
 
         info!("WebSocket connected successfully");
 
-        let (mut write, mut read) = ws_stream.split();
+        let (_write, mut read) = ws_stream.split();
         let (tx, rx) = mpsc::unbounded_channel();
         let tx_clone = tx.clone();
 
@@ -54,7 +55,7 @@ impl CoflWebSocket {
                         warn!("WebSocket closed by server");
                         break;
                     }
-                    Ok(Message::Ping(data)) => {
+                    Ok(Message::Ping(_data)) => {
                         debug!("Received ping, sending pong");
                         // Pong is handled automatically by tungstenite
                     }

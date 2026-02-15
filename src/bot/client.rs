@@ -1,8 +1,6 @@
 use anyhow::{anyhow, Result};
 use azalea::prelude::*;
-use azalea::chat::SendChatEvent;
 use azalea_protocol::packets::game::{
-    s_container_click::ServerboundContainerClick,
     ClientboundGamePacket,
 };
 use azalea_inventory::operations::ClickType;
@@ -311,6 +309,7 @@ pub struct BotClientState {
     pub bot_state: Arc<RwLock<BotState>>,
     pub handlers: Arc<BotEventHandlers>,
     pub event_tx: mpsc::UnboundedSender<BotEvent>,
+    #[allow(dead_code)]
     pub action_counter: Arc<RwLock<i16>>,
     pub last_window_id: Arc<RwLock<u8>>,
 }
@@ -330,7 +329,7 @@ impl Default for BotClientState {
 
 /// Handle events from the Azalea client
 async fn event_handler(
-    bot: Client,
+    _bot: Client,
     event: Event,
     state: BotClientState,
 ) -> Result<()> {

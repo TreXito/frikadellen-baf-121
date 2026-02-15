@@ -1,6 +1,5 @@
 use anyhow::Result;
 use std::path::PathBuf;
-use tracing::Level;
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
