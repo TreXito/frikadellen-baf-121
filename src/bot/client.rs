@@ -15,6 +15,9 @@ use tracing::{info, error, debug};
 use crate::types::BotState;
 use super::handlers::BotEventHandlers;
 
+/// Connection wait duration (seconds) - time to wait for bot connection to establish
+const CONNECTION_WAIT_SECONDS: u64 = 2;
+
 /// Main bot client wrapper for Azalea
 /// 
 /// Provides integration with azalea 0.15 for Minecraft bot functionality on Hypixel.
@@ -127,7 +130,8 @@ impl BotClient {
         // Build and start the client (this blocks until disconnection)
         let handler_state_clone = handler_state.clone();
         std::thread::spawn(move || {
-            let rt = tokio::runtime::Runtime::new().unwrap();
+            let rt = tokio::runtime::Runtime::new()
+                .expect("Failed to create tokio runtime for bot - this should never happen unless system resources are exhausted");
             rt.block_on(async move {
                 let exit_result = ClientBuilder::new()
                     .set_handler(event_handler)
@@ -146,8 +150,8 @@ impl BotClient {
             });
         });
         
-        // Wait a bit for connection to establish
-        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+        // Wait for connection to establish
+        tokio::time::sleep(tokio::time::Duration::from_secs(CONNECTION_WAIT_SECONDS)).await;
         
         info!("Bot connection initiated");
         
@@ -278,7 +282,7 @@ impl BotClient {
             // Create the container click packet
             let packet = ServerboundContainerClick {
                 container_id: window_id,
-                state_id: 0, // Server tracks this
+                state_id: 0, // State ID is tracked by the server; always send 0 from client
                 slot_num: slot,
                 button_num: button,
                 click_type: ClickType::Pickup,
@@ -360,15 +364,8 @@ impl Default for BotClientState {
     }
 }
 
-/// Event handler function for the azalea client
-fn event_handler(bot: Client, event: Event, state: BotClientState) -> impl std::future::Future<Output = Result<()>> + Send {
-    async move {
-        handle_event(bot, event, state).await
-    }
-}
-
 /// Handle events from the Azalea client
-async fn handle_event(
+async fn event_handler(
     bot: Client,
     event: Event,
     state: BotClientState,
@@ -376,19 +373,25 @@ async fn handle_event(
     match event {
         Event::Login => {
             info!("Bot logged in successfully");
-            let _ = state.event_tx.send(BotEvent::Login);
+            if state.event_tx.send(BotEvent::Login).is_err() {
+                debug!("Failed to send Login event - receiver dropped");
+            }
             *state.bot_state.write() = BotState::Idle;
         }
         
         Event::Init => {
             info!("Bot initialized and spawned in world");
-            let _ = state.event_tx.send(BotEvent::Spawn);
+            if state.event_tx.send(BotEvent::Spawn).is_err() {
+                debug!("Failed to send Spawn event - receiver dropped");
+            }
         }
         
         Event::Chat(chat) => {
             let message = chat.message().to_string();
             state.handlers.handle_chat_message(&message).await;
-            let _ = state.event_tx.send(BotEvent::ChatMessage(message));
+            if state.event_tx.send(BotEvent::ChatMessage(message)).is_err() {
+                debug!("Failed to send ChatMessage event - receiver dropped");
+            }
         }
         
         Event::Packet(packet) => {
@@ -406,12 +409,16 @@ async fn handle_event(
                     *state.last_window_id.write() = window_id as u8;
                     
                     state.handlers.handle_window_open(window_id as u8, &window_type, &parsed_title).await;
-                    let _ = state.event_tx.send(BotEvent::WindowOpen(window_id as u8, window_type, parsed_title));
+                    if state.event_tx.send(BotEvent::WindowOpen(window_id as u8, window_type, parsed_title)).is_err() {
+                        debug!("Failed to send WindowOpen event - receiver dropped");
+                    }
                 }
                 
                 ClientboundGamePacket::ContainerClose(_) => {
                     state.handlers.handle_window_close().await;
-                    let _ = state.event_tx.send(BotEvent::WindowClose);
+                    if state.event_tx.send(BotEvent::WindowClose).is_err() {
+                        debug!("Failed to send WindowClose event - receiver dropped");
+                    }
                 }
                 
                 ClientboundGamePacket::ContainerSetSlot(_slot_update) => {
@@ -431,7 +438,9 @@ async fn handle_event(
         Event::Disconnect(reason) => {
             info!("Bot disconnected: {:?}", reason);
             let reason_str = format!("{:?}", reason);
-            let _ = state.event_tx.send(BotEvent::Disconnected(reason_str));
+            if state.event_tx.send(BotEvent::Disconnected(reason_str)).is_err() {
+                debug!("Failed to send Disconnected event - receiver dropped");
+            }
         }
         
         _ => {}
