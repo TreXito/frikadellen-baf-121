@@ -95,12 +95,16 @@ frikadellen_baf-windows-x86_64.exe
 git clone https://github.com/TreXito/frikadellen-baf-121.git
 cd frikadellen-baf-121
 
-# Build release binary
-cargo build --release
+# Option 1: Use the launcher script (recommended)
+chmod +x frikadellen-baf-121
+./frikadellen-baf-121
 
-# Binary will be in target/release/frikadellen_baf
+# Option 2: Build and run manually
+cargo build --release
 ./target/release/frikadellen_baf
 ```
+
+The `frikadellen-baf-121` launcher script will automatically build the binary if it doesn't exist and then run it.
 
 ## 🎮 Usage
 
