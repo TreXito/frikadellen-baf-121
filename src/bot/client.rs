@@ -33,6 +33,7 @@ const CONNECTION_WAIT_SECONDS: u64 = 2;
 /// 
 /// - Original TypeScript: `/tmp/frikadellen-baf/src/BAF.ts`
 /// - Azalea examples: https://github.com/azalea-rs/azalea/tree/main/azalea/examples
+#[derive(Clone)]
 pub struct BotClient {
     /// Current bot state
     state: Arc<RwLock<BotState>>,
@@ -44,8 +45,8 @@ pub struct BotClient {
     handlers: Arc<BotEventHandlers>,
     /// Event sender channel
     event_tx: mpsc::UnboundedSender<BotEvent>,
-    /// Event receiver channel
-    event_rx: Arc<RwLock<mpsc::UnboundedReceiver<BotEvent>>>,
+    /// Event receiver channel (cloned for each listener)
+    event_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<BotEvent>>>,
 }
 
 /// Events that can be emitted by the bot
@@ -78,7 +79,7 @@ impl BotClient {
             last_window_id: Arc::new(RwLock::new(0)),
             handlers: Arc::new(BotEventHandlers::new()),
             event_tx,
-            event_rx: Arc::new(RwLock::new(event_rx)),
+            event_rx: Arc::new(tokio::sync::Mutex::new(event_rx)),
         }
     }
 
@@ -172,7 +173,7 @@ impl BotClient {
 
     /// Wait for next event
     pub async fn next_event(&self) -> Option<BotEvent> {
-        self.event_rx.write().recv().await
+        self.event_rx.lock().await.recv().await
     }
 
     /// Get the current action counter value
