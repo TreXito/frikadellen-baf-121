@@ -32,6 +32,15 @@ async fn main() -> Result<()> {
         config_loader.save(&config)?;
     }
 
+    // Prompt for Microsoft email if not set
+    if config.microsoft_email.is_none() {
+        let email: String = Input::new()
+            .with_prompt("Enter your Microsoft account email")
+            .interact_text()?;
+        config.microsoft_email = Some(email.clone());
+        config_loader.save(&config)?;
+    }
+
     if config.enable_ah_flips && config.enable_bazaar_flips {
         // Both are enabled, ask user
     } else if !config.enable_ah_flips && !config.enable_bazaar_flips {
@@ -52,6 +61,7 @@ async fn main() -> Result<()> {
     }
 
     let ingame_name = config.ingame_name.clone().unwrap();
+    let microsoft_email = config.microsoft_email.clone().unwrap();
     
     info!("Configuration loaded for player: {}", ingame_name);
     info!("AH Flips: {}", if config.enable_ah_flips { "ENABLED" } else { "DISABLED" });
@@ -83,12 +93,53 @@ async fn main() -> Result<()> {
 
     info!("WebSocket connected successfully");
 
-    // Initialize bot client (placeholder - needs Azalea integration)
+    // Initialize and connect bot client
     info!("Initializing Minecraft bot...");
-    info!("NOTE: Bot connection requires Azalea plugin integration");
-    info!("Refer to src/bot/README.md for implementation details");
+    info!("Connecting to Hypixel with Microsoft account: {}", microsoft_email);
     
-    let _bot_client = BotClient::new();
+    let mut bot_client = BotClient::new();
+    
+    // Connect to Hypixel
+    match bot_client.connect(microsoft_email.clone()).await {
+        Ok(_) => {
+            info!("Bot connection initiated successfully");
+        }
+        Err(e) => {
+            warn!("Failed to connect bot: {}", e);
+            warn!("The bot will continue running in limited mode (WebSocket only)");
+            warn!("Please ensure your Microsoft account is valid and you have access to Hypixel");
+        }
+    }
+
+    // Spawn bot event handler
+    let bot_client_clone = bot_client.clone();
+    tokio::spawn(async move {
+        while let Some(event) = bot_client_clone.next_event().await {
+            match event {
+                frikadellen_baf::bot::BotEvent::Login => {
+                    info!("✓ Bot logged into Minecraft successfully");
+                }
+                frikadellen_baf::bot::BotEvent::Spawn => {
+                    info!("✓ Bot spawned in world and ready");
+                }
+                frikadellen_baf::bot::BotEvent::ChatMessage(msg) => {
+                    info!("[Minecraft] {}", msg);
+                }
+                frikadellen_baf::bot::BotEvent::WindowOpen(id, window_type, title) => {
+                    info!("Window opened: {} (ID: {}, Type: {})", title, id, window_type);
+                }
+                frikadellen_baf::bot::BotEvent::WindowClose => {
+                    info!("Window closed");
+                }
+                frikadellen_baf::bot::BotEvent::Disconnected(reason) => {
+                    warn!("Bot disconnected: {}", reason);
+                }
+                frikadellen_baf::bot::BotEvent::Kicked(reason) => {
+                    warn!("Bot kicked: {}", reason);
+                }
+            }
+        }
+    });
 
     // Spawn WebSocket message handler
     let state_manager_clone = state_manager.clone();

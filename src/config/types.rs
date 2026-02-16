@@ -7,6 +7,9 @@ pub struct Config {
     #[serde(default)]
     pub ingame_name: Option<String>,
     
+    #[serde(default)]
+    pub microsoft_email: Option<String>,
+    
     #[serde(default = "default_websocket_url")]
     pub websocket_url: String,
     
@@ -153,6 +156,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             ingame_name: None,
+            microsoft_email: None,
             websocket_url: default_websocket_url(),
             web_gui_port: default_web_gui_port(),
             flip_action_delay: default_flip_action_delay(),
