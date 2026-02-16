@@ -16,6 +16,18 @@ use super::handlers::BotEventHandlers;
 /// Connection wait duration (seconds) - time to wait for bot connection to establish
 const CONNECTION_WAIT_SECONDS: u64 = 2;
 
+/// Delay after spawning in lobby before sending /play skyblock command
+const LOBBY_COMMAND_DELAY_SECS: u64 = 1;
+
+/// Delay after detecting SkyBlock join before teleporting to island
+const ISLAND_TELEPORT_DELAY_SECS: u64 = 2;
+
+/// Wait time for island teleport to complete
+const TELEPORT_COMPLETION_WAIT_SECS: u64 = 3;
+
+/// Timeout for waiting for SkyBlock join confirmation (seconds)
+const SKYBLOCK_JOIN_TIMEOUT_SECS: u64 = 15;
+
 /// Main bot client wrapper for Azalea
 /// 
 /// Provides integration with azalea 0.15 for Minecraft bot functionality on Hypixel.
@@ -395,7 +407,7 @@ async fn event_handler(
             if !joined_skyblock {
                 // First spawn - we're in the lobby, join SkyBlock
                 info!("Joining Hypixel SkyBlock...");
-                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                tokio::time::sleep(tokio::time::Duration::from_secs(LOBBY_COMMAND_DELAY_SECS)).await;
                 bot.write_chat_packet("/play skyblock");
                 *state.joined_skyblock.write() = true;
                 *state.skyblock_join_time.write() = Some(tokio::time::Instant::now());
@@ -418,28 +430,29 @@ async fn event_handler(
                 // Check for timeout (if we've been waiting too long, try anyway)
                 let join_time = *state.skyblock_join_time.read();
                 let should_timeout = if let Some(join_time) = join_time {
-                    join_time.elapsed() > tokio::time::Duration::from_secs(15)
+                    join_time.elapsed() > tokio::time::Duration::from_secs(SKYBLOCK_JOIN_TIMEOUT_SECS)
                 } else {
                     false
                 };
                 
                 // Look for welcome messages or timeout
-                if message.contains("Welcome to Hypixel SkyBlock") 
-                    || message.contains("SKYBLOCK") && message.contains("Profile")
-                    || should_timeout {
-                    
+                // Fix operator precedence: check timeout separately or use explicit parentheses
+                let skyblock_detected = message.contains("Welcome to Hypixel SkyBlock") 
+                    || (message.contains("SKYBLOCK") && message.contains("Profile"));
+                
+                if skyblock_detected || should_timeout {
                     if should_timeout {
                         info!("Timeout waiting for SkyBlock confirmation - attempting to teleport to island anyway...");
                     } else {
                         info!("Detected SkyBlock join - teleporting to island...");
                     }
                     
-                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    tokio::time::sleep(tokio::time::Duration::from_secs(ISLAND_TELEPORT_DELAY_SECS)).await;
                     bot.write_chat_packet("/is");
                     *state.teleported_to_island.write() = true;
                     
                     // Wait for teleport to complete
-                    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                    tokio::time::sleep(tokio::time::Duration::from_secs(TELEPORT_COMPLETION_WAIT_SECS)).await;
                     
                     // Now ready to process commands
                     info!("Bot initialization complete - ready to flip!");
