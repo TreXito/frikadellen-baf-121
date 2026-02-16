@@ -44,19 +44,15 @@ pub fn init_logger() -> Result<()> {
 }
 
 fn get_log_path() -> PathBuf {
-    #[cfg(target_os = "windows")]
-    {
-        let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
-        PathBuf::from(appdata).join("BAF").join("baf.log")
-    }
+    // Use executable directory for log file
+    // This allows multiple instances to run with separate logs
+    let exe_path = std::env::current_exe()
+        .unwrap_or_else(|_| PathBuf::from("."));
     
-    #[cfg(not(target_os = "windows"))]
-    {
-        dirs::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("baf")
-            .join("baf.log")
-    }
+    let exe_dir = exe_path.parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    
+    exe_dir.join("baf.log")
 }
 
 /// Remove Minecraft color codes from a string
