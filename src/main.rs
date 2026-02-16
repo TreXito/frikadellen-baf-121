@@ -340,23 +340,31 @@ async fn main() -> Result<()> {
                 CoflEvent::CreateAuction(data) => {
                     info!("Processing createAuction request");
                     // Parse the auction data
-                    if let Ok(auction_data) = serde_json::from_str::<serde_json::Value>(&data) {
-                        if let (Some(item), Some(price), Some(duration)) = (
-                            auction_data.get("itemName").and_then(|v| v.as_str()),
-                            auction_data.get("startingBid").and_then(|v| v.as_u64()),
-                            auction_data.get("duration").and_then(|v| v.as_u64()),
-                        ) {
-                            command_queue_clone.enqueue(
-                                CommandType::SellToAuction {
-                                    item_name: item.to_string(),
-                                    starting_bid: price,
-                                    duration_hours: duration,
-                                },
-                                CommandPriority::High,
-                                false,
-                            );
-                        } else {
-                            warn!("Failed to parse createAuction data: {}", data);
+                    match serde_json::from_str::<serde_json::Value>(&data) {
+                        Ok(auction_data) => {
+                            match (
+                                auction_data.get("itemName").and_then(|v| v.as_str()),
+                                auction_data.get("startingBid").and_then(|v| v.as_u64()),
+                                auction_data.get("duration").and_then(|v| v.as_u64()),
+                            ) {
+                                (Some(item), Some(price), Some(duration)) => {
+                                    command_queue_clone.enqueue(
+                                        CommandType::SellToAuction {
+                                            item_name: item.to_string(),
+                                            starting_bid: price,
+                                            duration_hours: duration,
+                                        },
+                                        CommandPriority::High,
+                                        false,
+                                    );
+                                }
+                                _ => {
+                                    warn!("createAuction missing required fields (itemName, startingBid, duration): {}", data);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!("Failed to parse createAuction JSON: {}", e);
                         }
                     }
                 }
@@ -477,7 +485,13 @@ async fn main() -> Result<()> {
                     
                     // Send to websocket with command as type
                     // Match TypeScript: data field must be JSON-stringified (double-encoded)
-                    let data_json = serde_json::to_string(&args).unwrap_or_else(|_| "\"\"".to_string());
+                    let data_json = match serde_json::to_string(&args) {
+                        Ok(json) => json,
+                        Err(e) => {
+                            error!("Failed to serialize command args: {}", e);
+                            "\"\"".to_string()
+                        }
+                    };
                     let message = serde_json::json!({
                         "type": command,
                         "data": data_json  // JSON-stringified to match TypeScript JSON.stringify()
@@ -515,7 +529,13 @@ async fn main() -> Result<()> {
             // Non-slash messages go to websocket as chat (matching TypeScript)
             else {
                 // Match TypeScript: data field must be JSON-stringified
-                let data_json = serde_json::to_string(&input).unwrap_or_else(|_| "\"\"".to_string());
+                let data_json = match serde_json::to_string(&input) {
+                    Ok(json) => json,
+                    Err(e) => {
+                        error!("Failed to serialize chat message: {}", e);
+                        "\"\"".to_string()
+                    }
+                };
                 let message = serde_json::json!({
                     "type": "chat",
                     "data": data_json  // JSON-stringified to match TypeScript JSON.stringify()

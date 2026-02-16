@@ -29,6 +29,10 @@ const TELEPORT_COMPLETION_WAIT_SECS: u64 = 3;
 /// Timeout for waiting for SkyBlock join confirmation (seconds)
 const SKYBLOCK_JOIN_TIMEOUT_SECS: u64 = 15;
 
+/// Delay before clicking accept button in trade response window (milliseconds)
+/// TypeScript waits to check for "Deal!" or "Warning!" messages before accepting
+const TRADE_RESPONSE_DELAY_MS: u64 = 3400;
+
 /// Main bot client wrapper for Azalea
 /// 
 /// Provides integration with azalea 0.15 for Minecraft bot functionality on Hypixel.
@@ -609,8 +613,8 @@ async fn execute_command(
             info!("Clicking slot {}", slot);
             // TypeScript: clicks slot in current window after checking trade display
             // For tradeResponse, TypeScript checks if window contains "Deal!" or "Warning!"
-            // and waits 3400ms before clicking
-            tokio::time::sleep(tokio::time::Duration::from_millis(3400)).await;
+            // and waits before clicking to ensure trade window is fully loaded
+            tokio::time::sleep(tokio::time::Duration::from_millis(TRADE_RESPONSE_DELAY_MS)).await;
             let window_id = *state.last_window_id.read();
             if window_id > 0 {
                 click_window_slot(bot, window_id, *slot).await;
@@ -621,7 +625,7 @@ async fn execute_command(
         CommandType::SwapProfile { profile_name } => {
             info!("Swapping to profile: {}", profile_name);
             // TypeScript: sends /profiles command and clicks on profile
-            bot.write_chat_packet(&format!("/profiles"));
+            bot.write_chat_packet("/profiles");
             // TODO: Implement profile selection from menu when window opens
             warn!("SwapProfile implementation incomplete - needs window interaction");
         }
