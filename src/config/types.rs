@@ -5,7 +5,7 @@ use chrono::{DateTime, Utc};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     #[serde(default)]
-    pub microsoft_email: Option<String>,
+    pub ingame_name: Option<String>,
     
     #[serde(default = "default_websocket_url")]
     pub websocket_url: String,
@@ -152,7 +152,7 @@ fn default_min_price() -> u64 {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            microsoft_email: None,
+            ingame_name: None,
             websocket_url: default_websocket_url(),
             web_gui_port: default_web_gui_port(),
             flip_action_delay: default_flip_action_delay(),

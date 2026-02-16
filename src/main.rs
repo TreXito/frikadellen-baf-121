@@ -23,12 +23,12 @@ async fn main() -> Result<()> {
     let config_loader = ConfigLoader::new();
     let mut config = config_loader.load()?;
 
-    // Prompt for Microsoft email if not set (used for both auth and as username)
-    if config.microsoft_email.is_none() {
-        let email: String = Input::new()
-            .with_prompt("Enter your Microsoft account email")
+    // Prompt for username if not set
+    if config.ingame_name.is_none() {
+        let name: String = Input::new()
+            .with_prompt("Enter your ingame name")
             .interact_text()?;
-        config.microsoft_email = Some(email);
+        config.ingame_name = Some(name);
         config_loader.save(&config)?;
     }
 
@@ -51,9 +51,9 @@ async fn main() -> Result<()> {
         config_loader.save(&config)?;
     }
 
-    let microsoft_email = config.microsoft_email.clone().unwrap();
+    let ingame_name = config.ingame_name.clone().unwrap();
     
-    info!("Configuration loaded for account: {}", microsoft_email);
+    info!("Configuration loaded for player: {}", ingame_name);
     info!("AH Flips: {}", if config.enable_ah_flips { "ENABLED" } else { "DISABLED" });
     info!("Bazaar Flips: {}", if config.enable_bazaar_flips { "ENABLED" } else { "DISABLED" });
     info!("Web GUI Port: {}", config.web_gui_port);
@@ -67,7 +67,7 @@ async fn main() -> Result<()> {
 
     // Get or generate session ID for Coflnet
     let session_id = config.sessions
-        .get(&microsoft_email)
+        .get(&ingame_name)
         .map(|s| s.id.clone())
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
@@ -76,7 +76,7 @@ async fn main() -> Result<()> {
     // Connect to Coflnet WebSocket
     let (_ws_client, mut ws_rx) = CoflWebSocket::connect(
         config.websocket_url.clone(),
-        microsoft_email.clone(),
+        ingame_name.clone(),
         VERSION.to_string(),
         session_id.clone(),
     ).await?;
@@ -85,12 +85,13 @@ async fn main() -> Result<()> {
 
     // Initialize and connect bot client
     info!("Initializing Minecraft bot...");
-    info!("Connecting to Hypixel with Microsoft account: {}", microsoft_email);
+    info!("Authenticating with Microsoft account...");
+    info!("A browser window will open for you to log in");
     
     let mut bot_client = BotClient::new();
     
-    // Connect to Hypixel
-    match bot_client.connect(microsoft_email).await {
+    // Connect to Hypixel - Azalea will handle Microsoft OAuth in browser
+    match bot_client.connect(ingame_name.clone()).await {
         Ok(_) => {
             info!("Bot connection initiated successfully");
         }

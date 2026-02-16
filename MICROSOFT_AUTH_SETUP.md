@@ -6,18 +6,21 @@ This guide explains how to set up Microsoft authentication for Frikadellen BAF t
 
 When you run Frikadellen BAF for the first time, you will be prompted for:
 
-1. **Microsoft account email**: The email address associated with your Microsoft/Minecraft account
+1. **In-game name**: Your Minecraft username (e.g., `zShadowReaper_`)
 
-This credential will be saved to `config.toml` in the same directory as the executable.
+After entering your username, Microsoft authentication will happen automatically through your browser.
 
 ## Authentication Flow
 
 The application uses Azalea's Microsoft authentication system which:
 
-1. Opens a browser window for you to log in to your Microsoft account
-2. Requests permission to access your Minecraft profile
-3. Saves authentication tokens locally for future sessions
-4. Automatically refreshes tokens when they expire
+1. Prompts you to enter your Minecraft username
+2. Opens a browser window for you to log in to your Microsoft account
+3. Requests permission to access your Minecraft profile
+4. Saves authentication tokens locally for future sessions
+5. Automatically refreshes tokens when they expire
+
+**Note:** You log in with your Microsoft email/password in the browser - the app only needs your username.
 
 ## First Run
 
@@ -27,29 +30,31 @@ The application uses Azalea's Microsoft authentication system which:
 
 You will see:
 ```
-Enter your Microsoft account email: [type your email]
+Enter your ingame name: [type your username]
 ```
 
-After entering your email:
-- A browser window will open
-- Log in with your Microsoft account
+After entering your username:
+- A browser window will open automatically
+- Log in with your Microsoft account (email and password)
 - Grant permission for the application to access Minecraft
 - The application will connect to Hypixel
 
 ## Subsequent Runs
 
 On subsequent runs, the application will:
-- Load your email from `config.toml`
+- Load your username from `config.toml`
 - Use cached authentication tokens
-- Only prompt for re-authentication if tokens have expired
+- Only prompt for re-authentication in browser if tokens have expired
 
 ## Expected Output
 
 When successfully connected, you should see:
 
 ```
-INFO Configuration loaded for account: your@email.com
-INFO Connecting to Hypixel with Microsoft account: your@email.com
+INFO Configuration loaded for player: zShadowReaper_
+INFO Initializing Minecraft bot...
+INFO Authenticating with Microsoft account...
+INFO A browser window will open for you to log in
 INFO Bot connection initiated successfully
 INFO ✓ Bot logged into Minecraft successfully
 INFO ✓ Bot spawned in world and ready
@@ -86,7 +91,7 @@ Each instance of Frikadellen BAF uses its own `config.toml` file in the executab
 
 ## Security Notes
 
-- **Never share your `config.toml`** - it contains your email address
+- **Never share your `config.toml`** - it contains your in-game username
 - **Keep authentication tokens secure** - they provide access to your Minecraft account
 - **Use a strong password** - protect your Microsoft account with 2FA if possible
 
