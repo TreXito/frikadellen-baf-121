@@ -16,6 +16,18 @@ use super::handlers::BotEventHandlers;
 /// Connection wait duration (seconds) - time to wait for bot connection to establish
 const CONNECTION_WAIT_SECONDS: u64 = 2;
 
+/// Delay after spawning in lobby before sending /play skyblock command
+const LOBBY_COMMAND_DELAY_SECS: u64 = 1;
+
+/// Delay after detecting SkyBlock join before teleporting to island
+const ISLAND_TELEPORT_DELAY_SECS: u64 = 2;
+
+/// Wait time for island teleport to complete
+const TELEPORT_COMPLETION_WAIT_SECS: u64 = 3;
+
+/// Timeout for waiting for SkyBlock join confirmation (seconds)
+const SKYBLOCK_JOIN_TIMEOUT_SECS: u64 = 15;
+
 /// Main bot client wrapper for Azalea
 /// 
 /// Provides integration with azalea 0.15 for Minecraft bot functionality on Hypixel.
@@ -129,6 +141,9 @@ impl BotClient {
             action_counter: self.action_counter.clone(),
             last_window_id: self.last_window_id.clone(),
             command_rx: self.command_rx.clone(),
+            joined_skyblock: Arc::new(RwLock::new(false)),
+            teleported_to_island: Arc::new(RwLock::new(false)),
+            skyblock_join_time: Arc::new(RwLock::new(None)),
         };
         
         // Build and start the client (this blocks until disconnection)
@@ -328,6 +343,12 @@ pub struct BotClientState {
     pub action_counter: Arc<RwLock<i16>>,
     pub last_window_id: Arc<RwLock<u8>>,
     pub command_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<QueuedCommand>>>,
+    /// Flag to track if we've joined SkyBlock
+    pub joined_skyblock: Arc<RwLock<bool>>,
+    /// Flag to track if we've teleported to island
+    pub teleported_to_island: Arc<RwLock<bool>>,
+    /// Time when we joined SkyBlock (for timeout detection)
+    pub skyblock_join_time: Arc<RwLock<Option<tokio::time::Instant>>>,
 }
 
 impl Default for BotClientState {
@@ -341,6 +362,9 @@ impl Default for BotClientState {
             action_counter: Arc::new(RwLock::new(1)),
             last_window_id: Arc::new(RwLock::new(0)),
             command_rx: Arc::new(tokio::sync::Mutex::new(command_rx)),
+            joined_skyblock: Arc::new(RwLock::new(false)),
+            teleported_to_island: Arc::new(RwLock::new(false)),
+            skyblock_join_time: Arc::new(RwLock::new(None)),
         }
     }
 }
@@ -366,7 +390,9 @@ async fn event_handler(
             if state.event_tx.send(BotEvent::Login).is_err() {
                 debug!("Failed to send Login event - receiver dropped");
             }
-            *state.bot_state.write() = BotState::Idle;
+            
+            // Keep state as Startup until fully initialized
+            *state.bot_state.write() = BotState::Startup;
         }
         
         Event::Init => {
@@ -374,13 +400,91 @@ async fn event_handler(
             if state.event_tx.send(BotEvent::Spawn).is_err() {
                 debug!("Failed to send Spawn event - receiver dropped");
             }
+            
+            // Check if we've already joined SkyBlock
+            let joined_skyblock = *state.joined_skyblock.read();
+            
+            if !joined_skyblock {
+                // First spawn - we're in the lobby, join SkyBlock
+                info!("Joining Hypixel SkyBlock...");
+                
+                // Spawn a task to send the command after delay (non-blocking)
+                let bot_clone = bot.clone();
+                let skyblock_join_time = state.skyblock_join_time.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(LOBBY_COMMAND_DELAY_SECS)).await;
+                    bot_clone.write_chat_packet("/play skyblock");
+                });
+                
+                // Set the join time for timeout tracking
+                *skyblock_join_time.write() = Some(tokio::time::Instant::now());
+            }
         }
         
         Event::Chat(chat) => {
             let message = chat.message().to_string();
             state.handlers.handle_chat_message(&message).await;
-            if state.event_tx.send(BotEvent::ChatMessage(message)).is_err() {
+            if state.event_tx.send(BotEvent::ChatMessage(message.clone())).is_err() {
                 debug!("Failed to send ChatMessage event - receiver dropped");
+            }
+            
+            // Check if we've teleported to island yet
+            let teleported = *state.teleported_to_island.read();
+            let join_time = *state.skyblock_join_time.read();
+            
+            // Look for messages indicating we're in SkyBlock and should go to island
+            if let Some(join_time) = join_time {
+                if !teleported {
+                    // Check for timeout (if we've been waiting too long, try anyway)
+                    let should_timeout = join_time.elapsed() > tokio::time::Duration::from_secs(SKYBLOCK_JOIN_TIMEOUT_SECS);
+                    
+                    // Check if message is a SkyBlock join confirmation
+                    let skyblock_detected = {
+                        // Primary welcome message
+                        if message.starts_with("Welcome to Hypixel SkyBlock") {
+                            true
+                        }
+                        // Profile selection messages like "[Profile] You are currently on: Your Island"
+                        else if message.starts_with("[Profile]") && message.contains("currently") {
+                            true
+                        }
+                        // Catch any other system messages about SKYBLOCK profile
+                        // Convert to uppercase once for case-insensitive comparison
+                        else if message.starts_with("[") {
+                            let upper = message.to_uppercase();
+                            upper.contains("SKYBLOCK") && upper.contains("PROFILE")
+                        } else {
+                            false
+                        }
+                    };
+                    
+                    if skyblock_detected || should_timeout {
+                        // Mark as joined now that we've confirmed
+                        *state.joined_skyblock.write() = true;
+                        *state.teleported_to_island.write() = true;
+                        
+                        if should_timeout {
+                            info!("Timeout waiting for SkyBlock confirmation - attempting to teleport to island anyway...");
+                        } else {
+                            info!("Detected SkyBlock join - teleporting to island...");
+                        }
+                        
+                        // Spawn a task to handle teleportation (non-blocking)
+                        let bot_clone = bot.clone();
+                        let bot_state = state.bot_state.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(tokio::time::Duration::from_secs(ISLAND_TELEPORT_DELAY_SECS)).await;
+                            bot_clone.write_chat_packet("/is");
+                            
+                            // Wait for teleport to complete
+                            tokio::time::sleep(tokio::time::Duration::from_secs(TELEPORT_COMPLETION_WAIT_SECS)).await;
+                            
+                            // Now ready to process commands
+                            info!("Bot initialization complete - ready to flip!");
+                            *bot_state.write() = BotState::Idle;
+                        });
+                    }
+                }
             }
         }
         
