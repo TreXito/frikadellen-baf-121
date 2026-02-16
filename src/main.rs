@@ -226,9 +226,8 @@ async fn main() -> Result<()> {
                     if cmd.trim().starts_with("/cofl") {
                         // Send /cofl commands to the websocket
                         let ws = ws_client_clone.clone();
-                        let cmd_clone = cmd.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = ws.send_message(&cmd_clone).await {
+                            if let Err(e) = ws.send_message(&cmd).await {
                                 error!("Failed to send /cofl command to websocket: {}", e);
                             }
                         });
