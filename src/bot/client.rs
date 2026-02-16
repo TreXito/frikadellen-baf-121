@@ -438,27 +438,25 @@ async fn event_handler(
                     // Check for timeout (if we've been waiting too long, try anyway)
                     let should_timeout = join_time.elapsed() > tokio::time::Duration::from_secs(SKYBLOCK_JOIN_TIMEOUT_SECS);
                     
-                    // Helper function to check if message is a SkyBlock join confirmation
-                    let is_skyblock_join_message = || {
+                    // Check if message is a SkyBlock join confirmation
+                    let skyblock_detected = {
                         // Primary welcome message
                         if message.starts_with("Welcome to Hypixel SkyBlock") {
-                            return true;
+                            true
                         }
-                        
                         // Profile selection messages like "[Profile] You are currently on: Your Island"
-                        if message.starts_with("[Profile]") && message.contains("currently") {
-                            return true;
+                        else if message.starts_with("[Profile]") && message.contains("currently") {
+                            true
                         }
-                        
                         // Catch any other system messages about SKYBLOCK profile
-                        if message.starts_with("[") && message.to_uppercase().contains("SKYBLOCK") && message.contains("Profile") {
-                            return true;
+                        // Convert to uppercase once for case-insensitive comparison
+                        else if message.starts_with("[") {
+                            let upper = message.to_uppercase();
+                            upper.contains("SKYBLOCK") && upper.contains("PROFILE")
+                        } else {
+                            false
                         }
-                        
-                        false
                     };
-                    
-                    let skyblock_detected = is_skyblock_join_message();
                     
                     if skyblock_detected || should_timeout {
                         // Mark as joined now that we've confirmed
