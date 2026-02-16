@@ -117,6 +117,17 @@ pub enum CommandType {
         starting_bid: u64,
         duration_hours: u64,
     },
+    // Advanced commands matching TypeScript BAF.ts
+    UploadInventory,
+    ClickSlot {
+        slot: i16,
+    },
+    SwapProfile {
+        profile_name: String,
+    },
+    AcceptTrade {
+        player_name: String,
+    },
 }
 
 /// Window types that can be opened

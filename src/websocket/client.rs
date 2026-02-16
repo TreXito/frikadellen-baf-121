@@ -12,6 +12,13 @@ pub enum CoflEvent {
     BazaarFlip(BazaarFlipRecommendation),
     ChatMessage(String),
     Command(String),
+    GetInventory,
+    TradeResponse,
+    PrivacySettings(String), // Store raw JSON for now
+    SwapProfile(String),     // Profile name
+    CreateAuction(String),   // Auction data as JSON
+    Trade(String),           // Trade data as JSON
+    RunSequence(String),     // Sequence data as JSON
 }
 
 #[derive(Clone)]
@@ -157,13 +164,38 @@ impl CoflWebSocket {
                     let _ = tx.send(CoflEvent::Command(command));
                 }
             }
-            // Handle additional message types for 100% compatibility
-            "swapProfile" | "createAuction" | "trade" | "tradeResponse" | 
-            "getInventory" | "runSequence" | "privacySettings" => {
-                // Log these message types but don't process them yet
-                // These are advanced features not required for basic flipping
-                info!("Received {} message (not yet implemented)", msg.msg_type);
-                debug!("Message data: {}", msg.data);
+            // Handle ALL message types for 100% compatibility (matching TypeScript BAF.ts)
+            "getInventory" => {
+                info!("Received getInventory request - will upload inventory");
+                let _ = tx.send(CoflEvent::GetInventory);
+            }
+            "tradeResponse" => {
+                info!("Received tradeResponse - will click slot 39");
+                let _ = tx.send(CoflEvent::TradeResponse);
+            }
+            "privacySettings" => {
+                info!("Received privacySettings");
+                let _ = tx.send(CoflEvent::PrivacySettings(msg.data.clone()));
+            }
+            "swapProfile" => {
+                info!("Received swapProfile request");
+                if let Ok(profile_name) = parse_message_data::<String>(&msg.data) {
+                    let _ = tx.send(CoflEvent::SwapProfile(profile_name));
+                } else {
+                    warn!("Failed to parse swapProfile data");
+                }
+            }
+            "createAuction" => {
+                info!("Received createAuction request");
+                let _ = tx.send(CoflEvent::CreateAuction(msg.data.clone()));
+            }
+            "trade" => {
+                info!("Received trade request");
+                let _ = tx.send(CoflEvent::Trade(msg.data.clone()));
+            }
+            "runSequence" => {
+                info!("Received runSequence request");
+                let _ = tx.send(CoflEvent::RunSequence(msg.data.clone()));
             }
             _ => {
                 // Log any unknown message types for debugging

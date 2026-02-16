@@ -287,6 +287,87 @@ async fn main() -> Result<()> {
                         );
                     }
                 }
+                // Handle advanced message types (matching TypeScript BAF.ts)
+                CoflEvent::GetInventory => {
+                    info!("Processing getInventory request");
+                    // Queue command to upload inventory to COFL
+                    command_queue_clone.enqueue(
+                        CommandType::UploadInventory,
+                        CommandPriority::High,
+                        false,
+                    );
+                }
+                CoflEvent::TradeResponse => {
+                    info!("Processing tradeResponse - clicking accept button");
+                    // TypeScript: clicks slot 39 after checking for "Deal!" or "Warning!"
+                    // Sleep is handled in TypeScript before clicking - we'll do the same
+                    command_queue_clone.enqueue(
+                        CommandType::ClickSlot { slot: 39 },
+                        CommandPriority::High,
+                        false,
+                    );
+                }
+                CoflEvent::PrivacySettings(data) => {
+                    info!("Received privacySettings: {}", data);
+                    // TypeScript stores this in bot.privacySettings
+                    // For now, just log it - can be enhanced later
+                    debug!("Privacy settings data: {}", data);
+                }
+                CoflEvent::SwapProfile(profile_name) => {
+                    info!("Processing swapProfile request: {}", profile_name);
+                    command_queue_clone.enqueue(
+                        CommandType::SwapProfile { profile_name },
+                        CommandPriority::High,
+                        false,
+                    );
+                }
+                CoflEvent::CreateAuction(data) => {
+                    info!("Processing createAuction request");
+                    // Parse the auction data
+                    if let Ok(auction_data) = serde_json::from_str::<serde_json::Value>(&data) {
+                        if let (Some(item), Some(price), Some(duration)) = (
+                            auction_data.get("itemName").and_then(|v| v.as_str()),
+                            auction_data.get("startingBid").and_then(|v| v.as_u64()),
+                            auction_data.get("duration").and_then(|v| v.as_u64()),
+                        ) {
+                            command_queue_clone.enqueue(
+                                CommandType::SellToAuction {
+                                    item_name: item.to_string(),
+                                    starting_bid: price,
+                                    duration_hours: duration,
+                                },
+                                CommandPriority::High,
+                                false,
+                            );
+                        } else {
+                            warn!("Failed to parse createAuction data: {}", data);
+                        }
+                    }
+                }
+                CoflEvent::Trade(data) => {
+                    info!("Processing trade request");
+                    // Parse trade data to get player name
+                    if let Ok(trade_data) = serde_json::from_str::<serde_json::Value>(&data) {
+                        if let Some(player) = trade_data.get("playerName").and_then(|v| v.as_str()) {
+                            command_queue_clone.enqueue(
+                                CommandType::AcceptTrade {
+                                    player_name: player.to_string(),
+                                },
+                                CommandPriority::High,
+                                false,
+                            );
+                        } else {
+                            warn!("Failed to parse trade data: {}", data);
+                        }
+                    }
+                }
+                CoflEvent::RunSequence(data) => {
+                    info!("Received runSequence request");
+                    // TypeScript has a runSequence handler but it's not fully implemented
+                    // For now, just log it
+                    debug!("Sequence data: {}", data);
+                    warn!("runSequence is not yet fully implemented");
+                }
             }
         }
 
@@ -355,6 +436,28 @@ async fn main() -> Result<()> {
                 if parts.len() > 1 {
                     let command = parts[1];
                     let args = parts[2..].join(" ");
+                    
+                    // Handle locally-processed commands (matching TypeScript consoleHandler.ts)
+                    match command.to_lowercase().as_str() {
+                        "queue" => {
+                            // Show command queue status
+                            let depth = command_queue_for_console.len();
+                            info!("━━━━━━━ Command Queue Status ━━━━━━━");
+                            info!("Queue depth: {}", depth);
+                            info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                            continue;
+                        }
+                        "clearqueue" => {
+                            // Clear command queue
+                            command_queue_for_console.clear();
+                            info!("Command queue cleared");
+                            continue;
+                        }
+                        // TODO: Add other local commands like forceClaim, connect, sellbz when implemented
+                        _ => {
+                            // Fall through to send to websocket
+                        }
+                    }
                     
                     // Send to websocket with command as type
                     // Match TypeScript: data field must be JSON-stringified (double-encoded)
