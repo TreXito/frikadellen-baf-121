@@ -86,7 +86,7 @@ Each instance of Frikadellen BAF uses its own `config.toml` file in the executab
 
 ## Security Notes
 
-- **Never share your `config.toml`** - it contains your in-game name and email
+- **Never share your `config.toml`** - it contains your email address
 - **Keep authentication tokens secure** - they provide access to your Minecraft account
 - **Use a strong password** - protect your Microsoft account with 2FA if possible
 
