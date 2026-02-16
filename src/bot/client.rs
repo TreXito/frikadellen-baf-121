@@ -228,11 +228,9 @@ impl BotClient {
     /// 
     /// ```no_run
     /// # use azalea::prelude::*;
-    /// # use azalea::chat::SendChatEvent;
     /// # async fn example(bot: Client) {
     /// // Inside the event handler:
-    /// bot.ecs.lock().write_message(SendChatEvent {
-    ///     content: "/bz".to_string(),
+    /// bot.write_chat_packet("/bz");
     /// # }
     /// ```
     #[deprecated(note = "Cannot be called from outside event handlers. Use the Client directly within event_handler. See method documentation for example.")]
