@@ -109,6 +109,13 @@ impl CommandQueue {
         info!("Cleared all bazaar orders from queue");
     }
 
+    /// Clear all commands from queue (matching TypeScript clearQueue)
+    pub fn clear(&self) {
+        let mut queue = self.queue.write();
+        queue.clear();
+        info!("Cleared all commands from queue");
+    }
+
     /// Remove stale commands (bazaar orders older than 60 seconds)
     fn remove_stale_commands(&self) {
         let mut queue = self.queue.write();

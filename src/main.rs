@@ -66,11 +66,37 @@ async fn main() -> Result<()> {
     // Set initial state to startup (prevents commands during initialization)
     state_manager.set(BotState::Startup);
 
-    // Get or generate session ID for Coflnet
-    let session_id = config.sessions
-        .get(&ingame_name)
-        .map(|s| s.id.clone())
-        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    // Get or generate session ID for Coflnet (matching TypeScript coflSessionManager.ts)
+    let session_id = if let Some(session) = config.sessions.get(&ingame_name) {
+        // Check if session is expired
+        if session.expires < chrono::Utc::now() {
+            // Session expired, generate new one
+            info!("Session expired for {}, generating new session ID", ingame_name);
+            let new_id = uuid::Uuid::new_v4().to_string();
+            let new_session = frikadellen_baf::config::types::CoflSession {
+                id: new_id.clone(),
+                expires: chrono::Utc::now() + chrono::Duration::days(180), // 180 days like TypeScript
+            };
+            config.sessions.insert(ingame_name.clone(), new_session);
+            config_loader.save(&config)?;
+            new_id
+        } else {
+            // Session still valid
+            info!("Using existing session ID for {}", ingame_name);
+            session.id.clone()
+        }
+    } else {
+        // No session exists, create new one
+        info!("No session found for {}, generating new session ID", ingame_name);
+        let new_id = uuid::Uuid::new_v4().to_string();
+        let new_session = frikadellen_baf::config::types::CoflSession {
+            id: new_id.clone(),
+            expires: chrono::Utc::now() + chrono::Duration::days(180), // 180 days like TypeScript
+        };
+        config.sessions.insert(ingame_name.clone(), new_session);
+        config_loader.save(&config)?;
+        new_id
+    };
 
     info!("Connecting to Coflnet WebSocket...");
     
@@ -225,23 +251,146 @@ async fn main() -> Result<()> {
                 CoflEvent::Command(cmd) => {
                     info!("Received command from Coflnet: {}", cmd);
                     
-                    // Check if this is a /cofl command that should be sent back to websocket
-                    if cmd.trim().starts_with("/cofl") {
-                        // Send /cofl commands to the websocket
-                        let ws = ws_client_clone.clone();
-                        tokio::spawn(async move {
-                            if let Err(e) = ws.send_message(&cmd).await {
-                                error!("Failed to send /cofl command to websocket: {}", e);
-                            }
-                        });
+                    // Check if this is a /cofl or /baf command that should be sent back to websocket
+                    // Match TypeScript consoleHandler.ts - parse and route commands properly
+                    let lowercase_cmd = cmd.trim().to_lowercase();
+                    if lowercase_cmd.starts_with("/cofl") || lowercase_cmd.starts_with("/baf") {
+                        // Parse /cofl command like the console handler does
+                        let parts: Vec<&str> = cmd.trim().split_whitespace().collect();
+                        if parts.len() > 1 {
+                            let command = parts[1].to_string(); // Clone to own the data
+                            let args = parts[2..].join(" ");
+                            
+                            // Send to websocket with command as type (JSON-stringified data)
+                            let ws = ws_client_clone.clone();
+                            tokio::spawn(async move {
+                                let data_json = serde_json::to_string(&args).unwrap_or_else(|_| "\"\"".to_string());
+                                let message = serde_json::json!({
+                                    "type": command,
+                                    "data": data_json
+                                }).to_string();
+                                
+                                if let Err(e) = ws.send_message(&message).await {
+                                    error!("Failed to send /cofl command to websocket: {}", e);
+                                } else {
+                                    info!("Sent /cofl {} to websocket", command);
+                                }
+                            });
+                        }
                     } else {
                         // Execute non-cofl commands sent by Coflnet to Minecraft
+                        // This matches TypeScript behavior: bot.chat(data) for non-cofl commands
                         command_queue_clone.enqueue(
                             CommandType::SendChat { message: cmd },
                             CommandPriority::High,
                             false, // Not interruptible
                         );
                     }
+                }
+                // Handle advanced message types (matching TypeScript BAF.ts)
+                CoflEvent::GetInventory => {
+                    info!("Processing getInventory request");
+                    // TypeScript: uploads bot.inventory to websocket with type "uploadInventory"
+                    // For now, send an empty inventory placeholder - proper implementation
+                    // would require bot client to expose inventory
+                    let ws = ws_client_clone.clone();
+                    tokio::spawn(async move {
+                        let inventory_json = serde_json::json!({
+                            "slots": [],
+                            "armor": [],
+                            "offhand": null
+                        });
+                        let data_json = serde_json::to_string(&inventory_json).unwrap();
+                        let message = serde_json::json!({
+                            "type": "uploadInventory",
+                            "data": data_json
+                        }).to_string();
+                        
+                        if let Err(e) = ws.send_message(&message).await {
+                            error!("Failed to upload inventory to websocket: {}", e);
+                        } else {
+                            info!("Uploaded inventory to COFL");
+                        }
+                    });
+                }
+                CoflEvent::TradeResponse => {
+                    info!("Processing tradeResponse - clicking accept button");
+                    // TypeScript: clicks slot 39 after checking for "Deal!" or "Warning!"
+                    // Sleep is handled in TypeScript before clicking - we'll do the same
+                    command_queue_clone.enqueue(
+                        CommandType::ClickSlot { slot: 39 },
+                        CommandPriority::High,
+                        false,
+                    );
+                }
+                CoflEvent::PrivacySettings(data) => {
+                    info!("Received privacySettings: {}", data);
+                    // TypeScript stores this in bot.privacySettings
+                    // For now, just log it - can be enhanced later
+                    debug!("Privacy settings data: {}", data);
+                }
+                CoflEvent::SwapProfile(profile_name) => {
+                    info!("Processing swapProfile request: {}", profile_name);
+                    command_queue_clone.enqueue(
+                        CommandType::SwapProfile { profile_name },
+                        CommandPriority::High,
+                        false,
+                    );
+                }
+                CoflEvent::CreateAuction(data) => {
+                    info!("Processing createAuction request");
+                    // Parse the auction data
+                    match serde_json::from_str::<serde_json::Value>(&data) {
+                        Ok(auction_data) => {
+                            match (
+                                auction_data.get("itemName").and_then(|v| v.as_str()),
+                                auction_data.get("startingBid").and_then(|v| v.as_u64()),
+                                auction_data.get("duration").and_then(|v| v.as_u64()),
+                            ) {
+                                (Some(item), Some(price), Some(duration)) => {
+                                    command_queue_clone.enqueue(
+                                        CommandType::SellToAuction {
+                                            item_name: item.to_string(),
+                                            starting_bid: price,
+                                            duration_hours: duration,
+                                        },
+                                        CommandPriority::High,
+                                        false,
+                                    );
+                                }
+                                _ => {
+                                    warn!("createAuction missing required fields (itemName, startingBid, duration): {}", data);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            error!("Failed to parse createAuction JSON: {}", e);
+                        }
+                    }
+                }
+                CoflEvent::Trade(data) => {
+                    info!("Processing trade request");
+                    // Parse trade data to get player name
+                    if let Ok(trade_data) = serde_json::from_str::<serde_json::Value>(&data) {
+                        if let Some(player) = trade_data.get("playerName").and_then(|v| v.as_str()) {
+                            command_queue_clone.enqueue(
+                                CommandType::AcceptTrade {
+                                    player_name: player.to_string(),
+                                },
+                                CommandPriority::High,
+                                false,
+                            );
+                        } else {
+                            warn!("Failed to parse trade data: {}", data);
+                        }
+                    }
+                }
+                CoflEvent::RunSequence(data) => {
+                    info!("Received runSequence request");
+                    // TypeScript has a runSequence handler but it's not fully implemented
+                    // For now, just log it
+                    debug!("Sequence data: {}", data);
+                    warn!("runSequence is not yet fully implemented");
                 }
             }
         }
@@ -305,27 +454,65 @@ async fn main() -> Result<()> {
             
             let lowercase_input = input.to_lowercase();
             
-            // Handle /cofl and /baf commands
+            // Handle /cofl and /baf commands (matching TypeScript consoleHandler.ts)
             if lowercase_input.starts_with("/cofl") || lowercase_input.starts_with("/baf") {
                 let parts: Vec<&str> = input.split_whitespace().collect();
                 if parts.len() > 1 {
                     let command = parts[1];
                     let args = parts[2..].join(" ");
                     
+                    // Handle locally-processed commands (matching TypeScript consoleHandler.ts)
+                    match command.to_lowercase().as_str() {
+                        "queue" => {
+                            // Show command queue status
+                            let depth = command_queue_for_console.len();
+                            info!("━━━━━━━ Command Queue Status ━━━━━━━");
+                            info!("Queue depth: {}", depth);
+                            info!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+                            continue;
+                        }
+                        "clearqueue" => {
+                            // Clear command queue
+                            command_queue_for_console.clear();
+                            info!("Command queue cleared");
+                            continue;
+                        }
+                        // TODO: Add other local commands like forceClaim, connect, sellbz when implemented
+                        _ => {
+                            // Fall through to send to websocket
+                        }
+                    }
+                    
                     // Send to websocket with command as type
+                    // Match TypeScript: data field must be JSON-stringified (double-encoded)
+                    let data_json = match serde_json::to_string(&args) {
+                        Ok(json) => json,
+                        Err(e) => {
+                            error!("Failed to serialize command args: {}", e);
+                            "\"\"".to_string()
+                        }
+                    };
                     let message = serde_json::json!({
                         "type": command,
-                        "data": args  // Already a string, don't double-encode
+                        "data": data_json  // JSON-stringified to match TypeScript JSON.stringify()
                     }).to_string();
                     
                     if let Err(e) = ws_client_for_console.send_message(&message).await {
                         error!("Failed to send command to websocket: {}", e);
                     } else {
-                        info!("Sent command to COFL: /{} {}", command, args);
+                        info!("Sent command to COFL: {} {}", command, args);
                     }
                 } else {
-                    // Bare /cofl or /baf command
-                    info!("Please specify a command after /cofl or /baf");
+                    // Bare /cofl or /baf command - send as chat type with empty data
+                    let data_json = serde_json::to_string("").unwrap();
+                    let message = serde_json::json!({
+                        "type": "chat",
+                        "data": data_json
+                    }).to_string();
+                    
+                    if let Err(e) = ws_client_for_console.send_message(&message).await {
+                        error!("Failed to send bare /cofl command to websocket: {}", e);
+                    }
                 }
             } 
             // Handle other slash commands - send to Minecraft
@@ -339,11 +526,19 @@ async fn main() -> Result<()> {
                 );
                 info!("Queued Minecraft command: {}", input);
             }
-            // Non-slash messages go to websocket as chat
+            // Non-slash messages go to websocket as chat (matching TypeScript)
             else {
+                // Match TypeScript: data field must be JSON-stringified
+                let data_json = match serde_json::to_string(&input) {
+                    Ok(json) => json,
+                    Err(e) => {
+                        error!("Failed to serialize chat message: {}", e);
+                        "\"\"".to_string()
+                    }
+                };
                 let message = serde_json::json!({
                     "type": "chat",
-                    "data": input  // Already a string, don't double-encode
+                    "data": data_json  // JSON-stringified to match TypeScript JSON.stringify()
                 }).to_string();
                 
                 if let Err(e) = ws_client_for_console.send_message(&message).await {
