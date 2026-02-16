@@ -106,3 +106,46 @@ pub fn print_mc_chat(message: &str) {
     let colored = mc_to_ansi(message);
     println!("{}", colored);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_remove_color_codes() {
+        let text = "§f[§4BAF§f]: §aHello §eWorld";
+        let clean = remove_color_codes(text);
+        assert_eq!(clean, "[BAF]: Hello World");
+    }
+
+    #[test]
+    fn test_mc_to_ansi() {
+        let text = "§f[§4BAF§f]: §aTest";
+        let ansi = mc_to_ansi(text);
+        
+        // Should contain ANSI escape codes
+        assert!(ansi.contains("\x1b["));
+        // Should end with reset
+        assert!(ansi.ends_with("\x1b[0m"));
+        // Original text parts should still be present (ANSI codes are inserted, not replacing text)
+        assert!(ansi.contains("BAF"));
+        assert!(ansi.contains("Test"));
+    }
+
+    #[test]
+    fn test_mc_to_ansi_colors() {
+        // Test all basic colors are converted
+        assert!(mc_to_ansi("§0").contains("\x1b[30m")); // Black
+        assert!(mc_to_ansi("§1").contains("\x1b[34m")); // Dark Blue
+        assert!(mc_to_ansi("§2").contains("\x1b[32m")); // Dark Green
+        assert!(mc_to_ansi("§4").contains("\x1b[31m")); // Dark Red
+        assert!(mc_to_ansi("§a").contains("\x1b[92m")); // Green
+        assert!(mc_to_ansi("§c").contains("\x1b[91m")); // Red
+        assert!(mc_to_ansi("§e").contains("\x1b[93m")); // Yellow
+        assert!(mc_to_ansi("§f").contains("\x1b[97m")); // White
+        
+        // Test formatting codes
+        assert!(mc_to_ansi("§l").contains("\x1b[1m"));  // Bold
+        assert!(mc_to_ansi("§r").contains("\x1b[0m"));  // Reset
+    }
+}

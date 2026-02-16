@@ -52,3 +52,58 @@ impl ChatMessage {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_inject_referral_id() {
+        // Test basic injection
+        let url = "https://sky.coflnet.com/authmod?userId=123&amp;conId=abc123";
+        let result = inject_referral_id(url);
+        assert!(result.contains("refId=9KKPN9"));
+        assert!(result.contains("&amp;conId=abc123"));
+        assert_eq!(result, "https://sky.coflnet.com/authmod?userId=123&amp;refId=9KKPN9&amp;conId=abc123");
+
+        // Test already has refId - should not inject again
+        let url_with_ref = "https://sky.coflnet.com/authmod?userId=123&amp;refId=existing&amp;conId=abc123";
+        let result = inject_referral_id(url_with_ref);
+        assert_eq!(result, url_with_ref);
+
+        // Test non-auth URL - should remain unchanged
+        let normal_url = "https://example.com/page?param=value";
+        let result = inject_referral_id(normal_url);
+        assert_eq!(result, normal_url);
+    }
+
+    #[test]
+    fn test_chat_message_with_referral_id() {
+        let msg = ChatMessage {
+            text: "Click here to authenticate".to_string(),
+            on_click: Some("https://sky.coflnet.com/authmod?userId=123&amp;conId=abc123".to_string()),
+            hover: Some("Hover text with https://sky.coflnet.com/authmod?test=1&amp;conId=xyz".to_string()),
+        };
+
+        let processed = msg.with_referral_id();
+        
+        // Check that refId was injected into onClick
+        assert!(processed.on_click.as_ref().unwrap().contains("refId=9KKPN9"));
+        
+        // Check that refId was injected into hover
+        assert!(processed.hover.as_ref().unwrap().contains("refId=9KKPN9"));
+    }
+
+    #[test]
+    fn test_parse_chat_message_array() {
+        let json = r#"[{"text":"Hello","onClick":"https://example.com"},{"text":"World"}]"#;
+        let messages: Result<Vec<ChatMessage>, _> = serde_json::from_str(json);
+        assert!(messages.is_ok());
+        let messages = messages.unwrap();
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[0].text, "Hello");
+        assert_eq!(messages[0].on_click, Some("https://example.com".to_string()));
+        assert_eq!(messages[1].text, "World");
+        assert_eq!(messages[1].on_click, None);
+    }
+}
