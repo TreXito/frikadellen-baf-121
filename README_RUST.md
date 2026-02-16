@@ -63,12 +63,30 @@ This repository is **production-ready** with:
 
 ## 🛠️ Installation
 
-### Pre-built Binaries
+### Pre-built Binaries (Recommended)
 
-Download the latest release for your platform:
-- [Windows (x64)](https://github.com/TreXito/frikadellen-baf-121/releases)
-- [Linux (x64)](https://github.com/TreXito/frikadellen-baf-121/releases)
-- [macOS (x64)](https://github.com/TreXito/frikadellen-baf-121/releases)
+Download the latest release for your platform from the [Releases page](https://github.com/TreXito/frikadellen-baf-121/releases):
+
+- **Windows (x64)**: `frikadellen_baf-windows-x86_64.exe`
+- **Linux (x64)**: `frikadellen_baf-linux-x86_64`
+- **macOS (Intel)**: `frikadellen_baf-macos-x86_64`
+- **macOS (Apple Silicon)**: `frikadellen_baf-macos-arm64`
+
+Binaries are automatically built and released when pull requests are merged to main.
+
+**Linux/macOS:**
+```bash
+# Make executable
+chmod +x frikadellen_baf-*
+
+# Run
+./frikadellen_baf-*
+```
+
+**Windows:**
+```
+frikadellen_baf-windows-x86_64.exe
+```
 
 ### Build from Source
 
@@ -277,6 +295,23 @@ Contributions are welcome! Please:
 3. Make your changes with tests
 4. Run `cargo fmt` and `cargo clippy`
 5. Submit a pull request
+
+### Continuous Integration
+
+The repository uses GitHub Actions for:
+- **CI Workflow** (`.github/workflows/ci.yml`):
+  - Runs tests on every push and PR
+  - Checks code formatting with `rustfmt`
+  - Lints with `clippy`
+  - Builds on Linux, Windows, and macOS
+
+- **Release Workflow** (`.github/workflows/release.yml`):
+  - Automatically builds executables when PRs are merged to main
+  - Creates releases for:
+    - Linux (x86_64)
+    - macOS (x86_64 Intel and ARM64 Apple Silicon)
+    - Windows (x86_64)
+  - Uploads binaries to GitHub Releases
 
 ## 📄 License
 
