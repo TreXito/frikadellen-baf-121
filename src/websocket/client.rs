@@ -112,8 +112,18 @@ impl CoflWebSocket {
                     let _ = tx.send(CoflEvent::Command(command));
                 }
             }
+            // Handle additional message types for 100% compatibility
+            "swapProfile" | "createAuction" | "trade" | "tradeResponse" | 
+            "getInventory" | "runSequence" | "privacySettings" => {
+                // Log these message types but don't process them yet
+                // These are advanced features not required for basic flipping
+                info!("Received {} message (not yet implemented)", msg.msg_type);
+                debug!("Message data: {}", msg.data);
+            }
             _ => {
-                debug!("Unhandled message type: {}", msg.msg_type);
+                // Log any unknown message types for debugging
+                warn!("Unknown websocket message type: {}", msg.msg_type);
+                debug!("Message data: {}", msg.data);
             }
         }
 
