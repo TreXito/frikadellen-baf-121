@@ -11,6 +11,10 @@ on:
     branches:
       - main
 
+permissions:
+  contents: write
+  pull-requests: read
+
 jobs:
   build:
     name: Build ${{ matrix.target }}
