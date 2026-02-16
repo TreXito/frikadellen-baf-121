@@ -2,7 +2,7 @@ use anyhow::Result;
 use dialoguer::{Input, Confirm};
 use frikadellen_baf::{
     config::ConfigLoader,
-    logging::init_logger,
+    logging::{init_logger, print_mc_chat},
     state::{StateManager, CommandQueue},
     websocket::CoflWebSocket,
     bot::BotClient,
@@ -10,6 +10,7 @@ use frikadellen_baf::{
 };
 use tracing::{debug, error, info, warn};
 use tokio::time::{sleep, Duration};
+use serde_json;
 
 const VERSION: &str = "af-3.0";
 
@@ -211,11 +212,13 @@ async fn main() -> Result<()> {
                     );
                 }
                 CoflEvent::ChatMessage(msg) => {
-                    // Log COFL chat messages for the user to see
+                    // Display COFL chat messages with proper color formatting
                     // These are informational messages and should NOT be sent to Hypixel server
                     if config_clone.use_cofl_chat {
-                        info!("[COFL Chat] {}", msg);
+                        // Print with color codes if the message contains them
+                        print_mc_chat(&msg);
                     } else {
+                        // Still show in debug mode but without color formatting
                         debug!("[COFL Chat] {}", msg);
                     }
                 }
@@ -276,13 +279,89 @@ async fn main() -> Result<()> {
     // The state will transition from Startup -> Idle after initialization
     info!("BAF initialization started - waiting for bot to complete setup...");
 
+    // Set up console input handler for commands
+    info!("Console interface ready - type commands and press Enter:");
+    info!("  /cofl <command> - Send command to COFL websocket");
+    info!("  /<command> - Send command to Minecraft");
+    info!("  <text> - Send chat message to COFL websocket");
+    
+    // Spawn console input handler
+    let ws_client_for_console = ws_client.clone();
+    let command_queue_for_console = command_queue.clone();
+    
+    tokio::spawn(async move {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        use tokio::io::stdin;
+        
+        let stdin = stdin();
+        let reader = BufReader::new(stdin);
+        let mut lines = reader.lines();
+        
+        while let Ok(Some(line)) = lines.next_line().await {
+            let input = line.trim();
+            if input.is_empty() {
+                continue;
+            }
+            
+            let lowercase_input = input.to_lowercase();
+            
+            // Handle /cofl and /baf commands
+            if lowercase_input.starts_with("/cofl") || lowercase_input.starts_with("/baf") {
+                let parts: Vec<&str> = input.split_whitespace().collect();
+                if parts.len() > 1 {
+                    let command = parts[1];
+                    let args = parts[2..].join(" ");
+                    
+                    // Send to websocket with command as type
+                    let message = serde_json::json!({
+                        "type": command,
+                        "data": args  // Already a string, don't double-encode
+                    }).to_string();
+                    
+                    if let Err(e) = ws_client_for_console.send_message(&message).await {
+                        error!("Failed to send command to websocket: {}", e);
+                    } else {
+                        info!("Sent command to COFL: /{} {}", command, args);
+                    }
+                } else {
+                    // Bare /cofl or /baf command
+                    info!("Please specify a command after /cofl or /baf");
+                }
+            } 
+            // Handle other slash commands - send to Minecraft
+            else if input.starts_with('/') {
+                command_queue_for_console.enqueue(
+                    frikadellen_baf::types::CommandType::SendChat { 
+                        message: input.to_string() 
+                    },
+                    frikadellen_baf::types::CommandPriority::High,
+                    false,
+                );
+                info!("Queued Minecraft command: {}", input);
+            }
+            // Non-slash messages go to websocket as chat
+            else {
+                let message = serde_json::json!({
+                    "type": "chat",
+                    "data": input  // Already a string, don't double-encode
+                }).to_string();
+                
+                if let Err(e) = ws_client_for_console.send_message(&message).await {
+                    error!("Failed to send chat to websocket: {}", e);
+                } else {
+                    debug!("Sent chat to COFL: {}", input);
+                }
+            }
+        }
+    });
+    
     // Keep the application running
-    info!("BAF is now running. Press Ctrl+C to exit.");
+    info!("BAF is now running. Type commands below or press Ctrl+C to exit.");
     
     // Wait indefinitely
     loop {
         sleep(Duration::from_secs(60)).await;
-        info!("Status: {} commands in queue", command_queue.len());
+        debug!("Status: {} commands in queue", command_queue.len());
     }
 }
 

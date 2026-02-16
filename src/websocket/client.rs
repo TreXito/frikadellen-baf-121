@@ -1,4 +1,4 @@
-use super::messages::{parse_message_data, ChatMessage, WebSocketMessage};
+use super::messages::{parse_message_data, inject_referral_id, ChatMessage, WebSocketMessage};
 use crate::types::{BazaarFlipRecommendation, Flip};
 use anyhow::{Context, Result};
 use futures::{stream::SplitSink, StreamExt, SinkExt};
@@ -76,6 +76,19 @@ impl CoflWebSocket {
         Ok((Self { tx, write }, rx))
     }
 
+    /// Format and send an authentication prompt to the user
+    fn send_auth_prompt(tx: &mpsc::UnboundedSender<CoflEvent>, text: &str, url: &str) {
+        let auth_prompt = format!(
+            "§f[§4BAF§f]: §c========================================\n\
+             §f[§4BAF§f]: §c§lCOFL Authentication Required!\n\
+             §f[§4BAF§f]: §e{}\n\
+             §f[§4BAF§f]: §bAuthentication URL: §f{}\n\
+             §f[§4BAF§f]: §c========================================",
+            text, url
+        );
+        let _ = tx.send(CoflEvent::ChatMessage(auth_prompt));
+    }
+
     fn handle_message(text: &str, tx: &mpsc::UnboundedSender<CoflEvent>) -> Result<()> {
         let msg: WebSocketMessage = serde_json::from_str(text)
             .context("Failed to parse WebSocket message")?;
@@ -105,10 +118,38 @@ impl CoflWebSocket {
                 }
             }
             "chatMessage" | "writeToChat" => {
-                if let Ok(chat) = parse_message_data::<ChatMessage>(&msg.data) {
-                    let _ = tx.send(CoflEvent::ChatMessage(chat.text));
+                // Try to parse as array of chat messages (most common for chatMessage)
+                if let Ok(messages) = parse_message_data::<Vec<ChatMessage>>(&msg.data) {
+                    for msg in messages {
+                        let msg_with_ref = msg.with_referral_id();
+                        
+                        // If there's an onClick URL with authmod, this is an authentication prompt
+                        if let Some(ref on_click) = msg_with_ref.on_click {
+                            if on_click.contains("sky.coflnet.com/authmod") {
+                                Self::send_auth_prompt(tx, &msg_with_ref.text, on_click);
+                                continue;
+                            }
+                        }
+                        
+                        let _ = tx.send(CoflEvent::ChatMessage(msg_with_ref.text));
+                    }
+                } else if let Ok(chat) = parse_message_data::<ChatMessage>(&msg.data) {
+                    // Single chat message (common for writeToChat)
+                    let msg_with_ref = chat.with_referral_id();
+                    
+                    // Check for authentication URL
+                    if let Some(ref on_click) = msg_with_ref.on_click {
+                        if on_click.contains("sky.coflnet.com/authmod") {
+                            Self::send_auth_prompt(tx, &msg_with_ref.text, on_click);
+                            return Ok(());
+                        }
+                    }
+                    
+                    let _ = tx.send(CoflEvent::ChatMessage(msg_with_ref.text));
                 } else if let Ok(text) = parse_message_data::<String>(&msg.data) {
-                    let _ = tx.send(CoflEvent::ChatMessage(text));
+                    // Fallback: plain text string
+                    let text_with_ref = inject_referral_id(&text);
+                    let _ = tx.send(CoflEvent::ChatMessage(text_with_ref));
                 }
             }
             "execute" => {
