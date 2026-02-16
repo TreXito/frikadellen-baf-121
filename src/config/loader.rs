@@ -15,20 +15,24 @@ impl ConfigLoader {
     }
 
     fn get_config_path() -> PathBuf {
-        // Use platform-specific config directory
-        #[cfg(target_os = "windows")]
-        {
-            let appdata = std::env::var("APPDATA").unwrap_or_else(|_| ".".to_string());
-            PathBuf::from(appdata).join("BAF").join("config.toml")
-        }
+        // Use executable directory for config file
+        // This allows multiple instances to run with different configs
+        let exe_dir = match std::env::current_exe() {
+            Ok(exe_path) => {
+                exe_path.parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| {
+                        eprintln!("Warning: Could not get parent directory of executable, using current directory");
+                        PathBuf::from(".")
+                    })
+            }
+            Err(e) => {
+                eprintln!("Warning: Could not get executable path ({}), using current directory", e);
+                PathBuf::from(".")
+            }
+        };
         
-        #[cfg(not(target_os = "windows"))]
-        {
-            dirs::config_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join("baf")
-                .join("config.toml")
-        }
+        exe_dir.join("config.toml")
     }
 
     pub fn load(&self) -> Result<Config> {
