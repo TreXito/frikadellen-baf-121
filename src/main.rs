@@ -23,21 +23,12 @@ async fn main() -> Result<()> {
     let config_loader = ConfigLoader::new();
     let mut config = config_loader.load()?;
 
-    // Interactive configuration if needed
-    if config.ingame_name.is_none() {
-        let name: String = Input::new()
-            .with_prompt("Enter your ingame name")
-            .interact_text()?;
-        config.ingame_name = Some(name.clone());
-        config_loader.save(&config)?;
-    }
-
-    // Prompt for Microsoft email if not set
+    // Prompt for Microsoft email if not set (used for both auth and as username)
     if config.microsoft_email.is_none() {
         let email: String = Input::new()
             .with_prompt("Enter your Microsoft account email")
             .interact_text()?;
-        config.microsoft_email = Some(email.clone());
+        config.microsoft_email = Some(email);
         config_loader.save(&config)?;
     }
 
@@ -60,10 +51,9 @@ async fn main() -> Result<()> {
         config_loader.save(&config)?;
     }
 
-    let ingame_name = config.ingame_name.clone().unwrap();
     let microsoft_email = config.microsoft_email.clone().unwrap();
     
-    info!("Configuration loaded for player: {}", ingame_name);
+    info!("Configuration loaded for account: {}", microsoft_email);
     info!("AH Flips: {}", if config.enable_ah_flips { "ENABLED" } else { "DISABLED" });
     info!("Bazaar Flips: {}", if config.enable_bazaar_flips { "ENABLED" } else { "DISABLED" });
     info!("Web GUI Port: {}", config.web_gui_port);
@@ -77,7 +67,7 @@ async fn main() -> Result<()> {
 
     // Get or generate session ID for Coflnet
     let session_id = config.sessions
-        .get(&ingame_name)
+        .get(&microsoft_email)
         .map(|s| s.id.clone())
         .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
 
@@ -86,7 +76,7 @@ async fn main() -> Result<()> {
     // Connect to Coflnet WebSocket
     let (_ws_client, mut ws_rx) = CoflWebSocket::connect(
         config.websocket_url.clone(),
-        ingame_name.clone(),
+        microsoft_email.clone(),
         VERSION.to_string(),
         session_id.clone(),
     ).await?;
@@ -100,7 +90,7 @@ async fn main() -> Result<()> {
     let mut bot_client = BotClient::new();
     
     // Connect to Hypixel
-    match bot_client.connect(microsoft_email.clone()).await {
+    match bot_client.connect(microsoft_email).await {
         Ok(_) => {
             info!("Bot connection initiated successfully");
         }

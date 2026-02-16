@@ -6,10 +6,9 @@ This guide explains how to set up Microsoft authentication for Frikadellen BAF t
 
 When you run Frikadellen BAF for the first time, you will be prompted for:
 
-1. **In-game name**: Your Minecraft username (e.g., `zShadowReaper_`)
-2. **Microsoft account email**: The email address associated with your Microsoft/Minecraft account
+1. **Microsoft account email**: The email address associated with your Microsoft/Minecraft account
 
-These credentials will be saved to `config.toml` in the same directory as the executable.
+This credential will be saved to `config.toml` in the same directory as the executable.
 
 ## Authentication Flow
 
@@ -28,11 +27,10 @@ The application uses Azalea's Microsoft authentication system which:
 
 You will see:
 ```
-Enter your ingame name: [type your username]
 Enter your Microsoft account email: [type your email]
 ```
 
-After entering your credentials:
+After entering your email:
 - A browser window will open
 - Log in with your Microsoft account
 - Grant permission for the application to access Minecraft
@@ -41,7 +39,7 @@ After entering your credentials:
 ## Subsequent Runs
 
 On subsequent runs, the application will:
-- Load your credentials from `config.toml`
+- Load your email from `config.toml`
 - Use cached authentication tokens
 - Only prompt for re-authentication if tokens have expired
 
@@ -50,6 +48,7 @@ On subsequent runs, the application will:
 When successfully connected, you should see:
 
 ```
+INFO Configuration loaded for account: your@email.com
 INFO Connecting to Hypixel with Microsoft account: your@email.com
 INFO Bot connection initiated successfully
 INFO ✓ Bot logged into Minecraft successfully

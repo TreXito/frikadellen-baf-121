@@ -14,7 +14,7 @@ Frikadellen BAF in the newest minecraft version based on Rust
 
 1. Download the latest release for your platform from the [Releases](../../releases) page
 2. Run the executable
-3. Enter your in-game name and Microsoft account email when prompted
+3. Enter your Microsoft account email when prompted
 4. Complete Microsoft authentication in your browser
 5. The bot will connect to Hypixel and start monitoring for flips
 
@@ -24,8 +24,7 @@ For detailed setup instructions, see [Microsoft Authentication Setup Guide](MICR
 
 The application creates a `config.toml` file in the same directory as the executable. You can manually edit this file to customize settings:
 
-- `ingame_name`: Your Minecraft username
-- `microsoft_email`: Your Microsoft account email
+- `microsoft_email`: Your Microsoft account email (used for authentication)
 - `enable_ah_flips`: Enable/disable auction house flips
 - `enable_bazaar_flips`: Enable/disable bazaar flips
 - `web_gui_port`: Port for the web interface (default: 8080)
