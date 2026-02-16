@@ -224,17 +224,22 @@ async fn main() -> Result<()> {
 
     // Spawn command processor
     let command_queue_processor = command_queue.clone();
+    let bot_client_clone = bot_client.clone();
     tokio::spawn(async move {
         loop {
             // Process commands from queue
             if let Some(cmd) = command_queue_processor.start_current() {
                 info!("Processing command: {:?}", cmd.command_type);
                 
-                // TODO: Execute command based on type
-                // This requires bot integration with Azalea
+                // Send command to bot for execution
+                if let Err(e) = bot_client_clone.send_command(cmd.clone()) {
+                    warn!("Failed to send command to bot: {}", e);
+                }
                 
-                // For now, just complete it
-                sleep(Duration::from_millis(100)).await;
+                // Wait for command to be processed
+                // TODO: Implement proper completion detection via window events
+                sleep(Duration::from_secs(5)).await;
+                
                 command_queue_processor.complete_current();
             }
             
