@@ -46,11 +46,20 @@ pub fn init_logger() -> Result<()> {
 fn get_log_path() -> PathBuf {
     // Use executable directory for log file
     // This allows multiple instances to run with separate logs
-    let exe_path = std::env::current_exe()
-        .unwrap_or_else(|_| PathBuf::from("."));
-    
-    let exe_dir = exe_path.parent()
-        .unwrap_or_else(|| std::path::Path::new("."));
+    let exe_dir = match std::env::current_exe() {
+        Ok(exe_path) => {
+            exe_path.parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| {
+                    eprintln!("Warning: Could not get parent directory of executable, using current directory");
+                    PathBuf::from(".")
+                })
+        }
+        Err(e) => {
+            eprintln!("Warning: Could not get executable path ({}), using current directory", e);
+            PathBuf::from(".")
+        }
+    };
     
     exe_dir.join("baf.log")
 }
