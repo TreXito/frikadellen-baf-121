@@ -105,6 +105,9 @@ pub enum CommandType {
     PurchaseAuction {
         flip: Flip,
     },
+    SendChat {
+        message: String,
+    },
     ClaimSoldItem,
     CheckCookie,
     DiscoverOrders,

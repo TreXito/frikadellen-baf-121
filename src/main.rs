@@ -11,7 +11,7 @@ use frikadellen_baf::{
 use tracing::{info, warn};
 use tokio::time::{sleep, Duration};
 
-const VERSION: &str = "af-3.0-rust";
+const VERSION: &str = "1.7.0";
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -211,10 +211,26 @@ async fn main() -> Result<()> {
                 }
                 CoflEvent::ChatMessage(msg) => {
                     info!("[Coflnet] {}", msg);
+                    
+                    // Send COFL chat messages to Minecraft chat if enabled
+                    if config_clone.use_cofl_chat {
+                        // Create a command to send the chat message
+                        command_queue_clone.enqueue(
+                            CommandType::SendChat { message: format!("[Chat] {}", msg) },
+                            CommandPriority::Low,
+                            true, // Interruptible
+                        );
+                    }
                 }
                 CoflEvent::Command(cmd) => {
-                    info!("Received command: {}", cmd);
-                    // TODO: Execute command
+                    info!("Received command from Coflnet: {}", cmd);
+                    
+                    // Execute commands sent by Coflnet
+                    command_queue_clone.enqueue(
+                        CommandType::SendChat { message: cmd },
+                        CommandPriority::High,
+                        false, // Not interruptible
+                    );
                 }
             }
         }

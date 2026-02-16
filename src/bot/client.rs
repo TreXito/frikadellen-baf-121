@@ -4,6 +4,7 @@ use azalea_protocol::packets::game::{
     ClientboundGamePacket,
 };
 use azalea_inventory::operations::ClickType;
+use azalea_client::chat::ChatPacket;
 use bevy_app::AppExit;
 use parking_lot::RwLock;
 use std::sync::Arc;
@@ -422,6 +423,14 @@ async fn event_handler(
         }
         
         Event::Chat(chat) => {
+            // Filter out overlay messages (action bar - e.g., health/defense/mana stats)
+            let is_overlay = matches!(chat, ChatPacket::System(ref packet) if packet.overlay);
+            
+            if is_overlay {
+                // Skip overlay messages - they spam the logs with stats updates
+                return Ok(());
+            }
+            
             let message = chat.message().to_string();
             state.handlers.handle_chat_message(&message).await;
             if state.event_tx.send(BotEvent::ChatMessage(message.clone())).is_err() {
@@ -557,6 +566,11 @@ async fn execute_command(
     info!("Executing command: {:?}", command.command_type);
 
     match &command.command_type {
+        CommandType::SendChat { message } => {
+            // Send chat message to Minecraft
+            info!("Sending chat message: {}", message);
+            bot.write_chat_packet(message);
+        }
         CommandType::PurchaseAuction { flip } => {
             // Send /viewauction command
             let uuid = flip.uuid.as_ref().map(|s| s.as_str()).unwrap_or("");
