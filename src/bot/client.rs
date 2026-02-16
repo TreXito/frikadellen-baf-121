@@ -10,7 +10,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{info, error, debug};
 
-use crate::types::BotState;
+use crate::types::{BotState, QueuedCommand};
 use super::handlers::BotEventHandlers;
 
 /// Connection wait duration (seconds) - time to wait for bot connection to establish
@@ -47,6 +47,10 @@ pub struct BotClient {
     event_tx: mpsc::UnboundedSender<BotEvent>,
     /// Event receiver channel (cloned for each listener)
     event_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<BotEvent>>>,
+    /// Command sender channel (for sending commands to the bot)
+    command_tx: mpsc::UnboundedSender<QueuedCommand>,
+    /// Command receiver channel (for the event handler to receive commands)
+    command_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<QueuedCommand>>>,
 }
 
 /// Events that can be emitted by the bot
@@ -72,6 +76,7 @@ impl BotClient {
     /// Create a new bot client instance
     pub fn new() -> Self {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
+        let (command_tx, command_rx) = mpsc::unbounded_channel();
         
         Self {
             state: Arc::new(RwLock::new(BotState::GracePeriod)),
@@ -80,6 +85,8 @@ impl BotClient {
             handlers: Arc::new(BotEventHandlers::new()),
             event_tx,
             event_rx: Arc::new(tokio::sync::Mutex::new(event_rx)),
+            command_tx,
+            command_rx: Arc::new(tokio::sync::Mutex::new(command_rx)),
         }
     }
 
@@ -121,6 +128,7 @@ impl BotClient {
             event_tx: self.event_tx.clone(),
             action_counter: self.action_counter.clone(),
             last_window_id: self.last_window_id.clone(),
+            command_rx: self.command_rx.clone(),
         };
         
         // Build and start the client (this blocks until disconnection)
@@ -176,6 +184,16 @@ impl BotClient {
         self.event_rx.lock().await.recv().await
     }
 
+    /// Send a command to the bot for execution
+    /// 
+    /// This queues a command to be executed by the bot event handler.
+    /// Commands are processed in the context of the Azalea client where
+    /// chat messages and window clicks can be sent.
+    pub fn send_command(&self, command: QueuedCommand) -> Result<()> {
+        self.command_tx.send(command)
+            .map_err(|e| anyhow!("Failed to send command to bot: {}", e))
+    }
+
     /// Get the current action counter value
     /// 
     /// The action counter is incremented with each window click to prevent
@@ -210,13 +228,9 @@ impl BotClient {
     /// 
     /// ```no_run
     /// # use azalea::prelude::*;
-    /// # use azalea::chat::SendChatEvent;
     /// # async fn example(bot: Client) {
     /// // Inside the event handler:
-    /// bot.ecs.lock().write_message(SendChatEvent {
-    ///     entity: bot.entity,
-    ///     content: "/bz".to_string(),
-    /// });
+    /// bot.write_chat_packet("/bz");
     /// # }
     /// ```
     #[deprecated(note = "Cannot be called from outside event handlers. Use the Client directly within event_handler. See method documentation for example.")]
@@ -313,27 +327,39 @@ pub struct BotClientState {
     #[allow(dead_code)]
     pub action_counter: Arc<RwLock<i16>>,
     pub last_window_id: Arc<RwLock<u8>>,
+    pub command_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<QueuedCommand>>>,
 }
 
 impl Default for BotClientState {
     fn default() -> Self {
         let (event_tx, _) = mpsc::unbounded_channel();
+        let (_, command_rx) = mpsc::unbounded_channel();
         Self {
             bot_state: Arc::new(RwLock::new(BotState::GracePeriod)),
             handlers: Arc::new(BotEventHandlers::new()),
             event_tx,
             action_counter: Arc::new(RwLock::new(1)),
             last_window_id: Arc::new(RwLock::new(0)),
+            command_rx: Arc::new(tokio::sync::Mutex::new(command_rx)),
         }
     }
 }
 
 /// Handle events from the Azalea client
 async fn event_handler(
-    _bot: Client,
+    bot: Client,
     event: Event,
     state: BotClientState,
 ) -> Result<()> {
+    // Process any pending commands first
+    // We use try_recv() to avoid blocking on command reception
+    if let Ok(mut command_rx) = state.command_rx.try_lock() {
+        if let Ok(command) = command_rx.try_recv() {
+            // Execute the command
+            execute_command(&bot, &command, &state).await;
+        }
+    }
+
     match event {
         Event::Login => {
             info!("Bot logged in successfully");
@@ -373,9 +399,12 @@ async fn event_handler(
                     *state.last_window_id.write() = window_id as u8;
                     
                     state.handlers.handle_window_open(window_id as u8, &window_type, &parsed_title).await;
-                    if state.event_tx.send(BotEvent::WindowOpen(window_id as u8, window_type, parsed_title)).is_err() {
+                    if state.event_tx.send(BotEvent::WindowOpen(window_id as u8, window_type.clone(), parsed_title.clone())).is_err() {
                         debug!("Failed to send WindowOpen event - receiver dropped");
                     }
+
+                    // Handle window interactions based on current state and window title
+                    handle_window_interaction(&bot, &state, window_id as u8, &parsed_title).await;
                 }
                 
                 ClientboundGamePacket::ContainerClose(_) => {
@@ -411,4 +440,129 @@ async fn event_handler(
     }
     
     Ok(())
+}
+
+/// Execute a command from the command queue
+async fn execute_command(
+    bot: &Client,
+    command: &QueuedCommand,
+    state: &BotClientState,
+) {
+    use crate::types::CommandType;
+
+    info!("Executing command: {:?}", command.command_type);
+
+    match &command.command_type {
+        CommandType::PurchaseAuction { flip } => {
+            // Send /viewauction command
+            let uuid = flip.uuid.as_ref().map(|s| s.as_str()).unwrap_or("");
+            let chat_command = format!("/viewauction {}", uuid);
+            
+            info!("Sending chat command: {}", chat_command);
+            bot.write_chat_packet(&chat_command);
+            
+            // Set state to purchasing
+            *state.bot_state.write() = BotState::Purchasing;
+        }
+        CommandType::BazaarBuyOrder { item_name, item_tag, amount: _, price_per_unit: _ } => {
+            // Send /bz command with item tag or name
+            let search_term = item_tag.as_ref().unwrap_or(item_name);
+            let chat_command = format!("/bz {}", search_term);
+            
+            info!("Sending bazaar buy order command: {}", chat_command);
+            bot.write_chat_packet(&chat_command);
+            
+            // Set state to bazaar
+            *state.bot_state.write() = BotState::Bazaar;
+        }
+        CommandType::BazaarSellOrder { item_name, item_tag, amount: _, price_per_unit: _ } => {
+            // Send /bz command with item tag or name
+            let search_term = item_tag.as_ref().unwrap_or(item_name);
+            let chat_command = format!("/bz {}", search_term);
+            
+            info!("Sending bazaar sell order command: {}", chat_command);
+            bot.write_chat_packet(&chat_command);
+            
+            // Set state to bazaar
+            *state.bot_state.write() = BotState::Bazaar;
+        }
+        _ => {
+            info!("Command type not yet implemented: {:?}", command.command_type);
+        }
+    }
+}
+
+/// Handle window interactions based on bot state and window title
+async fn handle_window_interaction(
+    bot: &Client,
+    state: &BotClientState,
+    window_id: u8,
+    window_title: &str,
+) {
+    let bot_state = *state.bot_state.read();
+    
+    match bot_state {
+        BotState::Purchasing => {
+            // Handle auction house windows
+            if window_title.contains("BIN Auction View") {
+                info!("BIN Auction View opened - clicking purchase button (slot 31)");
+                // Click slot 31 (purchase button)
+                click_window_slot(bot, window_id, 31).await;
+                
+                // Wait a bit for confirmation window to open
+                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+            } else if window_title.contains("Confirm Purchase") {
+                info!("Confirm Purchase window opened - clicking confirm button (slot 11)");
+                // Click slot 11 (confirm button)
+                click_window_slot(bot, window_id, 11).await;
+                
+                // Wait a bit for purchase to complete
+                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                
+                // Purchase complete, go back to idle
+                *state.bot_state.write() = BotState::Idle;
+            }
+        }
+        BotState::Bazaar => {
+            // Handle bazaar windows
+            if window_title.contains("Bazaar") {
+                info!("Bazaar window opened: {}", window_title);
+                // TODO: Implement bazaar order placement flow
+                // This involves:
+                // 1. Clicking the correct item in search results (if search)
+                // 2. Clicking "Create Buy Order" or "Create Sell Offer"
+                // 3. Filling in the amount sign
+                // 4. Filling in the price sign
+                // 5. Clicking confirm buttons
+                
+                // For now, just go back to idle after a delay
+                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                *state.bot_state.write() = BotState::Idle;
+            }
+        }
+        _ => {
+            // Not in a state that requires window interaction
+        }
+    }
+}
+
+/// Click a window slot
+async fn click_window_slot(bot: &Client, window_id: u8, slot: i16) {
+    use azalea_protocol::packets::game::s_container_click::{
+        ServerboundContainerClick,
+        HashedStack,
+    };
+    
+    let packet = ServerboundContainerClick {
+        container_id: window_id as i32,
+        state_id: 0,
+        slot_num: slot,
+        button_num: 0,
+        click_type: ClickType::Pickup,
+        changed_slots: Default::default(),
+        carried_item: HashedStack(None),
+    };
+    
+    bot.write_packet(packet);
+    info!("Clicked slot {} in window {}", slot, window_id);
 }
