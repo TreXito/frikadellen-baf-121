@@ -401,9 +401,12 @@ async fn event_handler(
                     *state.last_window_id.write() = window_id as u8;
                     
                     state.handlers.handle_window_open(window_id as u8, &window_type, &parsed_title).await;
-                    if state.event_tx.send(BotEvent::WindowOpen(window_id as u8, window_type, parsed_title)).is_err() {
+                    if state.event_tx.send(BotEvent::WindowOpen(window_id as u8, window_type.clone(), parsed_title.clone())).is_err() {
                         debug!("Failed to send WindowOpen event - receiver dropped");
                     }
+
+                    // Handle window interactions based on current state and window title
+                    handle_window_interaction(&bot, &state, window_id as u8, &parsed_title).await;
                 }
                 
                 ClientboundGamePacket::ContainerClose(_) => {
@@ -489,4 +492,79 @@ async fn execute_command(
             info!("Command type not yet implemented: {:?}", command.command_type);
         }
     }
+}
+
+/// Handle window interactions based on bot state and window title
+async fn handle_window_interaction(
+    bot: &Client,
+    state: &BotClientState,
+    window_id: u8,
+    window_title: &str,
+) {
+    let bot_state = *state.bot_state.read();
+    
+    match bot_state {
+        BotState::Purchasing => {
+            // Handle auction house windows
+            if window_title.contains("BIN Auction View") {
+                info!("BIN Auction View opened - clicking purchase button (slot 31)");
+                // Click slot 31 (purchase button)
+                click_window_slot(bot, window_id, 31).await;
+                
+                // Wait a bit for confirmation window to open
+                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+            } else if window_title.contains("Confirm Purchase") {
+                info!("Confirm Purchase window opened - clicking confirm button (slot 11)");
+                // Click slot 11 (confirm button)
+                click_window_slot(bot, window_id, 11).await;
+                
+                // Wait a bit for purchase to complete
+                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                
+                // Purchase complete, go back to idle
+                *state.bot_state.write() = BotState::Idle;
+            }
+        }
+        BotState::Bazaar => {
+            // Handle bazaar windows
+            if window_title.contains("Bazaar") {
+                info!("Bazaar window opened: {}", window_title);
+                // TODO: Implement bazaar order placement flow
+                // This involves:
+                // 1. Clicking the correct item in search results (if search)
+                // 2. Clicking "Create Buy Order" or "Create Sell Offer"
+                // 3. Filling in the amount sign
+                // 4. Filling in the price sign
+                // 5. Clicking confirm buttons
+                
+                // For now, just go back to idle after a delay
+                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                *state.bot_state.write() = BotState::Idle;
+            }
+        }
+        _ => {
+            // Not in a state that requires window interaction
+        }
+    }
+}
+
+/// Click a window slot
+async fn click_window_slot(bot: &Client, window_id: u8, slot: i16) {
+    use azalea_protocol::packets::game::s_container_click::{
+        ServerboundContainerClick,
+        HashedStack,
+    };
+    
+    let packet = ServerboundContainerClick {
+        container_id: window_id as i32,
+        state_id: 0,
+        slot_num: slot,
+        button_num: 0,
+        click_type: ClickType::Pickup,
+        changed_slots: Default::default(),
+        carried_item: HashedStack(None),
+    };
+    
+    bot.write_packet(packet);
+    info!("Clicked slot {} in window {}", slot, window_id);
 }
