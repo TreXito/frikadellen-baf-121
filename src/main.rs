@@ -11,7 +11,7 @@ use frikadellen_baf::{
 use tracing::{info, warn};
 use tokio::time::{sleep, Duration};
 
-const VERSION: &str = "1.7.0";
+const VERSION: &str = "af-3.0";
 
 #[tokio::main]
 async fn main() -> Result<()> {
