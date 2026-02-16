@@ -655,46 +655,37 @@ async fn execute_command(
         }
         CommandType::UploadInventory => {
             info!("Uploading inventory to COFL");
+            
+            // Helper function to serialize an inventory item slot
+            fn serialize_item_slot(slot_num: usize, item_slot: &azalea_inventory::ItemStack) -> serde_json::Value {
+                serde_json::json!({
+                    "slot": slot_num,
+                    "item_count": item_slot.count(),
+                    "item_id": item_slot.kind().to_string(),
+                    "nbt": serde_json::Value::Null, // TODO: Parse NBT data for SkyBlock item IDs
+                })
+            }
+            
             // Get the bot's inventory and serialize it
             let inventory = bot.menu();
             
             // Build inventory JSON matching TypeScript bot.inventory format
             let slots = (0..36).map(|slot_num| {
-                if let Some(item_slot) = inventory.slot(slot_num) {
-                    serde_json::json!({
-                        "slot": slot_num,
-                        "item_count": item_slot.count(),
-                        "item_id": format!("{:?}", item_slot.kind()),
-                        "nbt": serde_json::Value::Null, // TODO: Parse NBT data
-                    })
-                } else {
-                    serde_json::Value::Null
-                }
+                inventory.slot(slot_num)
+                    .map(|item_slot| serialize_item_slot(slot_num, item_slot))
+                    .unwrap_or(serde_json::Value::Null)
             }).collect::<Vec<_>>();
             
             // Get armor slots (5-8 in player inventory menu)
             let armor = (5..=8).map(|slot_num| {
-                if let Some(item_slot) = inventory.slot(slot_num) {
-                    serde_json::json!({
-                        "slot": slot_num,
-                        "item_count": item_slot.count(),
-                        "item_id": format!("{:?}", item_slot.kind()),
-                        "nbt": serde_json::Value::Null, // TODO: Parse NBT data
-                    })
-                } else {
-                    serde_json::Value::Null
-                }
+                inventory.slot(slot_num)
+                    .map(|item_slot| serialize_item_slot(slot_num, item_slot))
+                    .unwrap_or(serde_json::Value::Null)
             }).collect::<Vec<_>>();
             
             // Get offhand slot (45 in player inventory)
-            let offhand = inventory.slot(45).map(|item_slot| {
-                serde_json::json!({
-                    "slot": 45,
-                    "item_count": item_slot.count(),
-                    "item_id": format!("{:?}", item_slot.kind()),
-                    "nbt": serde_json::Value::Null, // TODO: Parse NBT data
-                })
-            });
+            let offhand = inventory.slot(45)
+                .map(|item_slot| serialize_item_slot(45, item_slot));
             
             let inventory_json = serde_json::json!({
                 "slots": slots,
@@ -704,20 +695,26 @@ async fn execute_command(
             
             // Send to websocket
             if let Some(ws) = &state.ws_client {
-                let data_json = serde_json::to_string(&inventory_json).unwrap();
-                let message = serde_json::json!({
-                    "type": "uploadInventory",
-                    "data": data_json
-                }).to_string();
-                
-                let ws_clone = ws.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = ws_clone.send_message(&message).await {
-                        error!("Failed to upload inventory to websocket: {}", e);
-                    } else {
-                        info!("Uploaded inventory to COFL successfully");
+                match serde_json::to_string(&inventory_json) {
+                    Ok(data_json) => {
+                        let message = serde_json::json!({
+                            "type": "uploadInventory",
+                            "data": data_json
+                        }).to_string();
+                        
+                        let ws_clone = ws.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = ws_clone.send_message(&message).await {
+                                error!("Failed to upload inventory to websocket: {}", e);
+                            } else {
+                                info!("Uploaded inventory to COFL successfully");
+                            }
+                        });
                     }
-                });
+                    Err(e) => {
+                        error!("Failed to serialize inventory to JSON: {}", e);
+                    }
+                }
             } else {
                 warn!("WebSocket client not available, cannot upload inventory");
             }
