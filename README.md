@@ -49,6 +49,20 @@ rustup default nightly
 cargo build --release
 ```
 
+### Using the Launcher Script
+
+For convenience, you can use the `frikadellen-baf-121` launcher script:
+
+```bash
+chmod +x frikadellen-baf-121
+./frikadellen-baf-121
+```
+
+The launcher script will:
+- Check for an existing binary
+- Automatically build from source if needed
+- Run the application with any arguments you provide
+
 ## License
 
 MIT
