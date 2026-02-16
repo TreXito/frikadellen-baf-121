@@ -76,6 +76,19 @@ impl CoflWebSocket {
         Ok((Self { tx, write }, rx))
     }
 
+    /// Format and send an authentication prompt to the user
+    fn send_auth_prompt(tx: &mpsc::UnboundedSender<CoflEvent>, text: &str, url: &str) {
+        let auth_prompt = format!(
+            "§f[§4BAF§f]: §c========================================\n\
+             §f[§4BAF§f]: §c§lCOFL Authentication Required!\n\
+             §f[§4BAF§f]: §e{}\n\
+             §f[§4BAF§f]: §bAuthentication URL: §f{}\n\
+             §f[§4BAF§f]: §c========================================",
+            text, url
+        );
+        let _ = tx.send(CoflEvent::ChatMessage(auth_prompt));
+    }
+
     fn handle_message(text: &str, tx: &mpsc::UnboundedSender<CoflEvent>) -> Result<()> {
         let msg: WebSocketMessage = serde_json::from_str(text)
             .context("Failed to parse WebSocket message")?;
@@ -113,17 +126,7 @@ impl CoflWebSocket {
                         // If there's an onClick URL with authmod, this is an authentication prompt
                         if let Some(ref on_click) = msg_with_ref.on_click {
                             if on_click.contains("sky.coflnet.com/authmod") {
-                                // Format authentication prompt with BAF colors
-                                let auth_prompt = format!(
-                                    "§f[§4BAF§f]: §c========================================\n\
-                                     §f[§4BAF§f]: §c§lCOFL Authentication Required!\n\
-                                     §f[§4BAF§f]: §e{}\n\
-                                     §f[§4BAF§f]: §bAuthentication URL: §f{}\n\
-                                     §f[§4BAF§f]: §c========================================",
-                                    msg_with_ref.text,
-                                    on_click
-                                );
-                                let _ = tx.send(CoflEvent::ChatMessage(auth_prompt));
+                                Self::send_auth_prompt(tx, &msg_with_ref.text, on_click);
                                 continue;
                             }
                         }
@@ -137,17 +140,7 @@ impl CoflWebSocket {
                     // Check for authentication URL
                     if let Some(ref on_click) = msg_with_ref.on_click {
                         if on_click.contains("sky.coflnet.com/authmod") {
-                            // Format authentication prompt with BAF colors
-                            let auth_prompt = format!(
-                                "§f[§4BAF§f]: §c========================================\n\
-                                 §f[§4BAF§f]: §c§lCOFL Authentication Required!\n\
-                                 §f[§4BAF§f]: §e{}\n\
-                                 §f[§4BAF§f]: §bAuthentication URL: §f{}\n\
-                                 §f[§4BAF§f]: §c========================================",
-                                msg_with_ref.text,
-                                on_click
-                            );
-                            let _ = tx.send(CoflEvent::ChatMessage(auth_prompt));
+                            Self::send_auth_prompt(tx, &msg_with_ref.text, on_click);
                             return Ok(());
                         }
                     }

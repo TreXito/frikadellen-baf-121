@@ -315,7 +315,7 @@ async fn main() -> Result<()> {
                     // Send to websocket with command as type
                     let message = serde_json::json!({
                         "type": command,
-                        "data": serde_json::to_string(&args).unwrap_or_else(|_| "\"\"".to_string())
+                        "data": args  // Already a string, don't double-encode
                     }).to_string();
                     
                     if let Err(e) = ws_client_for_console.send_message(&message).await {
@@ -343,7 +343,7 @@ async fn main() -> Result<()> {
             else {
                 let message = serde_json::json!({
                     "type": "chat",
-                    "data": serde_json::to_string(&input).unwrap_or_else(|_| "\"\"".to_string())
+                    "data": input  // Already a string, don't double-encode
                 }).to_string();
                 
                 if let Err(e) = ws_client_for_console.send_message(&message).await {
