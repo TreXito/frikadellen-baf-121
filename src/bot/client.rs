@@ -12,6 +12,7 @@ use tokio::sync::mpsc;
 use tracing::{info, error, debug, warn};
 
 use crate::types::{BotState, QueuedCommand};
+use crate::websocket::CoflWebSocket;
 use super::handlers::BotEventHandlers;
 
 /// Connection wait duration (seconds) - time to wait for bot connection to establish
@@ -114,6 +115,11 @@ impl BotClient {
     /// - Connect to mc.hypixel.net
     /// - Set up event handlers for chat, window, and inventory events
     /// 
+    /// # Arguments
+    /// 
+    /// * `username` - Ingame username for connection
+    /// * `ws_client` - Optional WebSocket client for inventory uploads
+    /// 
     /// # Example
     /// 
     /// ```no_run
@@ -122,10 +128,10 @@ impl BotClient {
     /// #[tokio::main]
     /// async fn main() {
     ///     let mut bot = BotClient::new();
-    ///     bot.connect("email@example.com".to_string()).await.unwrap();
+    ///     bot.connect("email@example.com".to_string(), None).await.unwrap();
     /// }
     /// ```
-    pub async fn connect(&mut self, username: String) -> Result<()> {
+    pub async fn connect(&mut self, username: String, ws_client: Option<CoflWebSocket>) -> Result<()> {
         info!("Connecting to Hypixel as: {}", username);
         
         // Set state to startup
@@ -149,6 +155,7 @@ impl BotClient {
             joined_skyblock: Arc::new(RwLock::new(false)),
             teleported_to_island: Arc::new(RwLock::new(false)),
             skyblock_join_time: Arc::new(RwLock::new(None)),
+            ws_client,
         };
         
         // Build and start the client (this blocks until disconnection)
@@ -354,6 +361,8 @@ pub struct BotClientState {
     pub teleported_to_island: Arc<RwLock<bool>>,
     /// Time when we joined SkyBlock (for timeout detection)
     pub skyblock_join_time: Arc<RwLock<Option<tokio::time::Instant>>>,
+    /// WebSocket client for sending messages (e.g., inventory uploads)
+    pub ws_client: Option<CoflWebSocket>,
 }
 
 impl Default for BotClientState {
@@ -370,6 +379,7 @@ impl Default for BotClientState {
             joined_skyblock: Arc::new(RwLock::new(false)),
             teleported_to_island: Arc::new(RwLock::new(false)),
             skyblock_join_time: Arc::new(RwLock::new(None)),
+            ws_client: None,
         }
     }
 }
@@ -642,6 +652,72 @@ async fn execute_command(
             bot.write_chat_packet("/ah");
             // TODO: Implement auction creation flow
             warn!("SellToAuction implementation incomplete - needs auction house window handling");
+        }
+        CommandType::UploadInventory => {
+            info!("Uploading inventory to COFL");
+            
+            // Helper function to serialize an inventory item slot
+            fn serialize_item_slot(slot_num: usize, item_slot: &azalea_inventory::ItemStack) -> serde_json::Value {
+                serde_json::json!({
+                    "slot": slot_num,
+                    "item_count": item_slot.count(),
+                    "item_id": item_slot.kind().to_string(),
+                    "nbt": serde_json::Value::Null, // TODO: Parse NBT data for SkyBlock item IDs
+                })
+            }
+            
+            // Get the bot's inventory and serialize it
+            let inventory = bot.menu();
+            
+            // Build inventory JSON matching TypeScript bot.inventory format
+            let slots = (0..36).map(|slot_num| {
+                inventory.slot(slot_num)
+                    .map(|item_slot| serialize_item_slot(slot_num, item_slot))
+                    .unwrap_or(serde_json::Value::Null)
+            }).collect::<Vec<_>>();
+            
+            // Get armor slots (5-8 in player inventory menu)
+            let armor = (5..=8).map(|slot_num| {
+                inventory.slot(slot_num)
+                    .map(|item_slot| serialize_item_slot(slot_num, item_slot))
+                    .unwrap_or(serde_json::Value::Null)
+            }).collect::<Vec<_>>();
+            
+            // Get offhand slot (45 in player inventory)
+            let offhand = inventory.slot(45)
+                .map(|item_slot| serialize_item_slot(45, item_slot));
+            
+            let inventory_json = serde_json::json!({
+                "slots": slots,
+                "armor": armor,
+                "offhand": offhand
+            });
+            
+            // Send to websocket
+            if let Some(ws) = &state.ws_client {
+                match serde_json::to_string(&inventory_json) {
+                    Ok(data_json) => {
+                        let message = serde_json::json!({
+                            "type": "uploadInventory",
+                            "data": data_json
+                        }).to_string();
+                        
+                        let ws_clone = ws.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = ws_clone.send_message(&message).await {
+                                error!("Failed to upload inventory to websocket: {}", e);
+                            } else {
+                                info!("Uploaded inventory to COFL successfully");
+                            }
+                        });
+                    }
+                    Err(e) => {
+                        error!("Failed to serialize inventory to JSON: {}", e);
+                    }
+                }
+            } else {
+                warn!("WebSocket client not available, cannot upload inventory");
+            }
         }
         CommandType::ClaimSoldItem | CommandType::CheckCookie | 
         CommandType::DiscoverOrders | CommandType::ExecuteOrders => {
