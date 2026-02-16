@@ -248,9 +248,9 @@ async fn main() -> Result<()> {
         }
     });
 
-    // Complete startup sequence
-    info!("Startup sequence complete");
-    state_manager.set(BotState::Idle);
+    // Bot will complete its startup sequence automatically
+    // The state will transition from Startup -> Idle after initialization
+    info!("BAF initialization started - waiting for bot to complete setup...");
 
     // Keep the application running
     info!("BAF is now running. Press Ctrl+C to exit.");

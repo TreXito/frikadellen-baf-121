@@ -129,6 +129,8 @@ impl BotClient {
             action_counter: self.action_counter.clone(),
             last_window_id: self.last_window_id.clone(),
             command_rx: self.command_rx.clone(),
+            joined_skyblock: Arc::new(RwLock::new(false)),
+            teleported_to_island: Arc::new(RwLock::new(false)),
         };
         
         // Build and start the client (this blocks until disconnection)
@@ -328,6 +330,10 @@ pub struct BotClientState {
     pub action_counter: Arc<RwLock<i16>>,
     pub last_window_id: Arc<RwLock<u8>>,
     pub command_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<QueuedCommand>>>,
+    /// Flag to track if we've joined SkyBlock
+    pub joined_skyblock: Arc<RwLock<bool>>,
+    /// Flag to track if we've teleported to island
+    pub teleported_to_island: Arc<RwLock<bool>>,
 }
 
 impl Default for BotClientState {
@@ -341,6 +347,8 @@ impl Default for BotClientState {
             action_counter: Arc::new(RwLock::new(1)),
             last_window_id: Arc::new(RwLock::new(0)),
             command_rx: Arc::new(tokio::sync::Mutex::new(command_rx)),
+            joined_skyblock: Arc::new(RwLock::new(false)),
+            teleported_to_island: Arc::new(RwLock::new(false)),
         }
     }
 }
@@ -366,7 +374,9 @@ async fn event_handler(
             if state.event_tx.send(BotEvent::Login).is_err() {
                 debug!("Failed to send Login event - receiver dropped");
             }
-            *state.bot_state.write() = BotState::Idle;
+            
+            // Keep state as Startup until fully initialized
+            *state.bot_state.write() = BotState::Startup;
         }
         
         Event::Init => {
@@ -374,13 +384,59 @@ async fn event_handler(
             if state.event_tx.send(BotEvent::Spawn).is_err() {
                 debug!("Failed to send Spawn event - receiver dropped");
             }
+            
+            // Check if we've already joined SkyBlock
+            let joined_skyblock = *state.joined_skyblock.read();
+            
+            if !joined_skyblock {
+                // First spawn - we're in the lobby, join SkyBlock
+                info!("Joining Hypixel SkyBlock...");
+                tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+                bot.write_chat_packet("/play skyblock");
+                *state.joined_skyblock.write() = true;
+            }
         }
         
         Event::Chat(chat) => {
             let message = chat.message().to_string();
             state.handlers.handle_chat_message(&message).await;
-            if state.event_tx.send(BotEvent::ChatMessage(message)).is_err() {
+            if state.event_tx.send(BotEvent::ChatMessage(message.clone())).is_err() {
                 debug!("Failed to send ChatMessage event - receiver dropped");
+            }
+            
+            // Check if we've teleported to island yet
+            let teleported = *state.teleported_to_island.read();
+            let joined = *state.joined_skyblock.read();
+            
+            // Look for messages indicating we're in SkyBlock and should go to island
+            // Common messages after joining SkyBlock: "Welcome to Hypixel SkyBlock!"
+            if joined && !teleported {
+                // Give a delay after any message to let world fully load
+                // Then teleport to island
+                if message.contains("Welcome") || message.contains("Skyblock") || message.contains("SKYBLOCK") {
+                    info!("Detected SkyBlock join - teleporting to island...");
+                    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                    bot.write_chat_packet("/is");
+                    *state.teleported_to_island.write() = true;
+                    
+                    // Wait for teleport to complete
+                    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                    
+                    // Now ready to process commands
+                    info!("Bot initialization complete - ready to flip!");
+                    *state.bot_state.write() = BotState::Idle;
+                } else if message.contains("lobby") || message.contains("Lobby") {
+                    // If we see lobby messages for too long, try sending /is anyway
+                    // This handles cases where we miss the welcome message
+                    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                    info!("Attempting to teleport to island...");
+                    bot.write_chat_packet("/is");
+                    *state.teleported_to_island.write() = true;
+                    
+                    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                    info!("Bot initialization complete - ready to flip!");
+                    *state.bot_state.write() = BotState::Idle;
+                }
             }
         }
         
