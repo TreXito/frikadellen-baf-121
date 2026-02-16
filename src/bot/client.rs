@@ -407,10 +407,17 @@ async fn event_handler(
             if !joined_skyblock {
                 // First spawn - we're in the lobby, join SkyBlock
                 info!("Joining Hypixel SkyBlock...");
-                tokio::time::sleep(tokio::time::Duration::from_secs(LOBBY_COMMAND_DELAY_SECS)).await;
-                bot.write_chat_packet("/play skyblock");
-                *state.joined_skyblock.write() = true;
-                *state.skyblock_join_time.write() = Some(tokio::time::Instant::now());
+                
+                // Spawn a task to send the command after delay (non-blocking)
+                let bot_clone = bot.clone();
+                let skyblock_join_time = state.skyblock_join_time.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(LOBBY_COMMAND_DELAY_SECS)).await;
+                    bot_clone.write_chat_packet("/play skyblock");
+                });
+                
+                // Set the join time for timeout tracking
+                *skyblock_join_time.write() = Some(tokio::time::Instant::now());
             }
         }
         
@@ -423,40 +430,47 @@ async fn event_handler(
             
             // Check if we've teleported to island yet
             let teleported = *state.teleported_to_island.read();
-            let joined = *state.joined_skyblock.read();
+            let join_time = *state.skyblock_join_time.read();
             
             // Look for messages indicating we're in SkyBlock and should go to island
-            if joined && !teleported {
+            if join_time.is_some() && !teleported {
                 // Check for timeout (if we've been waiting too long, try anyway)
-                let join_time = *state.skyblock_join_time.read();
                 let should_timeout = if let Some(join_time) = join_time {
                     join_time.elapsed() > tokio::time::Duration::from_secs(SKYBLOCK_JOIN_TIMEOUT_SECS)
                 } else {
                     false
                 };
                 
-                // Look for welcome messages or timeout
-                // Fix operator precedence: check timeout separately or use explicit parentheses
-                let skyblock_detected = message.contains("Welcome to Hypixel SkyBlock") 
-                    || (message.contains("SKYBLOCK") && message.contains("Profile"));
+                // Look for welcome messages (more specific to avoid false positives)
+                // System messages from Hypixel typically start with specific patterns
+                let skyblock_detected = message.starts_with("Welcome to Hypixel SkyBlock") 
+                    || (message.contains("SKYBLOCK") && message.contains("Profile") && message.starts_with("["));
                 
                 if skyblock_detected || should_timeout {
+                    // Mark as joined now that we've confirmed
+                    *state.joined_skyblock.write() = true;
+                    *state.teleported_to_island.write() = true;
+                    
                     if should_timeout {
                         info!("Timeout waiting for SkyBlock confirmation - attempting to teleport to island anyway...");
                     } else {
                         info!("Detected SkyBlock join - teleporting to island...");
                     }
                     
-                    tokio::time::sleep(tokio::time::Duration::from_secs(ISLAND_TELEPORT_DELAY_SECS)).await;
-                    bot.write_chat_packet("/is");
-                    *state.teleported_to_island.write() = true;
-                    
-                    // Wait for teleport to complete
-                    tokio::time::sleep(tokio::time::Duration::from_secs(TELEPORT_COMPLETION_WAIT_SECS)).await;
-                    
-                    // Now ready to process commands
-                    info!("Bot initialization complete - ready to flip!");
-                    *state.bot_state.write() = BotState::Idle;
+                    // Spawn a task to handle teleportation (non-blocking)
+                    let bot_clone = bot.clone();
+                    let bot_state = state.bot_state.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(tokio::time::Duration::from_secs(ISLAND_TELEPORT_DELAY_SECS)).await;
+                        bot_clone.write_chat_packet("/is");
+                        
+                        // Wait for teleport to complete
+                        tokio::time::sleep(tokio::time::Duration::from_secs(TELEPORT_COMPLETION_WAIT_SECS)).await;
+                        
+                        // Now ready to process commands
+                        info!("Bot initialization complete - ready to flip!");
+                        *bot_state.write() = BotState::Idle;
+                    });
                 }
             }
         }
