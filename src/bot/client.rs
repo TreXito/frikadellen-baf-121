@@ -9,7 +9,7 @@ use bevy_app::AppExit;
 use parking_lot::RwLock;
 use std::sync::Arc;
 use tokio::sync::mpsc;
-use tracing::{info, error, debug};
+use tracing::{info, error, debug, warn};
 
 use crate::types::{BotState, QueuedCommand};
 use super::handlers::BotEventHandlers;
@@ -604,8 +604,44 @@ async fn execute_command(
             // Set state to bazaar
             *state.bot_state.write() = BotState::Bazaar;
         }
-        _ => {
-            info!("Command type not yet implemented: {:?}", command.command_type);
+        // Advanced command types (matching TypeScript BAF.ts)
+        CommandType::ClickSlot { slot } => {
+            info!("Clicking slot {}", slot);
+            // TypeScript: clicks slot in current window after checking trade display
+            // For tradeResponse, TypeScript checks if window contains "Deal!" or "Warning!"
+            // and waits 3400ms before clicking
+            tokio::time::sleep(tokio::time::Duration::from_millis(3400)).await;
+            let window_id = *state.last_window_id.read();
+            if window_id > 0 {
+                click_window_slot(bot, window_id, *slot).await;
+            } else {
+                warn!("No window open (window_id=0), cannot click slot {}", slot);
+            }
+        }
+        CommandType::SwapProfile { profile_name } => {
+            info!("Swapping to profile: {}", profile_name);
+            // TypeScript: sends /profiles command and clicks on profile
+            bot.write_chat_packet(&format!("/profiles"));
+            // TODO: Implement profile selection from menu when window opens
+            warn!("SwapProfile implementation incomplete - needs window interaction");
+        }
+        CommandType::AcceptTrade { player_name } => {
+            info!("Accepting trade with player: {}", player_name);
+            // TypeScript: sends /trade <player> command
+            bot.write_chat_packet(&format!("/trade {}", player_name));
+            // TODO: Implement trade window handling
+            warn!("AcceptTrade implementation incomplete - needs trade window handling");
+        }
+        CommandType::SellToAuction { item_name, starting_bid, duration_hours } => {
+            info!("Creating auction: {} at {} coins for {} hours", item_name, starting_bid, duration_hours);
+            // TypeScript: opens /ah and creates auction
+            bot.write_chat_packet("/ah");
+            // TODO: Implement auction creation flow
+            warn!("SellToAuction implementation incomplete - needs auction house window handling");
+        }
+        CommandType::ClaimSoldItem | CommandType::CheckCookie | 
+        CommandType::DiscoverOrders | CommandType::ExecuteOrders => {
+            info!("Command type not yet fully implemented in execute_command: {:?}", command.command_type);
         }
     }
 }

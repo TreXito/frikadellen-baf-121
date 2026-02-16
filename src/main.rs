@@ -290,12 +290,28 @@ async fn main() -> Result<()> {
                 // Handle advanced message types (matching TypeScript BAF.ts)
                 CoflEvent::GetInventory => {
                     info!("Processing getInventory request");
-                    // Queue command to upload inventory to COFL
-                    command_queue_clone.enqueue(
-                        CommandType::UploadInventory,
-                        CommandPriority::High,
-                        false,
-                    );
+                    // TypeScript: uploads bot.inventory to websocket with type "uploadInventory"
+                    // For now, send an empty inventory placeholder - proper implementation
+                    // would require bot client to expose inventory
+                    let ws = ws_client_clone.clone();
+                    tokio::spawn(async move {
+                        let inventory_json = serde_json::json!({
+                            "slots": [],
+                            "armor": [],
+                            "offhand": null
+                        });
+                        let data_json = serde_json::to_string(&inventory_json).unwrap();
+                        let message = serde_json::json!({
+                            "type": "uploadInventory",
+                            "data": data_json
+                        }).to_string();
+                        
+                        if let Err(e) = ws.send_message(&message).await {
+                            error!("Failed to upload inventory to websocket: {}", e);
+                        } else {
+                            info!("Uploaded inventory to COFL");
+                        }
+                    });
                 }
                 CoflEvent::TradeResponse => {
                     info!("Processing tradeResponse - clicking accept button");

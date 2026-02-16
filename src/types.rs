@@ -118,7 +118,6 @@ pub enum CommandType {
         duration_hours: u64,
     },
     // Advanced commands matching TypeScript BAF.ts
-    UploadInventory,
     ClickSlot {
         slot: i16,
     },
