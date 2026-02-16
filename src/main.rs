@@ -8,7 +8,7 @@ use frikadellen_baf::{
     bot::BotClient,
     types::BotState,
 };
-use tracing::{info, warn};
+use tracing::{debug, error, info, warn};
 use tokio::time::{sleep, Duration};
 
 const VERSION: &str = "af-3.0";
@@ -74,7 +74,7 @@ async fn main() -> Result<()> {
     info!("Connecting to Coflnet WebSocket...");
     
     // Connect to Coflnet WebSocket
-    let (_ws_client, mut ws_rx) = CoflWebSocket::connect(
+    let (ws_client, mut ws_rx) = CoflWebSocket::connect(
         config.websocket_url.clone(),
         ingame_name.clone(),
         VERSION.to_string(),
@@ -136,6 +136,7 @@ async fn main() -> Result<()> {
     let state_manager_clone = state_manager.clone();
     let command_queue_clone = command_queue.clone();
     let config_clone = config.clone();
+    let ws_client_clone = ws_client.clone();
     
     tokio::spawn(async move {
         use frikadellen_baf::websocket::CoflEvent;
@@ -210,27 +211,35 @@ async fn main() -> Result<()> {
                     );
                 }
                 CoflEvent::ChatMessage(msg) => {
-                    info!("[Coflnet] {}", msg);
-                    
-                    // Send COFL chat messages to Minecraft chat if enabled
+                    // Log COFL chat messages for the user to see
+                    // These are informational messages and should NOT be sent to Hypixel server
                     if config_clone.use_cofl_chat {
-                        // Create a command to send the chat message
-                        command_queue_clone.enqueue(
-                            CommandType::SendChat { message: format!("[Chat] {}", msg) },
-                            CommandPriority::Low,
-                            true, // Interruptible
-                        );
+                        info!("[COFL Chat] {}", msg);
+                    } else {
+                        debug!("[COFL Chat] {}", msg);
                     }
                 }
                 CoflEvent::Command(cmd) => {
                     info!("Received command from Coflnet: {}", cmd);
                     
-                    // Execute commands sent by Coflnet
-                    command_queue_clone.enqueue(
-                        CommandType::SendChat { message: cmd },
-                        CommandPriority::High,
-                        false, // Not interruptible
-                    );
+                    // Check if this is a /cofl command that should be sent back to websocket
+                    if cmd.trim().starts_with("/cofl") {
+                        // Send /cofl commands to the websocket
+                        let ws = ws_client_clone.clone();
+                        let cmd_clone = cmd.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = ws.send_message(&cmd_clone).await {
+                                error!("Failed to send /cofl command to websocket: {}", e);
+                            }
+                        });
+                    } else {
+                        // Execute non-cofl commands sent by Coflnet to Minecraft
+                        command_queue_clone.enqueue(
+                            CommandType::SendChat { message: cmd },
+                            CommandPriority::High,
+                            false, // Not interruptible
+                        );
+                    }
                 }
             }
         }

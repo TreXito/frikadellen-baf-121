@@ -1,9 +1,10 @@
 use super::messages::{parse_message_data, ChatMessage, WebSocketMessage};
 use crate::types::{BazaarFlipRecommendation, Flip};
 use anyhow::{Context, Result};
-use futures::StreamExt;
-use tokio::sync::mpsc;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use futures::{stream::SplitSink, StreamExt, SinkExt};
+use tokio::sync::{mpsc, Mutex};
+use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
+use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 pub enum CoflEvent {
@@ -13,9 +14,11 @@ pub enum CoflEvent {
     Command(String),
 }
 
+#[derive(Clone)]
 pub struct CoflWebSocket {
     #[allow(dead_code)]
     tx: mpsc::UnboundedSender<CoflEvent>,
+    write: Arc<Mutex<SplitSink<WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>, Message>>>,
 }
 
 impl CoflWebSocket {
@@ -38,7 +41,8 @@ impl CoflWebSocket {
 
         info!("WebSocket connected successfully");
 
-        let (_write, mut read) = ws_stream.split();
+        let (write, mut read) = ws_stream.split();
+        let write = Arc::new(Mutex::new(write));
         let (tx, rx) = mpsc::unbounded_channel();
         let tx_clone = tx.clone();
 
@@ -69,7 +73,7 @@ impl CoflWebSocket {
             info!("WebSocket connection closed");
         });
 
-        Ok((Self { tx }, rx))
+        Ok((Self { tx, write }, rx))
     }
 
     fn handle_message(text: &str, tx: &mpsc::UnboundedSender<CoflEvent>) -> Result<()> {
@@ -127,6 +131,15 @@ impl CoflWebSocket {
             }
         }
 
+        Ok(())
+    }
+
+    /// Send a message to the COFL WebSocket
+    pub async fn send_message(&self, message: &str) -> Result<()> {
+        let mut write = self.write.lock().await;
+        write.send(Message::Text(message.to_string())).await
+            .context("Failed to send message to WebSocket")?;
+        info!("Sent message to COFL WebSocket: {}", message);
         Ok(())
     }
 }
