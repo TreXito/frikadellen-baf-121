@@ -2,7 +2,7 @@ use anyhow::Result;
 use dialoguer::{Input, Confirm};
 use frikadellen_baf::{
     config::ConfigLoader,
-    logging::init_logger,
+    logging::{init_logger, print_mc_chat},
     state::{StateManager, CommandQueue},
     websocket::CoflWebSocket,
     bot::BotClient,
@@ -211,11 +211,13 @@ async fn main() -> Result<()> {
                     );
                 }
                 CoflEvent::ChatMessage(msg) => {
-                    // Log COFL chat messages for the user to see
+                    // Display COFL chat messages with proper color formatting
                     // These are informational messages and should NOT be sent to Hypixel server
                     if config_clone.use_cofl_chat {
-                        info!("[COFL Chat] {}", msg);
+                        // Print with color codes if the message contains them
+                        print_mc_chat(&msg);
                     } else {
+                        // Still show in debug mode but without color formatting
                         debug!("[COFL Chat] {}", msg);
                     }
                 }
