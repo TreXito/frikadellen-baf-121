@@ -689,21 +689,13 @@ async fn execute_command(
                     let nbt_data = if let Some(item_data) = item.as_present() {
                         // Serialize the ItemStackData which includes component_patch
                         match serde_json::to_value(item_data) {
-                            Ok(mut value) => {
+                            Ok(value) => {
                                 // ItemStackData serialization includes count, id, and components fields
                                 // For COFL inventory upload, we only want the components field
                                 // This avoids duplicate count/id fields at the root level
-                                if let Some(obj) = value.as_object_mut() {
-                                    // Extract just the "components" field if it exists
-                                    if let Some(components) = obj.get("components").cloned() {
-                                        components
-                                    } else {
-                                        // If no components field, return the whole object (fallback)
-                                        value
-                                    }
-                                } else {
-                                    value
-                                }
+                                value.as_object()
+                                    .and_then(|obj| obj.get("components").cloned())
+                                    .unwrap_or(value)
                             }
                             Err(e) => {
                                 warn!("Failed to serialize item component data for slot {}: {}", slot_num, e);
