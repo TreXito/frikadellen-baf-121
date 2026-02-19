@@ -692,10 +692,18 @@ async fn execute_command(
             }).collect();
             
             // Build the inventory object matching mineflayer's Window structure
+            // Must match the Window class from prismarine-windows
             let inventory_json = serde_json::json!({
-                "slots": slots_array,
+                "id": 0,  // Player inventory always has window ID 0
                 "type": "minecraft:inventory",  // Window type
-                "id": 0  // Player inventory always has window ID 0
+                "title": "container.inventory",  // Standard inventory title
+                "slots": slots_array,
+                "inventoryStart": 9,  // First inventory slot (after crafting)
+                "inventoryEnd": 45,  // Last inventory slot + 1
+                "hotbarStart": 36,  // First hotbar slot
+                "craftingResultSlot": 0,  // Crafting output slot
+                "requiresConfirmation": true,  // Standard for inventory
+                "selectedItem": serde_json::Value::Null  // No item being held by cursor
             });
             
             info!("[InventoryDebug] Serialized inventory with {} total slots", slots_array.len());
