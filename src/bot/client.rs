@@ -656,42 +656,49 @@ async fn execute_command(
         CommandType::UploadInventory => {
             info!("Uploading inventory to COFL");
             
-            // Helper function to serialize an inventory item slot
-            fn serialize_item_slot(slot_num: usize, item_slot: &azalea_inventory::ItemStack) -> serde_json::Value {
-                serde_json::json!({
-                    "slot": slot_num,
-                    "item_count": item_slot.count(),
-                    "item_id": item_slot.kind().to_string(),
-                    "nbt": serde_json::Value::Null, // TODO: Parse NBT data for SkyBlock item IDs
-                })
-            }
-            
-            // Get the bot's inventory and serialize it
+            // Get the bot's inventory menu
             let inventory = bot.menu();
             
-            // Build inventory JSON matching TypeScript bot.inventory format
-            let slots = (0..36).map(|slot_num| {
-                inventory.slot(slot_num)
-                    .map(|item_slot| serialize_item_slot(slot_num, item_slot))
-                    .unwrap_or(serde_json::Value::Null)
-            }).collect::<Vec<_>>();
+            // Debug: Log inventory structure to understand what we have
+            info!("[InventoryDebug] Starting inventory serialization");
+            info!("[InventoryDebug] Total slots in menu: {}", inventory.slots().len());
             
-            // Get armor slots (5-8 in player inventory menu)
-            let armor = (5..=8).map(|slot_num| {
-                inventory.slot(slot_num)
-                    .map(|item_slot| serialize_item_slot(slot_num, item_slot))
-                    .unwrap_or(serde_json::Value::Null)
-            }).collect::<Vec<_>>();
+            // Count non-empty slots for debugging
+            let mut non_empty_count = 0;
+            for (idx, slot) in inventory.slots().iter().enumerate() {
+                if !slot.is_empty() {
+                    non_empty_count += 1;
+                    info!("[InventoryDebug] Slot {}: {} x{}", idx, slot.kind().to_string(), slot.count());
+                }
+            }
+            info!("[InventoryDebug] Found {} non-empty slots", non_empty_count);
             
-            // Get offhand slot (45 in player inventory)
-            let offhand = inventory.slot(45)
-                .map(|item_slot| serialize_item_slot(45, item_slot));
+            // Serialize all slots to match mineflayer's bot.inventory.slots structure
+            // In mineflayer, bot.inventory.slots is an array where null = empty slot
+            // We need to send the exact same structure to COFL
+            let slots_array: Vec<serde_json::Value> = inventory.slots().iter().enumerate().map(|(slot_num, item)| {
+                // Empty slots become null in the JSON
+                if item.is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::json!({
+                        "count": item.count(),
+                        "metadata": 0,  // TODO: Extract metadata if needed
+                        "nbt": serde_json::Value::Null,  // TODO: Parse NBT data for SkyBlock
+                        "name": item.kind().to_string(),
+                        "slot": slot_num
+                    })
+                }
+            }).collect();
             
+            // Build the inventory object matching mineflayer's Window structure
             let inventory_json = serde_json::json!({
-                "slots": slots,
-                "armor": armor,
-                "offhand": offhand
+                "slots": slots_array,
+                "type": "minecraft:inventory",  // Window type
+                "id": 0  // Player inventory always has window ID 0
             });
+            
+            info!("[InventoryDebug] Serialized inventory with {} total slots", slots_array.len());
             
             // Send to websocket
             if let Some(ws) = &state.ws_client {
@@ -701,6 +708,8 @@ async fn execute_command(
                             "type": "uploadInventory",
                             "data": data_json
                         }).to_string();
+                        
+                        info!("[InventoryDebug] Sending inventory data (length: {} bytes)", data_json.len());
                         
                         let ws_clone = ws.clone();
                         tokio::spawn(async move {
