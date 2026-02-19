@@ -683,8 +683,8 @@ async fn execute_command(
                 } else {
                     serde_json::json!({
                         "count": item.count(),
-                        "metadata": 0,  // TODO: Extract metadata if needed
-                        "nbt": serde_json::Value::Null,  // TODO: Parse NBT data for SkyBlock
+                        "metadata": 0, // TODO: Extract metadata if needed
+                        "nbt": serde_json::Value::Null, // TODO: Parse NBT data for SkyBlock
                         "name": item.kind().to_string(),
                         "slot": slot_num
                     })
@@ -709,7 +709,7 @@ async fn execute_command(
                             "data": data_json
                         }).to_string();
                         
-                        info!("[InventoryDebug] Sending inventory data (length: {} bytes)", data_json.len());
+                        info!("[InventoryDebug] Sending inventory data (length: {} bytes)", message.len());
                         
                         let ws_clone = ws.clone();
                         tokio::spawn(async move {
