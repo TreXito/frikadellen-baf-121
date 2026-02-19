@@ -688,7 +688,13 @@ async fn execute_command(
                     // This includes ExtraAttributes, enchantments, and other SkyBlock data
                     let nbt_data = if let Some(item_data) = item.as_present() {
                         // Serialize the ItemStackData which includes component_patch
-                        serde_json::to_value(item_data).unwrap_or(serde_json::Value::Null)
+                        match serde_json::to_value(item_data) {
+                            Ok(value) => value,
+                            Err(e) => {
+                                warn!("Failed to serialize item component data for slot {}: {}", slot_num, e);
+                                serde_json::Value::Null
+                            }
+                        }
                     } else {
                         serde_json::Value::Null
                     };
@@ -708,6 +714,8 @@ async fn execute_command(
             // Must match the Window class from prismarine-windows
             // This must exactly match bot.inventory structure from mineflayer
             // For SkyBlock, use "SKYBLOCK_MENU" type to include item data
+            // Note: This bot is specifically designed for Hypixel SkyBlock and auto-joins
+            // SkyBlock servers, so SKYBLOCK_MENU is always appropriate
             let inventory_json = serde_json::json!({
                 "id": 0,  // Player inventory always has window ID 0
                 "type": "SKYBLOCK_MENU",  // SkyBlock-specific type (was "minecraft:inventory")
