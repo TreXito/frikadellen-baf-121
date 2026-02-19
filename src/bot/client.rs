@@ -684,11 +684,20 @@ async fn execute_command(
                     // Get the numeric item type ID (protocol ID)
                     let item_type = item.kind() as u32;
                     
+                    // Serialize ItemStack to get component data (replaces NBT in 1.21+)
+                    // This includes ExtraAttributes, enchantments, and other SkyBlock data
+                    let nbt_data = if let Some(item_data) = item.as_present() {
+                        // Serialize the ItemStackData which includes component_patch
+                        serde_json::to_value(item_data).unwrap_or(serde_json::Value::Null)
+                    } else {
+                        serde_json::Value::Null
+                    };
+                    
                     serde_json::json!({
                         "type": item_type,  // Numeric item ID for protocol
                         "count": item.count(),
                         "metadata": 0,
-                        "nbt": serde_json::Value::Null,
+                        "nbt": nbt_data,  // Component data serialized as NBT-compatible JSON
                         "name": item.kind().to_string(),
                         "slot": slot_num
                     })
@@ -698,9 +707,10 @@ async fn execute_command(
             // Build the inventory object matching mineflayer's Window structure
             // Must match the Window class from prismarine-windows
             // This must exactly match bot.inventory structure from mineflayer
+            // For SkyBlock, use "SKYBLOCK_MENU" type to include item data
             let inventory_json = serde_json::json!({
                 "id": 0,  // Player inventory always has window ID 0
-                "type": "minecraft:inventory",  // Window type
+                "type": "SKYBLOCK_MENU",  // SkyBlock-specific type (was "minecraft:inventory")
                 "title": "Inventory",  // Must match mineflayer: "Inventory" not "container.inventory"
                 "slots": slots_array,
                 "inventoryStart": 9,  // First inventory slot (after crafting)
