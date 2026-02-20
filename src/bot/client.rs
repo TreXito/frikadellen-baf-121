@@ -136,8 +136,11 @@ impl BotClient {
     pub async fn connect(&mut self, username: String, ws_client: Option<CoflWebSocket>) -> Result<()> {
         info!("Connecting to Hypixel as: {}", username);
         
-        // Set state to startup
-        self.set_state(BotState::Startup);
+        // Keep state at GracePeriod (matches TypeScript's initial `bot.state = 'gracePeriod'`).
+        // GracePeriod allows commands – only the active startup-workflow state (Startup) blocks them.
+        // State transitions:  GracePeriod -> Idle  (via Login timeout or chat detection)
+        //                      -> Startup           (only if an active startup workflow runs)
+        //                      -> Idle              (after startup workflow completes)
         
         // Authenticate with Microsoft
         let account = Account::microsoft(&username)
@@ -408,14 +411,42 @@ async fn event_handler(
                 debug!("Failed to send Login event - receiver dropped");
             }
             
-            // Reset startup flags on (re)login so the startup sequence runs again
-            // This handles reconnects where teleported_to_island was already true
+            // Reset startup flags on (re)login so the startup sequence runs again.
+            // Keep state at GracePeriod (allows commands), matching TypeScript where
+            // 'gracePeriod' does NOT block flips – only 'startup' does.
             *state.joined_skyblock.write() = false;
             *state.teleported_to_island.write() = false;
             *state.skyblock_join_time.write() = None;
             
-            // Keep state as Startup until fully initialized
-            *state.bot_state.write() = BotState::Startup;
+            // Keep GracePeriod state – allows commands/flips just like TypeScript.
+            // Do NOT set to Startup here; Startup is reserved for an active startup workflow.
+            *state.bot_state.write() = BotState::GracePeriod;
+
+            // Spawn a 30-second startup-completion watchdog (matching TypeScript's ~5.5 s grace
+            // period + runStartupWorkflow).  If the chat-based detection hasn't fired by then,
+            // this guarantees the bot exits GracePeriod and becomes fully ready.
+            {
+                let bot_state_wd = state.bot_state.clone();
+                let teleported_wd = state.teleported_to_island.clone();
+                let joined_wd = state.joined_skyblock.clone();
+                let bot_wd = bot.clone();
+                let event_tx_wd = state.event_tx.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
+                    let already_done = *teleported_wd.read();
+                    if !already_done {
+                        warn!("[Startup] 30-second watchdog: forcing startup completion");
+                        *joined_wd.write() = true;
+                        *teleported_wd.write() = true;
+                        tokio::time::sleep(tokio::time::Duration::from_secs(ISLAND_TELEPORT_DELAY_SECS)).await;
+                        bot_wd.write_chat_packet("/is");
+                        tokio::time::sleep(tokio::time::Duration::from_secs(TELEPORT_COMPLETION_WAIT_SECS)).await;
+                        info!("[Startup] Watchdog: state → Idle, bot ready to flip");
+                        *bot_state_wd.write() = BotState::Idle;
+                        let _ = event_tx_wd.send(BotEvent::StartupComplete);
+                    }
+                });
+            }
         }
         
         Event::Init => {
@@ -428,7 +459,7 @@ async fn event_handler(
             let joined_skyblock = *state.joined_skyblock.read();
             
             if !joined_skyblock {
-                // First spawn - we're in the lobby, join SkyBlock
+                // First spawn -- we're in the lobby, join SkyBlock
                 info!("Joining Hypixel SkyBlock...");
                 
                 // Spawn a task to send the command after delay (non-blocking)
@@ -442,34 +473,8 @@ async fn event_handler(
                 // Set the join time for timeout tracking
                 *skyblock_join_time.write() = Some(tokio::time::Instant::now());
             }
-
-            // Spawn an independent 2-minute startup timeout.
-            // This is separate from the 15-second SKYBLOCK_JOIN_TIMEOUT_SECS check in Event::Chat
-            // because that check only fires when a non-overlay chat message arrives. On a solo
-            // SkyBlock island, no regular chat messages may arrive, so the shorter timeout never
-            // triggers. This timer runs unconditionally and guarantees startup eventually completes.
-            {
-                let bot_state_timeout = state.bot_state.clone();
-                let teleported_timeout = state.teleported_to_island.clone();
-                let joined_skyblock_timeout = state.joined_skyblock.clone();
-                let bot_timeout = bot.clone();
-                let event_tx_timeout = state.event_tx.clone();
-                tokio::spawn(async move {
-                    tokio::time::sleep(tokio::time::Duration::from_secs(120)).await;
-                    let already_teleported = *teleported_timeout.read();
-                    if !already_teleported {
-                        warn!("[Startup] 2-minute timeout reached, forcing startup completion");
-                        *joined_skyblock_timeout.write() = true;
-                        *teleported_timeout.write() = true;
-                        tokio::time::sleep(tokio::time::Duration::from_secs(ISLAND_TELEPORT_DELAY_SECS)).await;
-                        bot_timeout.write_chat_packet("/is");
-                        tokio::time::sleep(tokio::time::Duration::from_secs(TELEPORT_COMPLETION_WAIT_SECS)).await;
-                        info!("Startup timeout: forced state to Idle");
-                        *bot_state_timeout.write() = BotState::Idle;
-                        let _ = event_tx_timeout.send(BotEvent::StartupComplete);
-                    }
-                });
-            }
+            // Note: startup-completion watchdog is spawned from Event::Login,
+            // which fires reliably after the bot is authenticated and in the game.
         }
         
         Event::Chat(chat) => {
@@ -701,20 +706,6 @@ async fn execute_command(
             // Get the bot's inventory menu
             let inventory = bot.menu();
             
-            // Debug: Log inventory structure to understand what we have
-            info!("[InventoryDebug] Starting inventory serialization");
-            info!("[InventoryDebug] Total slots in menu: {}", inventory.slots().len());
-            
-            // Count non-empty slots for debugging
-            let mut non_empty_count = 0;
-            for (idx, slot) in inventory.slots().iter().enumerate() {
-                if !slot.is_empty() {
-                    non_empty_count += 1;
-                    info!("[InventoryDebug] Slot {}: {} x{}", idx, slot.kind().to_string(), slot.count());
-                }
-            }
-            info!("[InventoryDebug] Found {} non-empty slots", non_empty_count);
-            
             // Serialize all slots to match mineflayer's bot.inventory.slots structure
             // In mineflayer, bot.inventory.slots is an array where null = empty slot
             // We need to send the exact same structure to COFL
@@ -778,8 +769,6 @@ async fn execute_command(
                 "selectedItem": serde_json::Value::Null  // No item being held by cursor
             });
             
-            info!("[InventoryDebug] Serialized inventory with {} total slots", slots_array.len());
-            
             // Send to websocket
             if let Some(ws) = &state.ws_client {
                 match serde_json::to_string(&inventory_json) {
@@ -788,8 +777,6 @@ async fn execute_command(
                             "type": "uploadInventory",
                             "data": data_json
                         }).to_string();
-                        
-                        info!("[InventoryDebug] Sending inventory data (length: {} bytes)", message.len());
                         
                         let ws_clone = ws.clone();
                         tokio::spawn(async move {

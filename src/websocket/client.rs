@@ -19,6 +19,9 @@ pub enum CoflEvent {
     CreateAuction(String),   // Auction data as JSON
     Trade(String),           // Trade data as JSON
     RunSequence(String),     // Sequence data as JSON
+    /// COFL "countdown" message – AH flips arriving in ~10 seconds.
+    /// Used to pause bazaar flips while the AH flip window is active.
+    Countdown,
 }
 
 #[derive(Clone)]
@@ -196,6 +199,12 @@ impl CoflWebSocket {
             "runSequence" => {
                 info!("Received runSequence request");
                 let _ = tx.send(CoflEvent::RunSequence(msg.data.clone()));
+            }
+            "countdown" => {
+                // COFL sends this ~10 seconds before AH flips arrive.
+                // Matches TypeScript: used by bazaarFlipPauser to pause bazaar flips.
+                info!("[COFL] Flips in 10 seconds (countdown)");
+                let _ = tx.send(CoflEvent::Countdown);
             }
             _ => {
                 // Log any unknown message types for debugging
