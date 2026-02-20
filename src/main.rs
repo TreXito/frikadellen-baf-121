@@ -10,6 +10,7 @@ use frikadellen_baf::{
 use tracing::{debug, error, info, warn};
 use tokio::time::{sleep, Duration};
 use serde_json;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 
 const VERSION: &str = "af-3.0";
 
@@ -60,6 +61,10 @@ async fn main() -> Result<()> {
 
     // Initialize command queue
     let command_queue = CommandQueue::new();
+
+    // Bazaar-flip pause flag (matches TypeScript bazaarFlipPauser.ts).
+    // Set to true for 20 seconds when a `countdown` message arrives (AH flips incoming).
+    let bazaar_flips_paused = Arc::new(AtomicBool::new(false));
 
     // Get or generate session ID for Coflnet (matching TypeScript coflSessionManager.ts)
     let session_id = if let Some(session) = config.sessions.get(&ingame_name) {
@@ -176,6 +181,7 @@ async fn main() -> Result<()> {
     let config_clone = config.clone();
     let ws_client_clone = ws_client.clone();
     let bot_client_for_ws = bot_client.clone();
+    let bazaar_flips_paused_ws = bazaar_flips_paused.clone();
     
     tokio::spawn(async move {
         use frikadellen_baf::websocket::CoflEvent;
@@ -216,6 +222,12 @@ async fn main() -> Result<()> {
                     // Skip if in startup state - use bot_client state (authoritative source)
                     if !bot_client_for_ws.state().allows_commands() {
                         warn!("Skipping bazaar flip during startup: {}", bazaar_flip.item_name);
+                        continue;
+                    }
+
+                    // Skip if bazaar flips are paused due to incoming AH flip (matching bazaarFlipPauser.ts)
+                    if bazaar_flips_paused_ws.load(Ordering::Relaxed) {
+                        info!("Bazaar flips paused (AH flip incoming), skipping: {}", bazaar_flip.item_name);
                         continue;
                     }
 
@@ -387,6 +399,22 @@ async fn main() -> Result<()> {
                     // For now, just log it
                     debug!("Sequence data: {}", data);
                     warn!("runSequence is not yet fully implemented");
+                }
+                CoflEvent::Countdown => {
+                    // COFL sends this ~10 seconds before AH flips arrive.
+                    // Matching TypeScript bazaarFlipPauser.ts: pause bazaar flips for 20 seconds
+                    // when both AH flips and bazaar flips are enabled.
+                    info!("[COFL] Flips in 10 seconds");
+                    if config_clone.enable_bazaar_flips && config_clone.enable_ah_flips {
+                        info!("AH flip incoming – pausing bazaar flips for 20 seconds");
+                        let flag = bazaar_flips_paused_ws.clone();
+                        flag.store(true, Ordering::Relaxed);
+                        tokio::spawn(async move {
+                            sleep(Duration::from_secs(20)).await;
+                            flag.store(false, Ordering::Relaxed);
+                            info!("Bazaar flips resumed after AH flip window");
+                        });
+                    }
                 }
             }
         }
