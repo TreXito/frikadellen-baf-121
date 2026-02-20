@@ -3,10 +3,9 @@ use dialoguer::{Input, Confirm};
 use frikadellen_baf::{
     config::ConfigLoader,
     logging::{init_logger, print_mc_chat},
-    state::{StateManager, CommandQueue},
+    state::CommandQueue,
     websocket::CoflWebSocket,
     bot::BotClient,
-    types::BotState,
 };
 use tracing::{debug, error, info, warn};
 use tokio::time::{sleep, Duration};
@@ -59,12 +58,8 @@ async fn main() -> Result<()> {
     info!("Bazaar Flips: {}", if config.enable_bazaar_flips { "ENABLED" } else { "DISABLED" });
     info!("Web GUI Port: {}", config.web_gui_port);
 
-    // Initialize state management
-    let state_manager = StateManager::new();
+    // Initialize command queue
     let command_queue = CommandQueue::new();
-
-    // Set initial state to startup (prevents commands during initialization)
-    state_manager.set(BotState::Startup);
 
     // Get or generate session ID for Coflnet (matching TypeScript coflSessionManager.ts)
     let session_id = if let Some(session) = config.sessions.get(&ingame_name) {
@@ -131,6 +126,8 @@ async fn main() -> Result<()> {
 
     // Spawn bot event handler
     let bot_client_clone = bot_client.clone();
+    let ws_client_for_events = ws_client.clone();
+    let config_for_events = config.clone();
     tokio::spawn(async move {
         while let Some(event) = bot_client_clone.next_event().await {
             match event {
@@ -155,15 +152,30 @@ async fn main() -> Result<()> {
                 frikadellen_baf::bot::BotEvent::Kicked(reason) => {
                     warn!("Bot kicked: {}", reason);
                 }
+                frikadellen_baf::bot::BotEvent::StartupComplete => {
+                    info!("[Startup] Startup complete - bot is ready to flip!");
+                    // Request bazaar flips immediately after startup (matching TypeScript runStartupWorkflow)
+                    if config_for_events.enable_bazaar_flips {
+                        let msg = serde_json::json!({
+                            "type": "getbazaarflips",
+                            "data": serde_json::to_string("").unwrap_or_default()
+                        }).to_string();
+                        if let Err(e) = ws_client_for_events.send_message(&msg).await {
+                            error!("Failed to send getbazaarflips after startup: {}", e);
+                        } else {
+                            info!("[Startup] Requested bazaar flips");
+                        }
+                    }
+                }
             }
         }
     });
 
     // Spawn WebSocket message handler
-    let state_manager_clone = state_manager.clone();
     let command_queue_clone = command_queue.clone();
     let config_clone = config.clone();
     let ws_client_clone = ws_client.clone();
+    let bot_client_for_ws = bot_client.clone();
     
     tokio::spawn(async move {
         use frikadellen_baf::websocket::CoflEvent;
@@ -177,8 +189,8 @@ async fn main() -> Result<()> {
                         continue;
                     }
 
-                    // Skip if in startup state
-                    if !state_manager_clone.allows_commands() {
+                    // Skip if in startup state - use bot_client state (authoritative source)
+                    if !bot_client_for_ws.state().allows_commands() {
                         warn!("Skipping flip during startup: {}", flip.item_name);
                         continue;
                     }
@@ -201,8 +213,8 @@ async fn main() -> Result<()> {
                         continue;
                     }
 
-                    // Skip if in startup state
-                    if !state_manager_clone.allows_commands() {
+                    // Skip if in startup state - use bot_client state (authoritative source)
+                    if !bot_client_for_ws.state().allows_commands() {
                         warn!("Skipping bazaar flip during startup: {}", bazaar_flip.item_name);
                         continue;
                     }
@@ -534,6 +546,28 @@ async fn main() -> Result<()> {
         }
     });
     
+    // Periodic bazaar flip requests every 5 minutes (matching TypeScript startBazaarFlipRequests)
+    if config.enable_bazaar_flips {
+        let ws_client_periodic = ws_client.clone();
+        let bot_client_periodic = bot_client.clone();
+        tokio::spawn(async move {
+            loop {
+                sleep(Duration::from_secs(300)).await; // 5 minutes
+                if bot_client_periodic.state().allows_commands() {
+                    let msg = serde_json::json!({
+                        "type": "getbazaarflips",
+                        "data": serde_json::to_string("").unwrap_or_default()
+                    }).to_string();
+                    if let Err(e) = ws_client_periodic.send_message(&msg).await {
+                        error!("Failed to send periodic getbazaarflips: {}", e);
+                    } else {
+                        debug!("[BazaarFlips] Auto-requested bazaar flips (periodic)");
+                    }
+                }
+            }
+        });
+    }
+
     // Keep the application running
     info!("BAF is now running. Type commands below or press Ctrl+C to exit.");
     

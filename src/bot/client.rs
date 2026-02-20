@@ -88,6 +88,8 @@ pub enum BotEvent {
     Disconnected(String),
     /// Bot kicked (reason)
     Kicked(String),
+    /// Startup workflow completed - bot is ready to accept flips
+    StartupComplete,
 }
 
 impl BotClient {
@@ -406,6 +408,12 @@ async fn event_handler(
                 debug!("Failed to send Login event - receiver dropped");
             }
             
+            // Reset startup flags on (re)login so the startup sequence runs again
+            // This handles reconnects where teleported_to_island was already true
+            *state.joined_skyblock.write() = false;
+            *state.teleported_to_island.write() = false;
+            *state.skyblock_join_time.write() = None;
+            
             // Keep state as Startup until fully initialized
             *state.bot_state.write() = BotState::Startup;
         }
@@ -434,6 +442,34 @@ async fn event_handler(
                 // Set the join time for timeout tracking
                 *skyblock_join_time.write() = Some(tokio::time::Instant::now());
             }
+
+            // Spawn an independent 2-minute startup timeout.
+            // This is separate from the 15-second SKYBLOCK_JOIN_TIMEOUT_SECS check in Event::Chat
+            // because that check only fires when a non-overlay chat message arrives. On a solo
+            // SkyBlock island, no regular chat messages may arrive, so the shorter timeout never
+            // triggers. This timer runs unconditionally and guarantees startup eventually completes.
+            {
+                let bot_state_timeout = state.bot_state.clone();
+                let teleported_timeout = state.teleported_to_island.clone();
+                let joined_skyblock_timeout = state.joined_skyblock.clone();
+                let bot_timeout = bot.clone();
+                let event_tx_timeout = state.event_tx.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(120)).await;
+                    let already_teleported = *teleported_timeout.read();
+                    if !already_teleported {
+                        warn!("[Startup] 2-minute timeout reached, forcing startup completion");
+                        *joined_skyblock_timeout.write() = true;
+                        *teleported_timeout.write() = true;
+                        tokio::time::sleep(tokio::time::Duration::from_secs(ISLAND_TELEPORT_DELAY_SECS)).await;
+                        bot_timeout.write_chat_packet("/is");
+                        tokio::time::sleep(tokio::time::Duration::from_secs(TELEPORT_COMPLETION_WAIT_SECS)).await;
+                        info!("Startup timeout: forced state to Idle");
+                        *bot_state_timeout.write() = BotState::Idle;
+                        let _ = event_tx_timeout.send(BotEvent::StartupComplete);
+                    }
+                });
+            }
         }
         
         Event::Chat(chat) => {
@@ -461,20 +497,24 @@ async fn event_handler(
                     // Check for timeout (if we've been waiting too long, try anyway)
                     let should_timeout = join_time.elapsed() > tokio::time::Duration::from_secs(SKYBLOCK_JOIN_TIMEOUT_SECS);
                     
+                    // Strip Minecraft color codes before checking for SkyBlock join messages
+                    // Hypixel uses §-prefixed color codes (e.g. §aWelcome to Hypixel SkyBlock!)
+                    let clean_message = crate::bot::handlers::BotEventHandlers::remove_color_codes(&message);
+                    
                     // Check if message is a SkyBlock join confirmation
                     let skyblock_detected = {
-                        // Primary welcome message
-                        if message.starts_with("Welcome to Hypixel SkyBlock") {
+                        // Primary welcome message - use starts_with after stripping color codes
+                        if clean_message.starts_with("Welcome to Hypixel SkyBlock") {
                             true
                         }
                         // Profile selection messages like "[Profile] You are currently on: Your Island"
-                        else if message.starts_with("[Profile]") && message.contains("currently") {
+                        else if clean_message.starts_with("[Profile]") && clean_message.contains("currently") {
                             true
                         }
                         // Catch any other system messages about SKYBLOCK profile
                         // Convert to uppercase once for case-insensitive comparison
-                        else if message.starts_with("[") {
-                            let upper = message.to_uppercase();
+                        else if clean_message.starts_with("[") {
+                            let upper = clean_message.to_uppercase();
                             upper.contains("SKYBLOCK") && upper.contains("PROFILE")
                         } else {
                             false
@@ -495,6 +535,7 @@ async fn event_handler(
                         // Spawn a task to handle teleportation (non-blocking)
                         let bot_clone = bot.clone();
                         let bot_state = state.bot_state.clone();
+                        let event_tx_startup = state.event_tx.clone();
                         tokio::spawn(async move {
                             tokio::time::sleep(tokio::time::Duration::from_secs(ISLAND_TELEPORT_DELAY_SECS)).await;
                             bot_clone.write_chat_packet("/is");
@@ -505,6 +546,7 @@ async fn event_handler(
                             // Now ready to process commands
                             info!("Bot initialization complete - ready to flip!");
                             *bot_state.write() = BotState::Idle;
+                            let _ = event_tx_startup.send(BotEvent::StartupComplete);
                         });
                     }
                 }
