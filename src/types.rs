@@ -18,7 +18,7 @@ pub struct Flip {
     #[serde(rename = "profitPerc", default)]
     pub profit_perc: Option<f64>,
     
-    #[serde(default)]
+    #[serde(default, alias = "auctionUuid", alias = "auction_uuid", alias = "auctionId", alias = "id")]
     pub uuid: Option<String>,
 }
 
