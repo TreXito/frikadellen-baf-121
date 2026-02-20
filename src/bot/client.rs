@@ -634,7 +634,13 @@ async fn execute_command(
         }
         CommandType::PurchaseAuction { flip } => {
             // Send /viewauction command
-            let uuid = flip.uuid.as_ref().map(|s| s.as_str()).unwrap_or("");
+            let uuid = match flip.uuid.as_deref().filter(|s| !s.is_empty()) {
+                Some(u) => u,
+                None => {
+                    warn!("Cannot purchase auction for '{}': missing UUID", flip.item_name);
+                    return;
+                }
+            };
             let chat_command = format!("/viewauction {}", uuid);
             
             info!("Sending chat command: {}", chat_command);

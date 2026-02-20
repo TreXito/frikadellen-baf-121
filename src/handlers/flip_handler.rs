@@ -355,7 +355,8 @@ impl FlipHandler {
         );
 
         // Send the /viewauction command
-        let command = format!("/viewauction {}", flip.uuid.as_ref().unwrap_or(&String::new()));
+        let uuid = flip.uuid.as_deref().filter(|s| !s.is_empty()).ok_or_else(|| anyhow!("Cannot purchase auction for '{}': missing UUID", flip.item_name))?;
+        let command = format!("/viewauction {}", uuid);
         send_command(&command)?;
 
         // Wait for window to open (implemented in caller)
