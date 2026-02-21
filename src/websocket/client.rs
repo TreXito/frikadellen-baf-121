@@ -107,9 +107,15 @@ impl CoflWebSocket {
 
         match msg.msg_type.as_str() {
             "flip" => {
-                if let Ok(flip) = parse_message_data::<Flip>(&msg.data) {
-                    debug!("Parsed auction flip: {:?}", flip.item_name);
-                    let _ = tx.send(CoflEvent::AuctionFlip(flip));
+                if let Ok(value) = parse_message_data::<serde_json::Value>(&msg.data) {
+                    // Normalize: COFL sends itemName/startingBid nested inside "auction"
+                    // but also provides "id" at the top level as the auction UUID.
+                    // Promote auction sub-fields to the top level when missing there.
+                    let normalized = normalize_flip_value(value);
+                    if let Ok(flip) = serde_json::from_value::<Flip>(normalized) {
+                        debug!("Parsed auction flip: {:?}", flip.item_name);
+                        let _ = tx.send(CoflEvent::AuctionFlip(flip));
+                    }
                 }
             }
             "bazaarFlip" | "bzRecommend" | "placeOrder" => {
@@ -223,5 +229,98 @@ impl CoflWebSocket {
             .context("Failed to send message to WebSocket")?;
         info!("Sent message to COFL WebSocket: {}", message);
         Ok(())
+    }
+}
+
+/// Normalize a flip JSON value so that `itemName` and `startingBid` are always
+/// at the top level, even when the COFL server nests them inside an `auction`
+/// sub-object.  The `id` field (auction UUID) is already at the top level in
+/// the new format and is picked up by the `alias = "id"` on the `Flip.uuid`
+/// field.
+pub fn normalize_flip_value(mut value: serde_json::Value) -> serde_json::Value {
+    if let Some(auction) = value.get("auction").cloned() {
+        if let Some(obj) = value.as_object_mut() {
+            if obj.get("itemName").map(|v| v.is_null()).unwrap_or(true) {
+                if let Some(name) = auction.get("itemName") {
+                    obj.insert("itemName".to_string(), name.clone());
+                }
+            }
+            if obj.get("startingBid").map(|v| v.is_null()).unwrap_or(true) {
+                if let Some(bid) = auction.get("startingBid") {
+                    obj.insert("startingBid".to_string(), bid.clone());
+                }
+            }
+        }
+    }
+    value
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::Flip;
+
+    #[test]
+    fn test_normalize_flip_value_nested_auction() {
+        // New COFL format: id at top level, itemName/startingBid nested in auction
+        let json = serde_json::json!({
+            "id": "4f1d2446974e43dbaf644fb13cd8af62",
+            "auction": {
+                "itemName": "§dTreacherous Rod of the Sea",
+                "startingBid": 15000000
+            },
+            "target": 29314940,
+            "finder": "SNIPER_MEDIAN"
+        });
+
+        let normalized = normalize_flip_value(json);
+        let flip: Flip = serde_json::from_value(normalized).expect("should parse");
+
+        assert_eq!(flip.item_name, "§dTreacherous Rod of the Sea");
+        assert_eq!(flip.starting_bid, 15000000);
+        assert_eq!(flip.target, 29314940);
+        assert_eq!(flip.uuid.as_deref(), Some("4f1d2446974e43dbaf644fb13cd8af62"));
+    }
+
+    #[test]
+    fn test_normalize_flip_value_flat_format() {
+        // Old COFL format: itemName/startingBid already at top level (no auction nesting)
+        let json = serde_json::json!({
+            "itemName": "§dWithered Giant's Sword §6✪✪✪✪✪",
+            "startingBid": 100000000,
+            "target": 111164880,
+            "finder": "SNIPER_MEDIAN",
+            "profitPerc": 7.0
+        });
+
+        let normalized = normalize_flip_value(json);
+        let flip: Flip = serde_json::from_value(normalized).expect("should parse");
+
+        assert_eq!(flip.item_name, "§dWithered Giant's Sword §6✪✪✪✪✪");
+        assert_eq!(flip.starting_bid, 100000000);
+        assert_eq!(flip.uuid, None);
+    }
+
+    #[test]
+    fn test_normalize_flip_value_does_not_overwrite_top_level() {
+        // When itemName already exists at top level, auction.itemName should not overwrite it
+        let json = serde_json::json!({
+            "id": "abc123",
+            "itemName": "Top Level Item",
+            "startingBid": 5000000,
+            "auction": {
+                "itemName": "Nested Item",
+                "startingBid": 9999999
+            },
+            "target": 10000000,
+            "finder": "SNIPER"
+        });
+
+        let normalized = normalize_flip_value(json);
+        let flip: Flip = serde_json::from_value(normalized).expect("should parse");
+
+        assert_eq!(flip.item_name, "Top Level Item");
+        assert_eq!(flip.starting_bid, 5000000);
+        assert_eq!(flip.uuid.as_deref(), Some("abc123"));
     }
 }
