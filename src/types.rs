@@ -60,6 +60,8 @@ pub enum BotState {
     Selling,
     Claiming,
     GracePeriod,
+    ClaimingPurchased,
+    ClaimingSold,
 }
 
 impl BotState {
@@ -115,6 +117,7 @@ pub enum CommandType {
         message: String,
     },
     ClaimSoldItem,
+    ClaimPurchasedItem,
     CheckCookie,
     DiscoverOrders,
     ExecuteOrders,

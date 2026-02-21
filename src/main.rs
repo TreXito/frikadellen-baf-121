@@ -133,6 +133,8 @@ async fn main() -> Result<()> {
     let bot_client_clone = bot_client.clone();
     let ws_client_for_events = ws_client.clone();
     let config_for_events = config.clone();
+    let command_queue_clone = command_queue.clone();
+    let ingame_name_for_events = ingame_name.clone();
     tokio::spawn(async move {
         while let Some(event) = bot_client_clone.next_event().await {
             match event {
@@ -170,6 +172,59 @@ async fn main() -> Result<()> {
                         } else {
                             info!("[Startup] Requested bazaar flips");
                         }
+                    }
+                    // Send startup complete webhook
+                    if let Some(ref webhook_url) = config_for_events.webhook_url {
+                        let url = webhook_url.clone();
+                        let name = ingame_name_for_events.clone();
+                        let ah = config_for_events.enable_ah_flips;
+                        let bz = config_for_events.enable_bazaar_flips;
+                        tokio::spawn(async move {
+                            frikadellen_baf::webhook::send_webhook_startup_complete(&name, 0, ah, bz, &url).await;
+                        });
+                    }
+                }
+                frikadellen_baf::bot::BotEvent::ItemPurchased { item_name, price } => {
+                    info!("[Minecraft] You purchased {} for {} coins!", item_name, price);
+                    // Send uploadScoreboard and uploadTab (empty)
+                    let ws = ws_client_for_events.clone();
+                    tokio::spawn(async move {
+                        let scoreboard_msg = serde_json::json!({"type": "uploadScoreboard", "data": "[]"}).to_string();
+                        let tab_msg = serde_json::json!({"type": "uploadTab", "data": "[]"}).to_string();
+                        let _ = ws.send_message(&scoreboard_msg).await;
+                        let _ = ws.send_message(&tab_msg).await;
+                    });
+                    // Queue claim
+                    command_queue_clone.enqueue(
+                        frikadellen_baf::types::CommandType::ClaimPurchasedItem,
+                        frikadellen_baf::types::CommandPriority::High,
+                        false,
+                    );
+                    // Send webhook
+                    if let Some(ref webhook_url) = config_for_events.webhook_url {
+                        let url = webhook_url.clone();
+                        let name = ingame_name_for_events.clone();
+                        let item = item_name.clone();
+                        tokio::spawn(async move {
+                            frikadellen_baf::webhook::send_webhook_item_purchased(&name, &item, price, None, None, &url).await;
+                        });
+                    }
+                }
+                frikadellen_baf::bot::BotEvent::ItemSold { item_name, price, buyer } => {
+                    info!("[Minecraft] {} bought {} for {} coins!", buyer, item_name, price);
+                    command_queue_clone.enqueue(
+                        frikadellen_baf::types::CommandType::ClaimSoldItem,
+                        frikadellen_baf::types::CommandPriority::High,
+                        true,
+                    );
+                    if let Some(ref webhook_url) = config_for_events.webhook_url {
+                        let url = webhook_url.clone();
+                        let name = ingame_name_for_events.clone();
+                        let item = item_name.clone();
+                        let b = buyer.clone();
+                        tokio::spawn(async move {
+                            frikadellen_baf::webhook::send_webhook_item_sold(&name, &item, price, &b, &url).await;
+                        });
                     }
                 }
             }
