@@ -110,6 +110,17 @@ async fn main() -> Result<()> {
 
     info!("WebSocket connected successfully");
 
+    // Send "initialized" webhook notification
+    if let Some(ref webhook_url) = config.webhook_url {
+        let url = webhook_url.clone();
+        let name = ingame_name.clone();
+        let ah = config.enable_ah_flips;
+        let bz = config.enable_bazaar_flips;
+        tokio::spawn(async move {
+            frikadellen_baf::webhook::send_webhook_initialized(&name, ah, bz, &url).await;
+        });
+    }
+
     // Initialize and connect bot client
     info!("Initializing Minecraft bot...");
     info!("Authenticating with Microsoft account...");
@@ -491,9 +502,29 @@ async fn main() -> Result<()> {
                     warn!("Failed to send command to bot: {}", e);
                 }
                 
-                // Wait for command to be processed
-                // TODO: Implement proper completion detection via window events
-                sleep(Duration::from_secs(5)).await;
+                // Wait for command to be processed.
+                // For claim commands, poll until the bot leaves the claiming state (up to 30s).
+                // For other commands, wait a fixed 5 seconds.
+                let is_claim = matches!(
+                    cmd.command_type,
+                    frikadellen_baf::types::CommandType::ClaimPurchasedItem
+                    | frikadellen_baf::types::CommandType::ClaimSoldItem
+                );
+                if is_claim {
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                    loop {
+                        sleep(Duration::from_millis(250)).await;
+                        let s = bot_client_clone.state();
+                        if !matches!(s,
+                            frikadellen_baf::types::BotState::ClaimingPurchased
+                            | frikadellen_baf::types::BotState::ClaimingSold
+                        ) || std::time::Instant::now() >= deadline {
+                            break;
+                        }
+                    }
+                } else {
+                    sleep(Duration::from_secs(5)).await;
+                }
                 
                 command_queue_processor.complete_current();
             }

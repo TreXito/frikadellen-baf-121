@@ -498,13 +498,24 @@ fn find_slot_by_name(slots: &[azalea_inventory::ItemStack], name: &str) -> Optio
     None
 }
 
-/// Returns true if the item is a claimable auction slot:
-/// lore contains "Sold!", "Ended", or "Expired" but NOT "Ends in" or "BIN"
+/// Returns true if the item is a claimable (sold/ended/expired) auction slot.
+/// Matches TypeScript ingameMessageHandler claimableIndicators / activeIndicators.
 fn is_claimable_auction_slot(item: &azalea_inventory::ItemStack) -> bool {
     let lore = get_item_lore_from_slot(item);
+    if lore.is_empty() {
+        return false;
+    }
     let combined = lore.join("\n").to_lowercase();
-    let has_claimable = combined.contains("sold!") || combined.contains("ended") || combined.contains("expired");
-    let is_active = combined.contains("ends in") || combined.contains("buy-it-now") || combined.contains("bin");
+    // Must have at least one claimable indicator (from TypeScript claimableIndicators)
+    let has_claimable = combined.contains("sold!")
+        || combined.contains("ended")
+        || combined.contains("expired")
+        || combined.contains("click to claim")
+        || combined.contains("claim your");
+    // Must NOT have active-auction indicators (from TypeScript activeIndicators)
+    let is_active = combined.contains("ends in")
+        || combined.contains("buy it now")
+        || combined.contains("starting bid");
     has_claimable && !is_active
 }
 
@@ -670,7 +681,6 @@ async fn event_handler(
                         let bot_clone = bot.clone();
                         let bot_state = state.bot_state.clone();
                         let event_tx_startup = state.event_tx.clone();
-                        let ws_client_startup = state.ws_client.clone();
                         tokio::spawn(async move {
                             tokio::time::sleep(tokio::time::Duration::from_secs(ISLAND_TELEPORT_DELAY_SECS)).await;
                             bot_clone.write_chat_packet("/is");
@@ -691,7 +701,7 @@ async fn event_handler(
                             bot_clone.write_chat_packet("/ah");
                             *bot_state.write() = BotState::ClaimingSold;
 
-                            // Wait up to 30 seconds for claiming to finish
+                            // Wait up to 30 seconds for claiming to finish (state → Idle when done)
                             let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
                             loop {
                                 tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
@@ -700,20 +710,12 @@ async fn event_handler(
                                     break;
                                 }
                             }
-
-                            // Step 4: Send getbazaarflips, go idle, emit StartupComplete
-                            info!("[Startup] Step 4: Requesting bazaar flips...");
-                            if let Some(ws) = &ws_client_startup {
-                                let msg = serde_json::json!({
-                                    "type": "getbazaarflips",
-                                    "data": serde_json::to_string("").unwrap_or_default()
-                                }).to_string();
-                                let ws_clone = ws.clone();
-                                let _ = ws_clone.send_message(&msg).await;
-                            }
-
-                            info!("[Startup] Startup complete - bot is ready to flip!");
+                            // Ensure we're in Idle for step 4
                             *bot_state.write() = BotState::Idle;
+
+                            // Step 4: Emit StartupComplete — main.rs will request bazaar flips
+                            // and send the startup webhook from there.
+                            info!("[Startup] Startup complete - bot is ready to flip!");
                             let _ = event_tx_startup.send(BotEvent::StartupComplete);
                         });
                     }
@@ -1043,16 +1045,20 @@ async fn handle_window_interaction(
         BotState::ClaimingPurchased => {
             if window_title.contains("Auction House") {
                 info!("[ClaimPurchased] Auction House opened - clicking Your Bids (slot 13)");
+                // Small delay to let ContainerSetContent populate slots
+                tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
                 click_window_slot(bot, window_id, 13).await;
             } else if window_title.contains("Your Bids") {
                 info!("[ClaimPurchased] Your Bids opened - looking for Claim All or Sold item");
+                // Wait for ContainerSetContent to arrive and populate slots
+                tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
                 let menu = bot.menu();
                 let slots = menu.slots();
                 let mut found = false;
-                // First look for Claim All cauldron
+                // First look for Claim All cauldron (TypeScript: slot.type === 380 and name includes "Claim" and "All")
                 for (i, item) in slots.iter().enumerate() {
                     let name = get_item_display_name_from_slot(item).unwrap_or_default().to_lowercase();
-                    let kind_str = format!("{:?}", item.kind()).to_lowercase();
+                    let kind_str = item.kind().to_string().to_lowercase();
                     if kind_str.contains("cauldron") && name.contains("claim") {
                         info!("[ClaimPurchased] Found Claim All at slot {}", i);
                         click_window_slot(bot, window_id, i as i16).await;
@@ -1062,12 +1068,14 @@ async fn handle_window_interaction(
                     }
                 }
                 if !found {
-                    // Look for a sold item (lore contains "Sold!")
+                    // Look for purchased item with "Status: Sold!" in lore (TypeScript pattern)
                     for (i, item) in slots.iter().enumerate() {
                         let lore = get_item_lore_from_slot(item);
-                        if lore.iter().any(|l| l.contains("Sold!")) {
-                            info!("[ClaimPurchased] Found sold item at slot {}", i);
+                        let lore_lower = lore.join("\n").to_lowercase();
+                        if lore_lower.contains("status:") && lore_lower.contains("sold") {
+                            info!("[ClaimPurchased] Found purchased item with Sold status at slot {}", i);
                             click_window_slot(bot, window_id, i as i16).await;
+                            // Stay in ClaimingPurchased — next window should be BIN Auction View
                             found = true;
                             break;
                         }
@@ -1078,7 +1086,8 @@ async fn handle_window_interaction(
                     }
                 }
             } else if window_title.contains("BIN Auction View") || window_title.contains("Auction View") {
-                info!("[ClaimPurchased] Auction View opened - clicking slot 31");
+                info!("[ClaimPurchased] Auction View opened - clicking slot 31 to collect");
+                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
                 click_window_slot(bot, window_id, 31).await;
                 *state.bot_state.write() = BotState::Idle;
             }
@@ -1086,9 +1095,11 @@ async fn handle_window_interaction(
         BotState::ClaimingSold => {
             if window_title.contains("Auction House") {
                 info!("[ClaimSold] Auction House opened - looking for Manage Auctions");
+                // Wait for ContainerSetContent to arrive and populate slots
+                tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
                 let menu = bot.menu();
                 let slots = menu.slots();
-                if let Some(i) = find_slot_by_name(&slots.to_vec(), "Manage Auctions") {
+                if let Some(i) = find_slot_by_name(&slots, "Manage Auctions") {
                     info!("[ClaimSold] Clicking Manage Auctions at slot {}", i);
                     click_window_slot(bot, window_id, i as i16).await;
                 } else {
@@ -1097,12 +1108,15 @@ async fn handle_window_interaction(
                 }
             } else if window_title.contains("Manage Auctions") {
                 info!("[ClaimSold] Manage Auctions opened - looking for claimable items");
+                // Wait for ContainerSetContent to arrive and populate slots
+                tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
                 let menu = bot.menu();
                 let slots = menu.slots();
                 // Look for Claim All first
-                if let Some(i) = find_slot_by_name(&slots.to_vec(), "Claim All") {
+                if let Some(i) = find_slot_by_name(&slots, "Claim All") {
                     info!("[ClaimSold] Clicking Claim All at slot {}", i);
                     click_window_slot(bot, window_id, i as i16).await;
+                    // Claim All finishes everything — go idle
                     *state.bot_state.write() = BotState::Idle;
                 } else {
                     // Look for first claimable item
@@ -1111,6 +1125,7 @@ async fn handle_window_interaction(
                         if is_claimable_auction_slot(item) {
                             info!("[ClaimSold] Clicking claimable item at slot {}", i);
                             click_window_slot(bot, window_id, i as i16).await;
+                            // Stay in ClaimingSold — Hypixel re-opens Manage Auctions after the detail
                             found = true;
                             break;
                         }
@@ -1122,16 +1137,19 @@ async fn handle_window_interaction(
                 }
             } else if window_title.contains("BIN Auction View") || window_title.contains("Auction View") {
                 info!("[ClaimSold] Auction detail opened - looking for Claim button");
+                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
                 let menu = bot.menu();
                 let slots = menu.slots();
-                if let Some(i) = find_slot_by_name(&slots.to_vec(), "Claim") {
+                if let Some(i) = find_slot_by_name(&slots, "Claim") {
                     info!("[ClaimSold] Clicking Claim at slot {}", i);
                     click_window_slot(bot, window_id, i as i16).await;
                 } else {
                     info!("[ClaimSold] Clicking slot 31");
                     click_window_slot(bot, window_id, 31).await;
                 }
-                *state.bot_state.write() = BotState::Idle;
+                // Stay in ClaimingSold — after claiming, Hypixel re-opens Manage Auctions
+                // so the next OpenScreen event will handle more items.
+                // The startup-deadline or a new /ah command will eventually push us to Idle.
             }
         }
         _ => {
@@ -1197,4 +1215,43 @@ fn extract_viewauction_uuid(msg: &str) -> Option<String> {
     let end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
     let uuid = rest[..end].trim().to_string();
     if uuid.is_empty() { None } else { Some(uuid) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_purchased_message() {
+        let msg = "You purchased Gemstone Fuel Tank for 40,000,000 coins!";
+        let result = parse_purchased_message(msg);
+        assert_eq!(result, Some(("Gemstone Fuel Tank".to_string(), 40_000_000)));
+    }
+
+    #[test]
+    fn test_parse_purchased_message_simple_price() {
+        let msg = "You purchased Dirt for 100 coins!";
+        let result = parse_purchased_message(msg);
+        assert_eq!(result, Some(("Dirt".to_string(), 100)));
+    }
+
+    #[test]
+    fn test_parse_sold_message() {
+        let msg = "[Auction] SomePlayer bought Gemstone Fuel Tank for 45,000,000 coins!";
+        let result = parse_sold_message(msg);
+        assert_eq!(result, Some(("SomePlayer".to_string(), "Gemstone Fuel Tank".to_string(), 45_000_000)));
+    }
+
+    #[test]
+    fn test_extract_viewauction_uuid() {
+        let msg = "click /viewauction 26e353e9556a4b9791f5e03710ddc505 to view";
+        let result = extract_viewauction_uuid(msg);
+        assert_eq!(result, Some("26e353e9556a4b9791f5e03710ddc505".to_string()));
+    }
+
+    #[test]
+    fn test_remove_mc_colors() {
+        assert_eq!(remove_mc_colors("§aHello §r§bWorld"), "Hello World");
+        assert_eq!(remove_mc_colors("No colors"), "No colors");
+    }
 }

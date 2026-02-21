@@ -67,12 +67,11 @@ pub enum BotState {
 impl BotState {
     /// Returns true if the bot can accept flip/trade commands.
     ///
-    /// Matches TypeScript frikadellen-baf behaviour: only the `startup` state
-    /// blocks commands.  `gracePeriod` (and every other state) allows commands,
-    /// exactly like TypeScript where the handlers only check
-    /// `if (bot.state === 'startup')`.
+    /// Matches TypeScript frikadellen-baf behaviour: `startup` and the active
+    /// claiming states block commands (TypeScript: `if (bot.state)` blocks when
+    /// state is non-null, which includes 'startup' and 'claiming').
     pub fn allows_commands(&self) -> bool {
-        !matches!(self, BotState::Startup)
+        !matches!(self, BotState::Startup | BotState::ClaimingPurchased | BotState::ClaimingSold)
     }
 }
 

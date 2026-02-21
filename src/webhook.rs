@@ -1,14 +1,15 @@
+use once_cell::sync::Lazy;
 use tracing::warn;
 
+// Shared HTTP client - reqwest clients are designed to be cloned/reused
+static HTTP_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
+    reqwest::Client::builder()
+        .build()
+        .expect("Failed to build reqwest client")
+});
+
 async fn post_embed(webhook_url: &str, payload: serde_json::Value) {
-    let client = match reqwest::Client::builder().build() {
-        Ok(c) => c,
-        Err(e) => {
-            warn!("[Webhook] Failed to build HTTP client: {}", e);
-            return;
-        }
-    };
-    if let Err(e) = client.post(webhook_url).json(&payload).send().await {
+    if let Err(e) = HTTP_CLIENT.post(webhook_url).json(&payload).send().await {
         warn!("[Webhook] Failed to send webhook: {}", e);
     }
 }
