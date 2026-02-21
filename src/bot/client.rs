@@ -709,35 +709,49 @@ async fn execute_command(
         CommandType::UploadInventory => {
             info!("Uploading inventory to COFL");
             
-            // Get the bot's inventory menu
-            let inventory = bot.menu();
+            // Get the bot's current menu (may be a container window if one is open)
+            let menu = bot.menu();
+            let all_slots = menu.slots();
             
-            // Serialize all slots to match mineflayer's bot.inventory.slots structure
-            // In mineflayer, bot.inventory.slots is an array where null = empty slot
-            // We need to send the exact same structure to COFL
-            let slots_array: Vec<serde_json::Value> = inventory.slots().iter().enumerate().map(|(slot_num, item)| {
-                // Empty slots become null in the JSON
+            // Use player_slots_range() to get only the player's actual inventory slots,
+            // ignoring any open container (e.g. Bazaar GUI) slots.
+            // For a Generic9x6 container: player range is 54..=89 (36 player slots).
+            // For a Player menu: player range is 9..=44 (36 slots, same mineflayer indices).
+            // We map these 36 slots to mineflayer slot indices 9..=44 (main inv + hotbar).
+            let player_range = menu.player_slots_range();
+            let player_range_start = *player_range.start();
+            
+            // Build a 46-slot array (indices 0-45) matching mineflayer's bot.inventory.slots.
+            // Slots 0-8 (crafting/armor) are null; slots 9-44 hold player inventory items;
+            // slot 45 (offhand) is null.
+            let mut slots_array: Vec<serde_json::Value> = vec![serde_json::Value::Null; 46];
+            
+            for (i, item) in all_slots[player_range].iter().enumerate() {
+                // i=0 → mineflayer slot 9 (first main inventory slot)
+                // i=26 → mineflayer slot 35 (last main inventory slot)
+                // i=27 → mineflayer slot 36 (first hotbar slot)
+                // i=35 → mineflayer slot 44 (last hotbar slot)
+                let mineflayer_slot = 9 + i;
+                // Safety: player_slots_range() is always 36 slots (i=0..=35), so this
+                // condition is normally unreachable, but guards against any future menu
+                // changes or unusual window types that might extend the range.
+                if mineflayer_slot > 44 {
+                    break;
+                }
+                
                 if item.is_empty() {
-                    serde_json::Value::Null
+                    slots_array[mineflayer_slot] = serde_json::Value::Null;
                 } else {
-                    // Get the numeric item type ID (protocol ID)
                     let item_type = item.kind() as u32;
-                    
-                    // Serialize ItemStack to get component data (replaces NBT in 1.21+)
-                    // This includes ExtraAttributes, enchantments, and other SkyBlock data
                     let nbt_data = if let Some(item_data) = item.as_present() {
-                        // Serialize the ItemStackData which includes component_patch
                         match serde_json::to_value(item_data) {
                             Ok(value) => {
-                                // ItemStackData serialization includes count, id, and components fields
-                                // For COFL inventory upload, we only want the components field
-                                // This avoids duplicate count/id fields at the root level
                                 value.as_object()
                                     .and_then(|obj| obj.get("components").cloned())
                                     .unwrap_or(value)
                             }
                             Err(e) => {
-                                warn!("Failed to serialize item component data for slot {}: {}", slot_num, e);
+                                warn!("Failed to serialize item component data for player slot {}: {}", mineflayer_slot, e);
                                 serde_json::Value::Null
                             }
                         }
@@ -745,34 +759,32 @@ async fn execute_command(
                         serde_json::Value::Null
                     };
                     
-                    serde_json::json!({
-                        "type": item_type,  // Numeric item ID for protocol
+                    slots_array[mineflayer_slot] = serde_json::json!({
+                        "type": item_type,
                         "count": item.count(),
                         "metadata": 0,
-                        "nbt": nbt_data,  // Component data serialized as NBT-compatible JSON
+                        "nbt": nbt_data,
                         "name": item.kind().to_string(),
-                        "slot": slot_num
-                    })
+                        "slot": mineflayer_slot
+                    });
                 }
-            }).collect();
+            }
             
-            // Build the inventory object matching mineflayer's Window structure
-            // Must match the Window class from prismarine-windows
-            // This must exactly match bot.inventory structure from mineflayer
-            // For SkyBlock, use "SKYBLOCK_MENU" type to include item data
-            // Note: This bot is specifically designed for Hypixel SkyBlock and auto-joins
-            // SkyBlock servers, so SKYBLOCK_MENU is always appropriate
+            debug!("Uploading player inventory: player_range_start={}, {} player slots mapped to mineflayer 9-44",
+                player_range_start, 36);
+            
+            // Build the inventory object matching mineflayer's bot.inventory (Window) structure.
             let inventory_json = serde_json::json!({
-                "id": 0,  // Player inventory always has window ID 0
-                "type": "SKYBLOCK_MENU",  // SkyBlock-specific type (was "minecraft:inventory")
-                "title": "Inventory",  // Must match mineflayer: "Inventory" not "container.inventory"
+                "id": 0,
+                "type": "SKYBLOCK_MENU",
+                "title": "Inventory",
                 "slots": slots_array,
-                "inventoryStart": 9,  // First inventory slot (after crafting)
-                "inventoryEnd": 45,  // Last inventory slot + 1
-                "hotbarStart": 36,  // First hotbar slot
-                "craftingResultSlot": 0,  // Crafting output slot
-                "requiresConfirmation": true,  // Standard for inventory
-                "selectedItem": serde_json::Value::Null  // No item being held by cursor
+                "inventoryStart": 9,
+                "inventoryEnd": 45,
+                "hotbarStart": 36,
+                "craftingResultSlot": 0,
+                "requiresConfirmation": true,
+                "selectedItem": serde_json::Value::Null
             });
             
             // Send to websocket
