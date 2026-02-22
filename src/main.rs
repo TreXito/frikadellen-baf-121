@@ -110,6 +110,17 @@ async fn main() -> Result<()> {
 
     info!("WebSocket connected successfully");
 
+    // Send "initialized" webhook notification
+    if let Some(ref webhook_url) = config.webhook_url {
+        let url = webhook_url.clone();
+        let name = ingame_name.clone();
+        let ah = config.enable_ah_flips;
+        let bz = config.enable_bazaar_flips;
+        tokio::spawn(async move {
+            frikadellen_baf::webhook::send_webhook_initialized(&name, ah, bz, &url).await;
+        });
+    }
+
     // Initialize and connect bot client
     info!("Initializing Minecraft bot...");
     info!("Authenticating with Microsoft account...");
@@ -133,6 +144,8 @@ async fn main() -> Result<()> {
     let bot_client_clone = bot_client.clone();
     let ws_client_for_events = ws_client.clone();
     let config_for_events = config.clone();
+    let command_queue_clone = command_queue.clone();
+    let ingame_name_for_events = ingame_name.clone();
     tokio::spawn(async move {
         while let Some(event) = bot_client_clone.next_event().await {
             match event {
@@ -170,6 +183,75 @@ async fn main() -> Result<()> {
                         } else {
                             info!("[Startup] Requested bazaar flips");
                         }
+                    }
+                    // Send startup complete webhook
+                    if let Some(ref webhook_url) = config_for_events.webhook_url {
+                        let url = webhook_url.clone();
+                        let name = ingame_name_for_events.clone();
+                        let ah = config_for_events.enable_ah_flips;
+                        let bz = config_for_events.enable_bazaar_flips;
+                        tokio::spawn(async move {
+                            frikadellen_baf::webhook::send_webhook_startup_complete(&name, 0, ah, bz, &url).await;
+                        });
+                    }
+                }
+                frikadellen_baf::bot::BotEvent::ItemPurchased { item_name, price } => {
+                    info!("[Minecraft] You purchased {} for {} coins!", item_name, price);
+                    // Send uploadScoreboard and uploadTab (empty)
+                    let ws = ws_client_for_events.clone();
+                    tokio::spawn(async move {
+                        let scoreboard_msg = serde_json::json!({"type": "uploadScoreboard", "data": "[]"}).to_string();
+                        let tab_msg = serde_json::json!({"type": "uploadTab", "data": "[]"}).to_string();
+                        let _ = ws.send_message(&scoreboard_msg).await;
+                        let _ = ws.send_message(&tab_msg).await;
+                    });
+                    // Queue claim
+                    command_queue_clone.enqueue(
+                        frikadellen_baf::types::CommandType::ClaimPurchasedItem,
+                        frikadellen_baf::types::CommandPriority::High,
+                        false,
+                    );
+                    // Send webhook
+                    if let Some(ref webhook_url) = config_for_events.webhook_url {
+                        let url = webhook_url.clone();
+                        let name = ingame_name_for_events.clone();
+                        let item = item_name.clone();
+                        tokio::spawn(async move {
+                            frikadellen_baf::webhook::send_webhook_item_purchased(&name, &item, price, None, None, &url).await;
+                        });
+                    }
+                }
+                frikadellen_baf::bot::BotEvent::ItemSold { item_name, price, buyer } => {
+                    info!("[Minecraft] {} bought {} for {} coins!", buyer, item_name, price);
+                    command_queue_clone.enqueue(
+                        frikadellen_baf::types::CommandType::ClaimSoldItem,
+                        frikadellen_baf::types::CommandPriority::High,
+                        true,
+                    );
+                    if let Some(ref webhook_url) = config_for_events.webhook_url {
+                        let url = webhook_url.clone();
+                        let name = ingame_name_for_events.clone();
+                        let item = item_name.clone();
+                        let b = buyer.clone();
+                        tokio::spawn(async move {
+                            frikadellen_baf::webhook::send_webhook_item_sold(&name, &item, price, &b, &url).await;
+                        });
+                    }
+                }
+                frikadellen_baf::bot::BotEvent::BazaarOrderPlaced { item_name, amount, price_per_unit, is_buy_order } => {
+                    let order_type = if is_buy_order { "BUY" } else { "SELL" };
+                    info!("[Bazaar] {} order placed: {}x {} @ {:.1} coins/unit",
+                        order_type, amount, item_name, price_per_unit);
+                    if let Some(ref webhook_url) = config_for_events.webhook_url {
+                        let url = webhook_url.clone();
+                        let name = ingame_name_for_events.clone();
+                        let item = item_name.clone();
+                        let total = price_per_unit * amount as f64;
+                        tokio::spawn(async move {
+                            frikadellen_baf::webhook::send_webhook_bazaar_order_placed(
+                                &name, &item, amount, price_per_unit, total, is_buy_order, &url,
+                            ).await;
+                        });
                     }
                 }
             }
@@ -238,7 +320,14 @@ async fn main() -> Result<()> {
                         if bazaar_flip.is_buy_order { "BUY" } else { "SELL" }
                     );
 
-                    // Queue the bazaar command
+                    // Queue the bazaar command.
+                    // Matching TypeScript: SELL orders use HIGH priority (free up inventory),
+                    // BUY orders use NORMAL priority. Both are interruptible by AH flips.
+                    let priority = if bazaar_flip.is_buy_order {
+                        CommandPriority::Normal
+                    } else {
+                        CommandPriority::High
+                    };
                     let command_type = if bazaar_flip.is_buy_order {
                         CommandType::BazaarBuyOrder {
                             item_name: bazaar_flip.item_name.clone(),
@@ -257,7 +346,7 @@ async fn main() -> Result<()> {
 
                     command_queue_clone.enqueue(
                         command_type,
-                        CommandPriority::Normal,
+                        priority,
                         true, // Interruptible by AH flips
                     );
                 }
@@ -436,9 +525,46 @@ async fn main() -> Result<()> {
                     warn!("Failed to send command to bot: {}", e);
                 }
                 
-                // Wait for command to be processed
-                // TODO: Implement proper completion detection via window events
-                sleep(Duration::from_secs(5)).await;
+                // Wait for command to be processed.
+                // For claim commands, poll until the bot leaves the claiming state (up to 30s).
+                // For bazaar commands, poll until the bot leaves the Bazaar state (up to 20s).
+                // For other commands, wait a fixed 5 seconds.
+                let is_claim = matches!(
+                    cmd.command_type,
+                    frikadellen_baf::types::CommandType::ClaimPurchasedItem
+                    | frikadellen_baf::types::CommandType::ClaimSoldItem
+                );
+                let is_bazaar = matches!(
+                    cmd.command_type,
+                    frikadellen_baf::types::CommandType::BazaarBuyOrder { .. }
+                    | frikadellen_baf::types::CommandType::BazaarSellOrder { .. }
+                );
+                if is_claim {
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                    loop {
+                        sleep(Duration::from_millis(250)).await;
+                        let s = bot_client_clone.state();
+                        if !matches!(s,
+                            frikadellen_baf::types::BotState::ClaimingPurchased
+                            | frikadellen_baf::types::BotState::ClaimingSold
+                        ) || std::time::Instant::now() >= deadline {
+                            break;
+                        }
+                    }
+                } else if is_bazaar {
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+                    loop {
+                        sleep(Duration::from_millis(250)).await;
+                        let s = bot_client_clone.state();
+                        if s != frikadellen_baf::types::BotState::Bazaar
+                            || std::time::Instant::now() >= deadline
+                        {
+                            break;
+                        }
+                    }
+                } else {
+                    sleep(Duration::from_secs(5)).await;
+                }
                 
                 command_queue_processor.complete_current();
             }

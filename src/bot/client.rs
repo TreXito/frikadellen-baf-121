@@ -2,6 +2,7 @@ use anyhow::{anyhow, Result};
 use azalea::prelude::*;
 use azalea_protocol::packets::game::{
     ClientboundGamePacket,
+    s_sign_update::ServerboundSignUpdate,
 };
 use azalea_inventory::operations::ClickType;
 use azalea_client::chat::ChatPacket;
@@ -90,6 +91,17 @@ pub enum BotEvent {
     Kicked(String),
     /// Startup workflow completed - bot is ready to accept flips
     StartupComplete,
+    /// Item purchased from AH
+    ItemPurchased { item_name: String, price: u64 },
+    /// Item sold on AH
+    ItemSold { item_name: String, price: u64, buyer: String },
+    /// Bazaar order placed successfully
+    BazaarOrderPlaced {
+        item_name: String,
+        amount: u64,
+        price_per_unit: f64,
+        is_buy_order: bool,
+    },
 }
 
 impl BotClient {
@@ -161,6 +173,13 @@ impl BotClient {
             teleported_to_island: Arc::new(RwLock::new(false)),
             skyblock_join_time: Arc::new(RwLock::new(None)),
             ws_client,
+            claiming_purchased: Arc::new(RwLock::new(false)),
+            claim_sold_uuid: Arc::new(RwLock::new(None)),
+            bazaar_item_name: Arc::new(RwLock::new(String::new())),
+            bazaar_amount: Arc::new(RwLock::new(0)),
+            bazaar_price_per_unit: Arc::new(RwLock::new(0.0)),
+            bazaar_is_buy_order: Arc::new(RwLock::new(true)),
+            bazaar_step: Arc::new(RwLock::new(BazaarStep::Initial)),
         };
         
         // Build and start the client (this blocks until disconnection)
@@ -350,6 +369,19 @@ impl Default for BotClient {
     }
 }
 
+/// Which step of the bazaar order-placement flow the bot is in.
+/// Matches TypeScript's `currentStep` variable in placeBazaarOrder().
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BazaarStep {
+    #[default]
+    Initial,
+    SearchResults,
+    SelectOrderType,
+    SetAmount,
+    SetPrice,
+    Confirm,
+}
+
 /// State type for bot client event handler
 #[derive(Clone, Component)]
 pub struct BotClientState {
@@ -368,6 +400,21 @@ pub struct BotClientState {
     pub skyblock_join_time: Arc<RwLock<Option<tokio::time::Instant>>>,
     /// WebSocket client for sending messages (e.g., inventory uploads)
     pub ws_client: Option<CoflWebSocket>,
+    /// true = claiming purchased item, false = claiming sold item
+    pub claiming_purchased: Arc<RwLock<bool>>,
+    /// UUID for direct ClaimSoldItem flow
+    pub claim_sold_uuid: Arc<RwLock<Option<String>>>,
+    // ---- Bazaar order context (set in execute_command, read in window/sign handlers) ----
+    /// Item name for current bazaar order
+    pub bazaar_item_name: Arc<RwLock<String>>,
+    /// Amount for current bazaar order
+    pub bazaar_amount: Arc<RwLock<u64>>,
+    /// Price per unit for current bazaar order
+    pub bazaar_price_per_unit: Arc<RwLock<f64>>,
+    /// true = buy order, false = sell offer
+    pub bazaar_is_buy_order: Arc<RwLock<bool>>,
+    /// Which step of the bazaar flow we're in
+    pub bazaar_step: Arc<RwLock<BazaarStep>>,
 }
 
 impl Default for BotClientState {
@@ -385,8 +432,133 @@ impl Default for BotClientState {
             teleported_to_island: Arc::new(RwLock::new(false)),
             skyblock_join_time: Arc::new(RwLock::new(None)),
             ws_client: None,
+            claiming_purchased: Arc::new(RwLock::new(false)),
+            claim_sold_uuid: Arc::new(RwLock::new(None)),
+            bazaar_item_name: Arc::new(RwLock::new(String::new())),
+            bazaar_amount: Arc::new(RwLock::new(0)),
+            bazaar_price_per_unit: Arc::new(RwLock::new(0.0)),
+            bazaar_is_buy_order: Arc::new(RwLock::new(true)),
+            bazaar_step: Arc::new(RwLock::new(BazaarStep::Initial)),
         }
     }
+}
+
+/// Remove Minecraft §-prefixed color/format codes from a string
+fn remove_mc_colors(s: &str) -> String {
+    let mut result = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '§' {
+            chars.next(); // skip the code character
+        } else {
+            result.push(c);
+        }
+    }
+    result
+}
+
+/// Get the display name of an item slot as a plain string (no color codes)
+fn get_item_display_name_from_slot(item: &azalea_inventory::ItemStack) -> Option<String> {
+    if let Some(item_data) = item.as_present() {
+        if let Ok(value) = serde_json::to_value(item_data) {
+            // Try components["minecraft:custom_name"]
+            if let Some(name_val) = value
+                .get("components")
+                .and_then(|c| c.get("minecraft:custom_name"))
+            {
+                let raw = if name_val.is_string() {
+                    name_val.as_str().unwrap_or("").to_string()
+                } else {
+                    name_val.to_string()
+                };
+                // The name may be a JSON chat component string like {"text":"..."}
+                let plain = if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&raw) {
+                    extract_text_from_chat_component(&json_val)
+                } else {
+                    remove_mc_colors(&raw)
+                };
+                return Some(plain);
+            }
+        }
+    }
+    None
+}
+
+/// Recursively extract plain text from an Azalea/Minecraft chat component
+fn extract_text_from_chat_component(val: &serde_json::Value) -> String {
+    let mut result = String::new();
+    if let Some(text) = val.get("text").and_then(|v| v.as_str()) {
+        result.push_str(text);
+    }
+    if let Some(extra) = val.get("extra").and_then(|v| v.as_array()) {
+        for part in extra {
+            result.push_str(&extract_text_from_chat_component(part));
+        }
+    }
+    remove_mc_colors(&result)
+}
+
+/// Get lore lines from an item slot as plain strings (no color codes)
+fn get_item_lore_from_slot(item: &azalea_inventory::ItemStack) -> Vec<String> {
+    let mut lore_lines = Vec::new();
+    if let Some(item_data) = item.as_present() {
+        if let Ok(value) = serde_json::to_value(item_data) {
+            if let Some(lore_arr) = value
+                .get("components")
+                .and_then(|c| c.get("minecraft:lore"))
+                .and_then(|l| l.as_array())
+            {
+                for entry in lore_arr {
+                    let raw = if entry.is_string() {
+                        entry.as_str().unwrap_or("").to_string()
+                    } else {
+                        entry.to_string()
+                    };
+                    let plain = if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&raw) {
+                        extract_text_from_chat_component(&json_val)
+                    } else {
+                        remove_mc_colors(&raw)
+                    };
+                    lore_lines.push(plain);
+                }
+            }
+        }
+    }
+    lore_lines
+}
+
+/// Find the first slot index matching the given name (case-insensitive)
+fn find_slot_by_name(slots: &[azalea_inventory::ItemStack], name: &str) -> Option<usize> {
+    let name_lower = name.to_lowercase();
+    for (i, item) in slots.iter().enumerate() {
+        if let Some(display) = get_item_display_name_from_slot(item) {
+            if display.to_lowercase().contains(&name_lower) {
+                return Some(i);
+            }
+        }
+    }
+    None
+}
+
+/// Returns true if the item is a claimable (sold/ended/expired) auction slot.
+/// Matches TypeScript ingameMessageHandler claimableIndicators / activeIndicators.
+fn is_claimable_auction_slot(item: &azalea_inventory::ItemStack) -> bool {
+    let lore = get_item_lore_from_slot(item);
+    if lore.is_empty() {
+        return false;
+    }
+    let combined = lore.join("\n").to_lowercase();
+    // Must have at least one claimable indicator (from TypeScript claimableIndicators)
+    let has_claimable = combined.contains("sold!")
+        || combined.contains("ended")
+        || combined.contains("expired")
+        || combined.contains("click to claim")
+        || combined.contains("claim your");
+    // Must NOT have active-auction indicators (from TypeScript activeIndicators)
+    let is_active = combined.contains("ends in")
+        || combined.contains("buy it now")
+        || combined.contains("starting bid");
+    has_claimable && !is_active
 }
 
 /// Handle events from the Azalea client
@@ -491,6 +663,24 @@ async fn event_handler(
             if state.event_tx.send(BotEvent::ChatMessage(message.clone())).is_err() {
                 debug!("Failed to send ChatMessage event - receiver dropped");
             }
+
+            // Detect purchase/sold messages and emit events
+            let clean_message = crate::bot::handlers::BotEventHandlers::remove_color_codes(&message);
+
+            if clean_message.contains("You purchased") && clean_message.contains("coins!") {
+                // "You purchased <item> for <price> coins!"
+                if let Some((item_name, price)) = parse_purchased_message(&clean_message) {
+                    let _ = state.event_tx.send(BotEvent::ItemPurchased { item_name, price });
+                }
+            } else if clean_message.contains("[Auction]") && clean_message.contains("bought") && clean_message.contains("for") && clean_message.contains("coins") {
+                // "[Auction] <buyer> bought <item> for <price> coins"
+                if let Some((buyer, item_name, price)) = parse_sold_message(&clean_message) {
+                    // Extract UUID if present
+                    let uuid = extract_viewauction_uuid(&clean_message);
+                    *state.claim_sold_uuid.write() = uuid;
+                    let _ = state.event_tx.send(BotEvent::ItemSold { item_name, price, buyer });
+                }
+            }
             
             // Check if we've teleported to island yet
             let teleported = *state.teleported_to_island.read();
@@ -502,22 +692,14 @@ async fn event_handler(
                     // Check for timeout (if we've been waiting too long, try anyway)
                     let should_timeout = join_time.elapsed() > tokio::time::Duration::from_secs(SKYBLOCK_JOIN_TIMEOUT_SECS);
                     
-                    // Strip Minecraft color codes before checking for SkyBlock join messages
-                    // Hypixel uses §-prefixed color codes (e.g. §aWelcome to Hypixel SkyBlock!)
-                    let clean_message = crate::bot::handlers::BotEventHandlers::remove_color_codes(&message);
-                    
                     // Check if message is a SkyBlock join confirmation
                     let skyblock_detected = {
-                        // Primary welcome message - use starts_with after stripping color codes
                         if clean_message.starts_with("Welcome to Hypixel SkyBlock") {
                             true
                         }
-                        // Profile selection messages like "[Profile] You are currently on: Your Island"
                         else if clean_message.starts_with("[Profile]") && clean_message.contains("currently") {
                             true
                         }
-                        // Catch any other system messages about SKYBLOCK profile
-                        // Convert to uppercase once for case-insensitive comparison
                         else if clean_message.starts_with("[") {
                             let upper = clean_message.to_uppercase();
                             upper.contains("SKYBLOCK") && upper.contains("PROFILE")
@@ -537,7 +719,7 @@ async fn event_handler(
                             info!("Detected SkyBlock join - teleporting to island...");
                         }
                         
-                        // Spawn a task to handle teleportation (non-blocking)
+                        // Spawn a task to handle teleportation and startup workflow (non-blocking)
                         let bot_clone = bot.clone();
                         let bot_state = state.bot_state.clone();
                         let event_tx_startup = state.event_tx.clone();
@@ -547,10 +729,35 @@ async fn event_handler(
                             
                             // Wait for teleport to complete
                             tokio::time::sleep(tokio::time::Duration::from_secs(TELEPORT_COMPLETION_WAIT_SECS)).await;
+
+                            // === Startup Workflow ===
+                            *bot_state.write() = BotState::Startup;
+                            info!("╔══════════════════════════════════════╗");
+                            info!("║        BAF Startup Workflow          ║");
+                            info!("╚══════════════════════════════════════╝");
+                            info!("[Startup] Step 1: Checking cookie... (skipped)");
+                            info!("[Startup] Step 2: Managing bazaar orders... (skipped)");
                             
-                            // Now ready to process commands
-                            info!("Bot initialization complete - ready to flip!");
+                            // Step 3: Claim sold items
+                            info!("[Startup] Step 3: Claiming sold items...");
+                            bot_clone.write_chat_packet("/ah");
+                            *bot_state.write() = BotState::ClaimingSold;
+
+                            // Wait up to 30 seconds for claiming to finish (state → Idle when done)
+                            let deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(30);
+                            loop {
+                                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                                let cur = *bot_state.read();
+                                if cur == BotState::Idle || tokio::time::Instant::now() >= deadline {
+                                    break;
+                                }
+                            }
+                            // Ensure we're in Idle for step 4
                             *bot_state.write() = BotState::Idle;
+
+                            // Step 4: Emit StartupComplete — main.rs will request bazaar flips
+                            // and send the startup webhook from there.
+                            info!("[Startup] Startup complete - bot is ready to flip!");
                             let _ = event_tx_startup.send(BotEvent::StartupComplete);
                         });
                     }
@@ -596,6 +803,47 @@ async fn event_handler(
                 ClientboundGamePacket::ContainerSetContent(_content) => {
                     // Track full inventory updates
                     debug!("Inventory content updated");
+                }
+
+                ClientboundGamePacket::OpenSignEditor(pkt) => {
+                    // Hypixel sends this when the bot clicks "Custom Amount" or "Custom Price"
+                    // in the bazaar GUI. We respond immediately with ServerboundSignUpdate to
+                    // write the desired value (matching TypeScript's bot._client.once('open_sign_entity'))
+                    let bot_state = *state.bot_state.read();
+                    if bot_state == BotState::Bazaar {
+                        let step = *state.bazaar_step.read();
+                        let pos = pkt.pos;
+                        let is_front = pkt.is_front_text;
+
+                        let text_to_write = match step {
+                            BazaarStep::SetAmount => {
+                                let amount = *state.bazaar_amount.read();
+                                info!("[Bazaar] Sign opened for amount — writing: {}", amount);
+                                amount.to_string()
+                            }
+                            BazaarStep::SetPrice => {
+                                let price = *state.bazaar_price_per_unit.read();
+                                info!("[Bazaar] Sign opened for price — writing: {}", price);
+                                price.to_string()
+                            }
+                            _ => {
+                                warn!("[Bazaar] Unexpected sign opened at step {:?}", step);
+                                return Ok(());
+                            }
+                        };
+
+                        let packet = ServerboundSignUpdate {
+                            pos,
+                            is_front_text: is_front,
+                            lines: [
+                                text_to_write,
+                                String::new(),
+                                String::new(),
+                                String::new(),
+                            ],
+                        };
+                        bot.write_packet(packet);
+                    }
                 }
                 
                 _ => {}
@@ -649,26 +897,44 @@ async fn execute_command(
             // Set state to purchasing
             *state.bot_state.write() = BotState::Purchasing;
         }
-        CommandType::BazaarBuyOrder { item_name, item_tag, amount: _, price_per_unit: _ } => {
-            // Send /bz command with item tag or name
-            let search_term = item_tag.as_ref().unwrap_or(item_name);
-            let chat_command = format!("/bz {}", search_term);
-            
-            info!("Sending bazaar buy order command: {}", chat_command);
-            bot.write_chat_packet(&chat_command);
-            
-            // Set state to bazaar
+        CommandType::BazaarBuyOrder { item_name, item_tag, amount, price_per_unit } => {
+            // Store order context so window/sign handlers can use it
+            *state.bazaar_item_name.write() = item_name.clone();
+            *state.bazaar_amount.write() = *amount;
+            *state.bazaar_price_per_unit.write() = *price_per_unit;
+            *state.bazaar_is_buy_order.write() = true;
+            *state.bazaar_step.write() = BazaarStep::Initial;
+
+            // Use itemTag when available (skips search results page), else title-case itemName
+            let search_term = item_tag.as_ref().map(|s| s.as_str())
+                .unwrap_or_else(|| item_name.as_str());
+            let cmd = if item_tag.is_some() {
+                format!("/bz {}", search_term)
+            } else {
+                format!("/bz {}", crate::utils::to_title_case(search_term))
+            };
+            info!("Sending bazaar buy order command: {}", cmd);
+            bot.write_chat_packet(&cmd);
             *state.bot_state.write() = BotState::Bazaar;
         }
-        CommandType::BazaarSellOrder { item_name, item_tag, amount: _, price_per_unit: _ } => {
-            // Send /bz command with item tag or name
-            let search_term = item_tag.as_ref().unwrap_or(item_name);
-            let chat_command = format!("/bz {}", search_term);
-            
-            info!("Sending bazaar sell order command: {}", chat_command);
-            bot.write_chat_packet(&chat_command);
-            
-            // Set state to bazaar
+        CommandType::BazaarSellOrder { item_name, item_tag, amount, price_per_unit } => {
+            // Store order context so window/sign handlers can use it
+            *state.bazaar_item_name.write() = item_name.clone();
+            *state.bazaar_amount.write() = *amount;
+            *state.bazaar_price_per_unit.write() = *price_per_unit;
+            *state.bazaar_is_buy_order.write() = false;
+            *state.bazaar_step.write() = BazaarStep::Initial;
+
+            // Use itemTag when available, else title-case itemName
+            let search_term = item_tag.as_ref().map(|s| s.as_str())
+                .unwrap_or_else(|| item_name.as_str());
+            let cmd = if item_tag.is_some() {
+                format!("/bz {}", search_term)
+            } else {
+                format!("/bz {}", crate::utils::to_title_case(search_term))
+            };
+            info!("Sending bazaar sell order command: {}", cmd);
+            bot.write_chat_packet(&cmd);
             *state.bot_state.write() = BotState::Bazaar;
         }
         // Advanced command types (matching TypeScript BAF.ts)
@@ -813,8 +1079,26 @@ async fn execute_command(
                 warn!("WebSocket client not available, cannot upload inventory");
             }
         }
-        CommandType::ClaimSoldItem | CommandType::CheckCookie | 
-        CommandType::DiscoverOrders | CommandType::ExecuteOrders => {
+        CommandType::ClaimSoldItem => {
+            *state.claiming_purchased.write() = false;
+            let uuid = state.claim_sold_uuid.read().clone();
+            if let Some(uuid) = uuid {
+                info!("Claiming sold item via direct /viewauction {}", uuid);
+                bot.write_chat_packet(&format!("/viewauction {}", uuid));
+            } else {
+                info!("Claiming sold items via /ah");
+                bot.write_chat_packet("/ah");
+            }
+            *state.bot_state.write() = BotState::ClaimingSold;
+        }
+        CommandType::ClaimPurchasedItem => {
+            *state.claiming_purchased.write() = true;
+            *state.claim_sold_uuid.write() = None;
+            info!("Claiming purchased item via /ah");
+            bot.write_chat_packet("/ah");
+            *state.bot_state.write() = BotState::ClaimingPurchased;
+        }
+        CommandType::CheckCookie | CommandType::DiscoverOrders | CommandType::ExecuteOrders => {
             info!("Command type not yet fully implemented in execute_command: {:?}", command.command_type);
         }
     }
@@ -852,20 +1136,221 @@ async fn handle_window_interaction(
             }
         }
         BotState::Bazaar => {
-            // Handle bazaar windows
-            if window_title.contains("Bazaar") {
-                info!("Bazaar window opened: {}", window_title);
-                // TODO: Implement bazaar order placement flow
-                // This involves:
-                // 1. Clicking the correct item in search results (if search)
-                // 2. Clicking "Create Buy Order" or "Create Sell Offer"
-                // 3. Filling in the amount sign
-                // 4. Filling in the price sign
-                // 5. Clicking confirm buttons
-                
-                // For now, just go back to idle after a delay
-                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+            // Full bazaar order-placement flow matching TypeScript placeBazaarOrder().
+            // Context (item_name, amount, price_per_unit, is_buy_order) was stored in
+            // execute_command when the BazaarBuyOrder / BazaarSellOrder command ran.
+            //
+            // Steps:
+            //  1. Search-results page  ("Bazaar" in title, step == Initial)
+            //     → find the item by name, click it.
+            //  2. Item-detail page  (has "Create Buy Order" / "Create Sell Offer" slot)
+            //     → click the right button.
+            //  3. Amount screen  (has "Custom Amount" slot, buy orders only)
+            //     → click Custom Amount, then write sign.
+            //  4. Price screen   (has "Custom Price" slot)
+            //     → click Custom Price, then write sign.
+            //  5. Confirm screen  (step == SetPrice, no other matching slot)
+            //     → click slot 13.
+            //
+            // Sign writing is handled separately in the OpenSignEditor packet handler below.
+
+            // Wait 300ms for ContainerSetContent to arrive before reading slots
+            tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+
+            let item_name = state.bazaar_item_name.read().clone();
+            let is_buy_order = *state.bazaar_is_buy_order.read();
+            let current_step = *state.bazaar_step.read();
+
+            let menu = bot.menu();
+            let slots = menu.slots();
+
+            info!("[Bazaar] Window: \"{}\" | step: {:?}", window_title, current_step);
+
+            // Step 2: Item-detail page — identified by having the order-creation button.
+            // This MUST be checked before the "Bazaar" title check so that direct-tag
+            // lookups (which go straight to item-detail, no search results) still work.
+            let buy_slot  = find_slot_by_name(&slots, "Create Buy Order");
+            let sell_slot = find_slot_by_name(&slots, "Create Sell Offer");
+            // Only consider a button "found" for this order type
+            let order_button_slot = if is_buy_order { buy_slot } else { sell_slot };
+
+            if order_button_slot.is_some() && current_step != BazaarStep::SelectOrderType {
+                let i = order_button_slot.unwrap();
+                let btn = if is_buy_order { "Create Buy Order" } else { "Create Sell Offer" };
+                info!("[Bazaar] Item detail: clicking \"{}\" at slot {}", btn, i);
+                *state.bazaar_step.write() = BazaarStep::SelectOrderType;
+                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                click_window_slot(bot, window_id, i as i16).await;
+            }
+            // Step 1: Search-results page — "Bazaar" in title, still on Initial step
+            else if window_title.contains("Bazaar") && current_step == BazaarStep::Initial {
+                info!("[Bazaar] Search results: looking for \"{}\"", item_name);
+                *state.bazaar_step.write() = BazaarStep::SearchResults;
+
+                // Find item by name (exact → token → partial, same as TypeScript)
+                let found = find_slot_by_name(&slots, &item_name);
+                match found {
+                    Some(i) => {
+                        info!("[Bazaar] Found item at slot {}", i);
+                        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                        click_window_slot(bot, window_id, i as i16).await;
+                    }
+                    None => {
+                        warn!("[Bazaar] Item \"{}\" not found in search results; going idle", item_name);
+                        *state.bot_state.write() = BotState::Idle;
+                    }
+                }
+            }
+            // Step 3: Amount screen (buy orders only)
+            else if let (Some(i), true) = (find_slot_by_name(&slots, "Custom Amount"),
+                is_buy_order && current_step == BazaarStep::SelectOrderType)
+            {
+                info!("[Bazaar] Amount screen: clicking Custom Amount at slot {}", i);
+                *state.bazaar_step.write() = BazaarStep::SetAmount;
+                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                click_window_slot(bot, window_id, i as i16).await;
+                // Sign response is sent in the OpenSignEditor packet handler
+            }
+            // Step 4: Price screen
+            else if let (Some(i), true) = (find_slot_by_name(&slots, "Custom Price"),
+                current_step == BazaarStep::SelectOrderType || current_step == BazaarStep::SetAmount)
+            {
+                info!("[Bazaar] Price screen: clicking Custom Price at slot {}", i);
+                *state.bazaar_step.write() = BazaarStep::SetPrice;
+                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                click_window_slot(bot, window_id, i as i16).await;
+                // Sign response is sent in the OpenSignEditor packet handler
+            }
+            // Step 5: Confirm screen — anything that opens after SetPrice
+            else if current_step == BazaarStep::SetPrice {
+                info!("[Bazaar] Confirm screen: clicking slot 13");
+                *state.bazaar_step.write() = BazaarStep::Confirm;
+                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                click_window_slot(bot, window_id, 13).await;
+
+                // Order placement complete — emit event and go idle after short wait
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                let item = item_name.clone();
+                let amount = *state.bazaar_amount.read();
+                let price_per_unit = *state.bazaar_price_per_unit.read();
+                let _ = state.event_tx.send(BotEvent::BazaarOrderPlaced {
+                    item_name: item,
+                    amount,
+                    price_per_unit,
+                    is_buy_order,
+                });
+                info!("[Bazaar] ===== ORDER COMPLETE =====");
                 *state.bot_state.write() = BotState::Idle;
+            }
+        }
+        BotState::ClaimingPurchased => {
+            if window_title.contains("Auction House") {
+                info!("[ClaimPurchased] Auction House opened - clicking Your Bids (slot 13)");
+                // Small delay to let ContainerSetContent populate slots
+                tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+                click_window_slot(bot, window_id, 13).await;
+            } else if window_title.contains("Your Bids") {
+                info!("[ClaimPurchased] Your Bids opened - looking for Claim All or Sold item");
+                // Wait for ContainerSetContent to arrive and populate slots
+                tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+                let menu = bot.menu();
+                let slots = menu.slots();
+                let mut found = false;
+                // First look for Claim All cauldron (TypeScript: slot.type === 380 and name includes "Claim" and "All")
+                for (i, item) in slots.iter().enumerate() {
+                    let name = get_item_display_name_from_slot(item).unwrap_or_default().to_lowercase();
+                    let kind_str = item.kind().to_string().to_lowercase();
+                    if kind_str.contains("cauldron") && name.contains("claim") {
+                        info!("[ClaimPurchased] Found Claim All at slot {}", i);
+                        click_window_slot(bot, window_id, i as i16).await;
+                        *state.bot_state.write() = BotState::Idle;
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    // Look for purchased item with "Status: Sold!" in lore (TypeScript pattern)
+                    for (i, item) in slots.iter().enumerate() {
+                        let lore = get_item_lore_from_slot(item);
+                        let lore_lower = lore.join("\n").to_lowercase();
+                        if lore_lower.contains("status:") && lore_lower.contains("sold") {
+                            info!("[ClaimPurchased] Found purchased item with Sold status at slot {}", i);
+                            click_window_slot(bot, window_id, i as i16).await;
+                            // Stay in ClaimingPurchased — next window should be BIN Auction View
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found {
+                        info!("[ClaimPurchased] Nothing to claim, going idle");
+                        *state.bot_state.write() = BotState::Idle;
+                    }
+                }
+            } else if window_title.contains("BIN Auction View") || window_title.contains("Auction View") {
+                info!("[ClaimPurchased] Auction View opened - clicking slot 31 to collect");
+                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                click_window_slot(bot, window_id, 31).await;
+                *state.bot_state.write() = BotState::Idle;
+            }
+        }
+        BotState::ClaimingSold => {
+            if window_title.contains("Auction House") {
+                info!("[ClaimSold] Auction House opened - looking for Manage Auctions");
+                // Wait for ContainerSetContent to arrive and populate slots
+                tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+                let menu = bot.menu();
+                let slots = menu.slots();
+                if let Some(i) = find_slot_by_name(&slots, "Manage Auctions") {
+                    info!("[ClaimSold] Clicking Manage Auctions at slot {}", i);
+                    click_window_slot(bot, window_id, i as i16).await;
+                } else {
+                    warn!("[ClaimSold] Manage Auctions not found, going idle");
+                    *state.bot_state.write() = BotState::Idle;
+                }
+            } else if window_title.contains("Manage Auctions") {
+                info!("[ClaimSold] Manage Auctions opened - looking for claimable items");
+                // Wait for ContainerSetContent to arrive and populate slots
+                tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+                let menu = bot.menu();
+                let slots = menu.slots();
+                // Look for Claim All first
+                if let Some(i) = find_slot_by_name(&slots, "Claim All") {
+                    info!("[ClaimSold] Clicking Claim All at slot {}", i);
+                    click_window_slot(bot, window_id, i as i16).await;
+                    // Claim All finishes everything — go idle
+                    *state.bot_state.write() = BotState::Idle;
+                } else {
+                    // Look for first claimable item
+                    let mut found = false;
+                    for (i, item) in slots.iter().enumerate() {
+                        if is_claimable_auction_slot(item) {
+                            info!("[ClaimSold] Clicking claimable item at slot {}", i);
+                            click_window_slot(bot, window_id, i as i16).await;
+                            // Stay in ClaimingSold — Hypixel re-opens Manage Auctions after the detail
+                            found = true;
+                            break;
+                        }
+                    }
+                    if !found {
+                        info!("[ClaimSold] Nothing to claim, going idle");
+                        *state.bot_state.write() = BotState::Idle;
+                    }
+                }
+            } else if window_title.contains("BIN Auction View") || window_title.contains("Auction View") {
+                info!("[ClaimSold] Auction detail opened - looking for Claim button");
+                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                let menu = bot.menu();
+                let slots = menu.slots();
+                if let Some(i) = find_slot_by_name(&slots, "Claim") {
+                    info!("[ClaimSold] Clicking Claim at slot {}", i);
+                    click_window_slot(bot, window_id, i as i16).await;
+                } else {
+                    info!("[ClaimSold] Clicking slot 31");
+                    click_window_slot(bot, window_id, 31).await;
+                }
+                // Stay in ClaimingSold — after claiming, Hypixel re-opens Manage Auctions
+                // so the next OpenScreen event will handle more items.
+                // The startup-deadline or a new /ah command will eventually push us to Idle.
             }
         }
         _ => {
@@ -893,4 +1378,81 @@ async fn click_window_slot(bot: &Client, window_id: u8, slot: i16) {
     
     bot.write_packet(packet);
     info!("Clicked slot {} in window {}", slot, window_id);
+}
+
+/// Parse "You purchased <item> for <price> coins!" → (item_name, price)
+fn parse_purchased_message(msg: &str) -> Option<(String, u64)> {
+    // "You purchased <item> for <price> coins!"
+    let after = msg.strip_prefix("You purchased ")?;
+    let for_idx = after.rfind(" for ")?;
+    let item_name = after[..for_idx].to_string();
+    let rest = &after[for_idx + 5..];
+    let coins_idx = rest.find(" coins")?;
+    let price_str = rest[..coins_idx].replace(',', "");
+    let price: u64 = price_str.trim().parse().ok()?;
+    Some((item_name, price))
+}
+
+/// Parse "[Auction] <buyer> bought <item> for <price> coins" → (buyer, item_name, price)
+fn parse_sold_message(msg: &str) -> Option<(String, String, u64)> {
+    // "[Auction] <buyer> bought <item> for <price> coins"
+    let after = msg.strip_prefix("[Auction] ")?;
+    let bought_idx = after.find(" bought ")?;
+    let buyer = after[..bought_idx].to_string();
+    let rest = &after[bought_idx + 8..];
+    let for_idx = rest.rfind(" for ")?;
+    let item_name = rest[..for_idx].to_string();
+    let rest2 = &rest[for_idx + 5..];
+    let coins_idx = rest2.find(" coins")?;
+    let price_str = rest2[..coins_idx].replace(',', "");
+    let price: u64 = price_str.trim().parse().ok()?;
+    Some((buyer, item_name, price))
+}
+
+/// Extract UUID from a message that might contain "/viewauction <UUID>"
+fn extract_viewauction_uuid(msg: &str) -> Option<String> {
+    let idx = msg.find("/viewauction ")?;
+    let rest = &msg[idx + 13..];
+    let end = rest.find(|c: char| c.is_whitespace()).unwrap_or(rest.len());
+    let uuid = rest[..end].trim().to_string();
+    if uuid.is_empty() { None } else { Some(uuid) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_purchased_message() {
+        let msg = "You purchased Gemstone Fuel Tank for 40,000,000 coins!";
+        let result = parse_purchased_message(msg);
+        assert_eq!(result, Some(("Gemstone Fuel Tank".to_string(), 40_000_000)));
+    }
+
+    #[test]
+    fn test_parse_purchased_message_simple_price() {
+        let msg = "You purchased Dirt for 100 coins!";
+        let result = parse_purchased_message(msg);
+        assert_eq!(result, Some(("Dirt".to_string(), 100)));
+    }
+
+    #[test]
+    fn test_parse_sold_message() {
+        let msg = "[Auction] SomePlayer bought Gemstone Fuel Tank for 45,000,000 coins!";
+        let result = parse_sold_message(msg);
+        assert_eq!(result, Some(("SomePlayer".to_string(), "Gemstone Fuel Tank".to_string(), 45_000_000)));
+    }
+
+    #[test]
+    fn test_extract_viewauction_uuid() {
+        let msg = "click /viewauction 26e353e9556a4b9791f5e03710ddc505 to view";
+        let result = extract_viewauction_uuid(msg);
+        assert_eq!(result, Some("26e353e9556a4b9791f5e03710ddc505".to_string()));
+    }
+
+    #[test]
+    fn test_remove_mc_colors() {
+        assert_eq!(remove_mc_colors("§aHello §r§bWorld"), "Hello World");
+        assert_eq!(remove_mc_colors("No colors"), "No colors");
+    }
 }
