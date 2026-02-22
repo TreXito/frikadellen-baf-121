@@ -172,6 +172,19 @@ async fn main() -> Result<()> {
                 }
                 frikadellen_baf::bot::BotEvent::StartupComplete => {
                     info!("[Startup] Startup complete - bot is ready to flip!");
+                    // Upload scoreboard to COFL (with real data matching TypeScript runStartupWorkflow)
+                    {
+                        let scoreboard_lines = bot_client_clone.get_scoreboard_lines();
+                        let ws = ws_client_for_events.clone();
+                        tokio::spawn(async move {
+                            let data_json = serde_json::to_string(&scoreboard_lines).unwrap_or_else(|_| "[]".to_string());
+                            let scoreboard_msg = serde_json::json!({"type": "uploadScoreboard", "data": data_json}).to_string();
+                            let tab_msg = serde_json::json!({"type": "uploadTab", "data": "[]"}).to_string();
+                            let _ = ws.send_message(&scoreboard_msg).await;
+                            let _ = ws.send_message(&tab_msg).await;
+                            info!("[Startup] Uploaded scoreboard ({} lines)", scoreboard_lines.len());
+                        });
+                    }
                     // Request bazaar flips immediately after startup (matching TypeScript runStartupWorkflow)
                     if config_for_events.enable_bazaar_flips {
                         let msg = serde_json::json!({
@@ -197,10 +210,12 @@ async fn main() -> Result<()> {
                 }
                 frikadellen_baf::bot::BotEvent::ItemPurchased { item_name, price } => {
                     info!("[Minecraft] You purchased {} for {} coins!", item_name, price);
-                    // Send uploadScoreboard and uploadTab (empty)
+                    // Send uploadScoreboard (with real data) and uploadTab to COFL
                     let ws = ws_client_for_events.clone();
+                    let scoreboard_lines = bot_client_clone.get_scoreboard_lines();
                     tokio::spawn(async move {
-                        let scoreboard_msg = serde_json::json!({"type": "uploadScoreboard", "data": "[]"}).to_string();
+                        let data_json = serde_json::to_string(&scoreboard_lines).unwrap_or_else(|_| "[]".to_string());
+                        let scoreboard_msg = serde_json::json!({"type": "uploadScoreboard", "data": data_json}).to_string();
                         let tab_msg = serde_json::json!({"type": "uploadTab", "data": "[]"}).to_string();
                         let _ = ws.send_message(&scoreboard_msg).await;
                         let _ = ws.send_message(&tab_msg).await;
@@ -439,15 +454,17 @@ async fn main() -> Result<()> {
                     // Parse the auction data
                     match serde_json::from_str::<serde_json::Value>(&data) {
                         Ok(auction_data) => {
-                            match (
-                                auction_data.get("itemName").and_then(|v| v.as_str()),
-                                auction_data.get("startingBid").and_then(|v| v.as_u64()),
-                                auction_data.get("duration").and_then(|v| v.as_u64()),
-                            ) {
-                                (Some(item), Some(price), Some(duration)) => {
+                            // Field is "price" in COFL protocol (not "startingBid")
+                            let item_raw = auction_data.get("itemName").and_then(|v| v.as_str());
+                            let price = auction_data.get("price").and_then(|v| v.as_u64());
+                            let duration = auction_data.get("duration").and_then(|v| v.as_u64());
+                            match (item_raw, price, duration) {
+                                (Some(item_raw), Some(price), Some(duration)) => {
+                                    // Strip Minecraft color codes (§X) from item name
+                                    let item_name = frikadellen_baf::utils::remove_minecraft_colors(item_raw);
                                     command_queue_clone.enqueue(
                                         CommandType::SellToAuction {
-                                            item_name: item.to_string(),
+                                            item_name,
                                             starting_bid: price,
                                             duration_hours: duration,
                                         },
@@ -456,7 +473,7 @@ async fn main() -> Result<()> {
                                     );
                                 }
                                 _ => {
-                                    warn!("createAuction missing required fields (itemName, startingBid, duration): {}", data);
+                                    warn!("createAuction missing required fields (itemName, price, duration): {}", data);
                                 }
                             }
                         }
@@ -716,6 +733,27 @@ async fn main() -> Result<()> {
                         error!("Failed to send periodic getbazaarflips: {}", e);
                     } else {
                         debug!("[BazaarFlips] Auto-requested bazaar flips (periodic)");
+                    }
+                }
+            }
+        });
+    }
+
+    // Periodic scoreboard upload every 5 seconds (matching TypeScript setInterval purse update)
+    {
+        let ws_client_scoreboard = ws_client.clone();
+        let bot_client_scoreboard = bot_client.clone();
+        tokio::spawn(async move {
+            loop {
+                sleep(Duration::from_secs(5)).await;
+                if bot_client_scoreboard.state().allows_commands() {
+                    let scoreboard_lines = bot_client_scoreboard.get_scoreboard_lines();
+                    if !scoreboard_lines.is_empty() {
+                        let data_json = serde_json::to_string(&scoreboard_lines).unwrap_or_else(|_| "[]".to_string());
+                        let msg = serde_json::json!({"type": "uploadScoreboard", "data": data_json}).to_string();
+                        if let Err(e) = ws_client_scoreboard.send_message(&msg).await {
+                            debug!("Failed to send periodic scoreboard upload: {}", e);
+                        }
                     }
                 }
             }
