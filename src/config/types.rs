@@ -68,6 +68,9 @@ pub struct Config {
     pub webhook_url: Option<String>,
     
     #[serde(default)]
+    pub web_gui_password: Option<String>,
+    
+    #[serde(default)]
     pub accounts: Option<String>,
     
     #[serde(default)]
@@ -173,6 +176,7 @@ impl Default for Config {
             proxy_username: None,
             proxy_password: None,
             webhook_url: None,
+            web_gui_password: None,
             accounts: None,
             auto_switching: None,
             sessions: HashMap::new(),

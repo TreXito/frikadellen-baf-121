@@ -14,21 +14,51 @@ async fn post_embed(webhook_url: &str, payload: serde_json::Value) {
     }
 }
 
+/// Format a number with M/K suffixes matching TypeScript formatNumber()
+fn format_number(n: f64) -> String {
+    if n >= 1_000_000.0 {
+        format!("{:.2}M", n / 1_000_000.0)
+    } else if n >= 1_000.0 {
+        format!("{:.2}K", n / 1_000.0)
+    } else {
+        format!("{:.0}", n)
+    }
+}
+
+/// Sanitize an item name for use as an icon URL path component
+fn sanitize_item_name(name: &str) -> String {
+    name.replace(|c: char| !c.is_alphanumeric() && c != '_', "_")
+}
+
+/// Unix timestamp seconds for Discord relative timestamps
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 pub async fn send_webhook_initialized(
     ingame_name: &str,
     ah_enabled: bool,
     bazaar_enabled: bool,
     webhook_url: &str,
 ) {
+    let description = format!(
+        "AH Flips: {} | Bazaar Flips: {}\n<t:{}:R>",
+        if ah_enabled { "✅" } else { "❌" },
+        if bazaar_enabled { "✅" } else { "❌" },
+        now_unix()
+    );
     let payload = serde_json::json!({
         "embeds": [{
             "title": "✓ Started BAF",
-            "color": 0x00ff00,
-            "fields": [
-                {"name": "Player", "value": ingame_name, "inline": true},
-                {"name": "AH Flips", "value": if ah_enabled { "✓" } else { "✗" }, "inline": true},
-                {"name": "Bazaar Flips", "value": if bazaar_enabled { "✓" } else { "✗" }, "inline": true},
-            ]
+            "description": description,
+            "color": 0x00ff88,
+            "footer": {
+                "text": format!("BAF - {}", ingame_name),
+                "icon_url": format!("https://mc-heads.net/avatar/{}/32.png", ingame_name)
+            }
         }]
     });
     post_embed(webhook_url, payload).await;
@@ -41,16 +71,34 @@ pub async fn send_webhook_startup_complete(
     bazaar_enabled: bool,
     webhook_url: &str,
 ) {
+    let description = format!(
+        "Ready to accept flips!\n\nAH Flips: {}\nBazaar Flips: {}",
+        if ah_enabled { "✅ Enabled" } else { "❌ Disabled" },
+        if bazaar_enabled { "✅ Enabled" } else { "❌ Disabled" }
+    );
     let payload = serde_json::json!({
         "embeds": [{
             "title": "🚀 Startup Workflow Complete",
-            "color": 0x0099ff,
+            "description": description,
+            "color": 0x2ecc71,
             "fields": [
-                {"name": "Player", "value": ingame_name, "inline": true},
-                {"name": "Orders Found", "value": orders_found.to_string(), "inline": true},
-                {"name": "AH Flips", "value": if ah_enabled { "✓" } else { "✗" }, "inline": true},
-                {"name": "Bazaar Flips", "value": if bazaar_enabled { "✓" } else { "✗" }, "inline": true},
-            ]
+                {"name": "1️⃣ Cookie Check", "value": "```✓ Complete```", "inline": true},
+                {
+                    "name": "2️⃣ Order Discovery",
+                    "value": if bazaar_enabled {
+                        format!("```✓ Found {} order(s)```", orders_found)
+                    } else {
+                        "```- Skipped (Bazaar disabled)```".to_string()
+                    },
+                    "inline": true
+                },
+                {"name": "3️⃣ Claim Items", "value": "```✓ Complete```", "inline": true},
+            ],
+            "footer": {
+                "text": format!("BAF - {}", ingame_name),
+                "icon_url": format!("https://mc-heads.net/avatar/{}/32.png", ingame_name)
+            },
+            "timestamp": chrono::Utc::now().to_rfc3339()
         }]
     });
     post_embed(webhook_url, payload).await;
@@ -65,21 +113,39 @@ pub async fn send_webhook_item_purchased(
     webhook_url: &str,
 ) {
     let mut fields = vec![
-        serde_json::json!({"name": "Player", "value": ingame_name, "inline": true}),
-        serde_json::json!({"name": "Item", "value": item_name, "inline": true}),
-        serde_json::json!({"name": "Price", "value": format!("{} coins", price), "inline": true}),
+        serde_json::json!({
+            "name": "💰 Purchase Price",
+            "value": format!("```fix\n{} coins\n```", format_number(price as f64)),
+            "inline": true
+        }),
     ];
     if let Some(t) = target {
-        fields.push(serde_json::json!({"name": "Target", "value": format!("{} coins", t), "inline": true}));
+        fields.push(serde_json::json!({
+            "name": "🎯 Target Price",
+            "value": format!("```fix\n{} coins\n```", format_number(t as f64)),
+            "inline": true
+        }));
     }
     if let Some(p) = profit {
-        fields.push(serde_json::json!({"name": "Profit", "value": format!("{} coins", p), "inline": true}));
+        let sign = if p >= 0 { "+" } else { "" };
+        fields.push(serde_json::json!({
+            "name": "📈 Expected Profit",
+            "value": format!("```diff\n{}{} coins\n```", sign, format_number(p as f64)),
+            "inline": true
+        }));
     }
+    let safe_item = sanitize_item_name(item_name);
     let payload = serde_json::json!({
         "embeds": [{
-            "title": "🛒 Item Purchased",
-            "color": 0xffaa00,
-            "fields": fields
+            "title": "🛒 Item Purchased Successfully",
+            "description": format!("**{}** • <t:{}:R>", item_name, now_unix()),
+            "color": 0x00ff00,
+            "fields": fields,
+            "thumbnail": {"url": format!("https://sky.coflnet.com/static/icon/{}", safe_item)},
+            "footer": {
+                "text": format!("BAF • {}", ingame_name),
+                "icon_url": format!("https://mc-heads.net/avatar/{}/32.png", ingame_name)
+            }
         }]
     });
     post_embed(webhook_url, payload).await;
@@ -92,16 +158,21 @@ pub async fn send_webhook_item_sold(
     buyer: &str,
     webhook_url: &str,
 ) {
+    let safe_item = sanitize_item_name(item_name);
     let payload = serde_json::json!({
         "embeds": [{
             "title": "✅ Item Sold",
-            "color": 0x00ff99,
+            "description": format!("**{}** • <t:{}:R>", item_name, now_unix()),
+            "color": 0x0099ff,
             "fields": [
-                {"name": "Player", "value": ingame_name, "inline": true},
-                {"name": "Item", "value": item_name, "inline": true},
-                {"name": "Price", "value": format!("{} coins", price), "inline": true},
-                {"name": "Buyer", "value": buyer, "inline": true},
-            ]
+                {"name": "👤 Buyer", "value": format!("```\n{}\n```", buyer), "inline": true},
+                {"name": "💵 Sale Price", "value": format!("```fix\n{} coins\n```", format_number(price as f64)), "inline": true},
+            ],
+            "thumbnail": {"url": format!("https://sky.coflnet.com/static/icon/{}", safe_item)},
+            "footer": {
+                "text": format!("BAF • {}", ingame_name),
+                "icon_url": format!("https://mc-heads.net/avatar/{}/32.png", ingame_name)
+            }
         }]
     });
     post_embed(webhook_url, payload).await;
@@ -117,19 +188,25 @@ pub async fn send_webhook_bazaar_order_placed(
     webhook_url: &str,
 ) {
     let order_type = if is_buy_order { "Buy Order" } else { "Sell Offer" };
-    let color: u32 = if is_buy_order { 0x55ff55 } else { 0xff5555 };
+    let order_emoji = if is_buy_order { "🛒" } else { "🏷️" };
+    let color: u32 = if is_buy_order { 0x00cccc } else { 0xff9900 };
+    let safe_item = sanitize_item_name(item_name);
     let payload = serde_json::json!({
         "embeds": [{
-            "title": format!("📦 Bazaar {} Placed", order_type),
+            "title": format!("{} Bazaar {} Placed", order_emoji, order_type),
+            "description": format!("**{}** • <t:{}:R>", item_name, now_unix()),
             "color": color,
             "fields": [
-                {"name": "Player",      "value": ingame_name,                          "inline": true},
-                {"name": "Item",        "value": item_name,                            "inline": true},
-                {"name": "Type",        "value": order_type,                           "inline": true},
-                {"name": "Amount",      "value": format!("{}x", amount),               "inline": true},
-                {"name": "Price/unit",  "value": format!("{:.1} coins", price_per_unit),"inline": true},
-                {"name": "Total",       "value": format!("{:.1} coins", total_price),   "inline": true},
-            ]
+                {"name": "📦 Amount",       "value": format!("```fix\n{}x\n```", amount),                     "inline": true},
+                {"name": "💵 Price/Unit",   "value": format!("```fix\n{} coins\n```", format_number(price_per_unit)), "inline": true},
+                {"name": "💰 Total Price",  "value": format!("```fix\n{} coins\n```", format_number(total_price)),    "inline": true},
+                {"name": "📊 Order Type",   "value": format!("```\n{}\n```", order_type),                     "inline": false},
+            ],
+            "thumbnail": {"url": format!("https://sky.coflnet.com/static/icon/{}", safe_item)},
+            "footer": {
+                "text": format!("BAF • {}", ingame_name),
+                "icon_url": format!("https://mc-heads.net/avatar/{}/32.png", ingame_name)
+            }
         }]
     });
     post_embed(webhook_url, payload).await;

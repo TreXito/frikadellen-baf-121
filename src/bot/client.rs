@@ -2,12 +2,14 @@ use anyhow::{anyhow, Result};
 use azalea::prelude::*;
 use azalea_protocol::packets::game::{
     ClientboundGamePacket,
+    c_set_display_objective::DisplaySlot,
     s_sign_update::ServerboundSignUpdate,
 };
 use azalea_inventory::operations::ClickType;
 use azalea_client::chat::ChatPacket;
 use bevy_app::AppExit;
 use parking_lot::RwLock;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{info, error, debug, warn};
@@ -70,6 +72,10 @@ pub struct BotClient {
     command_tx: mpsc::UnboundedSender<QueuedCommand>,
     /// Command receiver channel (for the event handler to receive commands)
     command_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<QueuedCommand>>>,
+    /// Scoreboard scores shared with BotClientState: objective_name -> (owner -> (display_text, score))
+    scoreboard_scores: Arc<RwLock<HashMap<String, HashMap<String, (String, u32)>>>>,
+    /// Which objective is displayed in the sidebar slot (shared with BotClientState)
+    sidebar_objective: Arc<RwLock<Option<String>>>,
 }
 
 /// Events that can be emitted by the bot
@@ -119,6 +125,8 @@ impl BotClient {
             event_rx: Arc::new(tokio::sync::Mutex::new(event_rx)),
             command_tx,
             command_rx: Arc::new(tokio::sync::Mutex::new(command_rx)),
+            scoreboard_scores: Arc::new(RwLock::new(HashMap::new())),
+            sidebar_objective: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -180,6 +188,8 @@ impl BotClient {
             bazaar_price_per_unit: Arc::new(RwLock::new(0.0)),
             bazaar_is_buy_order: Arc::new(RwLock::new(true)),
             bazaar_step: Arc::new(RwLock::new(BazaarStep::Initial)),
+            scoreboard_scores: self.scoreboard_scores.clone(),
+            sidebar_objective: self.sidebar_objective.clone(),
         };
         
         // Build and start the client (this blocks until disconnection)
@@ -267,6 +277,30 @@ impl BotClient {
     /// Set the last window ID
     pub fn set_last_window_id(&self, id: u8) {
         *self.last_window_id.write() = id;
+    }
+
+    /// Get the current SkyBlock scoreboard sidebar lines as a JSON-serializable array.
+    ///
+    /// Returns the lines sorted by score (descending), matching the TypeScript
+    /// `bot.scoreboard.sidebar.items.map(item => item.displayName.getText(null).replace(item.name, ''))`.
+    ///
+    /// Returns an empty Vec if the sidebar objective is not yet known.
+    pub fn get_scoreboard_lines(&self) -> Vec<String> {
+        let sidebar = self.sidebar_objective.read();
+        let sidebar_name = match sidebar.as_ref() {
+            Some(name) => name.clone(),
+            None => return Vec::new(),
+        };
+        drop(sidebar);
+        let scores = self.scoreboard_scores.read();
+        let objective = match scores.get(&sidebar_name) {
+            Some(obj) => obj,
+            None => return Vec::new(),
+        };
+        // Sort entries by score descending (matches mineflayer sidebar order)
+        let mut entries: Vec<(&String, &(String, u32))> = objective.iter().collect();
+        entries.sort_by(|a, b| b.1.1.cmp(&a.1.1));
+        entries.iter().map(|(_, (display, _))| display.clone()).collect()
     }
 
     /// Documentation for sending chat messages
@@ -415,6 +449,10 @@ pub struct BotClientState {
     pub bazaar_is_buy_order: Arc<RwLock<bool>>,
     /// Which step of the bazaar flow we're in
     pub bazaar_step: Arc<RwLock<BazaarStep>>,
+    /// Scoreboard scores: objective_name -> (owner -> (display_text, score))
+    pub scoreboard_scores: Arc<RwLock<HashMap<String, HashMap<String, (String, u32)>>>>,
+    /// Which objective is currently displayed in the sidebar slot
+    pub sidebar_objective: Arc<RwLock<Option<String>>>,
 }
 
 impl Default for BotClientState {
@@ -439,6 +477,8 @@ impl Default for BotClientState {
             bazaar_price_per_unit: Arc::new(RwLock::new(0.0)),
             bazaar_is_buy_order: Arc::new(RwLock::new(true)),
             bazaar_step: Arc::new(RwLock::new(BazaarStep::Initial)),
+            scoreboard_scores: Arc::new(RwLock::new(HashMap::new())),
+            sidebar_objective: Arc::new(RwLock::new(None)),
         }
     }
 }
@@ -843,6 +883,47 @@ async fn event_handler(
                             ],
                         };
                         bot.write_packet(packet);
+                    }
+                }
+
+                // ---- Scoreboard packets ----
+                // Track scoreboard data from Hypixel SkyBlock sidebar.
+                // The sidebar contains player purse, stats, etc. which COFL uses
+                // to validate flip eligibility (e.g. purse check before buying).
+
+                ClientboundGamePacket::SetDisplayObjective(pkt) => {
+                    // Slot 1 = sidebar
+                    if matches!(pkt.slot, DisplaySlot::Sidebar) {
+                        *state.sidebar_objective.write() = Some(pkt.objective_name.clone());
+                        debug!("[Scoreboard] Sidebar objective set to: {}", pkt.objective_name);
+                    }
+                }
+
+                ClientboundGamePacket::SetScore(pkt) => {
+                    // Store score entry: objective -> owner -> (display, score)
+                    let display_text = pkt.display
+                        .as_ref()
+                        .map(|d| d.to_string())
+                        .unwrap_or_default();
+                    state.scoreboard_scores
+                        .write()
+                        .entry(pkt.objective_name.clone())
+                        .or_default()
+                        .insert(pkt.owner.clone(), (display_text, pkt.score));
+                }
+
+                ClientboundGamePacket::ResetScore(pkt) => {
+                    // Remove a score entry
+                    let mut scores = state.scoreboard_scores.write();
+                    if let Some(obj_name) = &pkt.objective_name {
+                        if let Some(objective) = scores.get_mut(obj_name.as_str()) {
+                            objective.remove(&pkt.owner);
+                        }
+                    } else {
+                        // Remove from all objectives
+                        for objective in scores.values_mut() {
+                            objective.remove(&pkt.owner);
+                        }
                     }
                 }
                 
