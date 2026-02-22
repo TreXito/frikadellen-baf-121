@@ -106,3 +106,31 @@ pub async fn send_webhook_item_sold(
     });
     post_embed(webhook_url, payload).await;
 }
+
+pub async fn send_webhook_bazaar_order_placed(
+    ingame_name: &str,
+    item_name: &str,
+    amount: u64,
+    price_per_unit: f64,
+    total_price: f64,
+    is_buy_order: bool,
+    webhook_url: &str,
+) {
+    let order_type = if is_buy_order { "Buy Order" } else { "Sell Offer" };
+    let color: u32 = if is_buy_order { 0x55ff55 } else { 0xff5555 };
+    let payload = serde_json::json!({
+        "embeds": [{
+            "title": format!("📦 Bazaar {} Placed", order_type),
+            "color": color,
+            "fields": [
+                {"name": "Player",      "value": ingame_name,                          "inline": true},
+                {"name": "Item",        "value": item_name,                            "inline": true},
+                {"name": "Type",        "value": order_type,                           "inline": true},
+                {"name": "Amount",      "value": format!("{}x", amount),               "inline": true},
+                {"name": "Price/unit",  "value": format!("{:.1} coins", price_per_unit),"inline": true},
+                {"name": "Total",       "value": format!("{:.1} coins", total_price),   "inline": true},
+            ]
+        }]
+    });
+    post_embed(webhook_url, payload).await;
+}

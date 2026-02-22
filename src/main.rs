@@ -238,6 +238,22 @@ async fn main() -> Result<()> {
                         });
                     }
                 }
+                frikadellen_baf::bot::BotEvent::BazaarOrderPlaced { item_name, amount, price_per_unit, is_buy_order } => {
+                    let order_type = if is_buy_order { "BUY" } else { "SELL" };
+                    info!("[Bazaar] {} order placed: {}x {} @ {:.1} coins/unit",
+                        order_type, amount, item_name, price_per_unit);
+                    if let Some(ref webhook_url) = config_for_events.webhook_url {
+                        let url = webhook_url.clone();
+                        let name = ingame_name_for_events.clone();
+                        let item = item_name.clone();
+                        let total = price_per_unit * amount as f64;
+                        tokio::spawn(async move {
+                            frikadellen_baf::webhook::send_webhook_bazaar_order_placed(
+                                &name, &item, amount, price_per_unit, total, is_buy_order, &url,
+                            ).await;
+                        });
+                    }
+                }
             }
         }
     });
@@ -304,7 +320,14 @@ async fn main() -> Result<()> {
                         if bazaar_flip.is_buy_order { "BUY" } else { "SELL" }
                     );
 
-                    // Queue the bazaar command
+                    // Queue the bazaar command.
+                    // Matching TypeScript: SELL orders use HIGH priority (free up inventory),
+                    // BUY orders use NORMAL priority. Both are interruptible by AH flips.
+                    let priority = if bazaar_flip.is_buy_order {
+                        CommandPriority::Normal
+                    } else {
+                        CommandPriority::High
+                    };
                     let command_type = if bazaar_flip.is_buy_order {
                         CommandType::BazaarBuyOrder {
                             item_name: bazaar_flip.item_name.clone(),
@@ -323,7 +346,7 @@ async fn main() -> Result<()> {
 
                     command_queue_clone.enqueue(
                         command_type,
-                        CommandPriority::Normal,
+                        priority,
                         true, // Interruptible by AH flips
                     );
                 }
@@ -504,11 +527,17 @@ async fn main() -> Result<()> {
                 
                 // Wait for command to be processed.
                 // For claim commands, poll until the bot leaves the claiming state (up to 30s).
+                // For bazaar commands, poll until the bot leaves the Bazaar state (up to 20s).
                 // For other commands, wait a fixed 5 seconds.
                 let is_claim = matches!(
                     cmd.command_type,
                     frikadellen_baf::types::CommandType::ClaimPurchasedItem
                     | frikadellen_baf::types::CommandType::ClaimSoldItem
+                );
+                let is_bazaar = matches!(
+                    cmd.command_type,
+                    frikadellen_baf::types::CommandType::BazaarBuyOrder { .. }
+                    | frikadellen_baf::types::CommandType::BazaarSellOrder { .. }
                 );
                 if is_claim {
                     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
@@ -519,6 +548,17 @@ async fn main() -> Result<()> {
                             frikadellen_baf::types::BotState::ClaimingPurchased
                             | frikadellen_baf::types::BotState::ClaimingSold
                         ) || std::time::Instant::now() >= deadline {
+                            break;
+                        }
+                    }
+                } else if is_bazaar {
+                    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+                    loop {
+                        sleep(Duration::from_millis(250)).await;
+                        let s = bot_client_clone.state();
+                        if s != frikadellen_baf::types::BotState::Bazaar
+                            || std::time::Instant::now() >= deadline
+                        {
                             break;
                         }
                     }

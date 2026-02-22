@@ -2,6 +2,7 @@ use anyhow::{anyhow, Result};
 use azalea::prelude::*;
 use azalea_protocol::packets::game::{
     ClientboundGamePacket,
+    s_sign_update::ServerboundSignUpdate,
 };
 use azalea_inventory::operations::ClickType;
 use azalea_client::chat::ChatPacket;
@@ -94,6 +95,13 @@ pub enum BotEvent {
     ItemPurchased { item_name: String, price: u64 },
     /// Item sold on AH
     ItemSold { item_name: String, price: u64, buyer: String },
+    /// Bazaar order placed successfully
+    BazaarOrderPlaced {
+        item_name: String,
+        amount: u64,
+        price_per_unit: f64,
+        is_buy_order: bool,
+    },
 }
 
 impl BotClient {
@@ -167,6 +175,11 @@ impl BotClient {
             ws_client,
             claiming_purchased: Arc::new(RwLock::new(false)),
             claim_sold_uuid: Arc::new(RwLock::new(None)),
+            bazaar_item_name: Arc::new(RwLock::new(String::new())),
+            bazaar_amount: Arc::new(RwLock::new(0)),
+            bazaar_price_per_unit: Arc::new(RwLock::new(0.0)),
+            bazaar_is_buy_order: Arc::new(RwLock::new(true)),
+            bazaar_step: Arc::new(RwLock::new(BazaarStep::Initial)),
         };
         
         // Build and start the client (this blocks until disconnection)
@@ -356,6 +369,19 @@ impl Default for BotClient {
     }
 }
 
+/// Which step of the bazaar order-placement flow the bot is in.
+/// Matches TypeScript's `currentStep` variable in placeBazaarOrder().
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BazaarStep {
+    #[default]
+    Initial,
+    SearchResults,
+    SelectOrderType,
+    SetAmount,
+    SetPrice,
+    Confirm,
+}
+
 /// State type for bot client event handler
 #[derive(Clone, Component)]
 pub struct BotClientState {
@@ -378,6 +404,17 @@ pub struct BotClientState {
     pub claiming_purchased: Arc<RwLock<bool>>,
     /// UUID for direct ClaimSoldItem flow
     pub claim_sold_uuid: Arc<RwLock<Option<String>>>,
+    // ---- Bazaar order context (set in execute_command, read in window/sign handlers) ----
+    /// Item name for current bazaar order
+    pub bazaar_item_name: Arc<RwLock<String>>,
+    /// Amount for current bazaar order
+    pub bazaar_amount: Arc<RwLock<u64>>,
+    /// Price per unit for current bazaar order
+    pub bazaar_price_per_unit: Arc<RwLock<f64>>,
+    /// true = buy order, false = sell offer
+    pub bazaar_is_buy_order: Arc<RwLock<bool>>,
+    /// Which step of the bazaar flow we're in
+    pub bazaar_step: Arc<RwLock<BazaarStep>>,
 }
 
 impl Default for BotClientState {
@@ -397,6 +434,11 @@ impl Default for BotClientState {
             ws_client: None,
             claiming_purchased: Arc::new(RwLock::new(false)),
             claim_sold_uuid: Arc::new(RwLock::new(None)),
+            bazaar_item_name: Arc::new(RwLock::new(String::new())),
+            bazaar_amount: Arc::new(RwLock::new(0)),
+            bazaar_price_per_unit: Arc::new(RwLock::new(0.0)),
+            bazaar_is_buy_order: Arc::new(RwLock::new(true)),
+            bazaar_step: Arc::new(RwLock::new(BazaarStep::Initial)),
         }
     }
 }
@@ -762,6 +804,47 @@ async fn event_handler(
                     // Track full inventory updates
                     debug!("Inventory content updated");
                 }
+
+                ClientboundGamePacket::OpenSignEditor(pkt) => {
+                    // Hypixel sends this when the bot clicks "Custom Amount" or "Custom Price"
+                    // in the bazaar GUI. We respond immediately with ServerboundSignUpdate to
+                    // write the desired value (matching TypeScript's bot._client.once('open_sign_entity'))
+                    let bot_state = *state.bot_state.read();
+                    if bot_state == BotState::Bazaar {
+                        let step = *state.bazaar_step.read();
+                        let pos = pkt.pos;
+                        let is_front = pkt.is_front_text;
+
+                        let text_to_write = match step {
+                            BazaarStep::SetAmount => {
+                                let amount = *state.bazaar_amount.read();
+                                info!("[Bazaar] Sign opened for amount — writing: {}", amount);
+                                amount.to_string()
+                            }
+                            BazaarStep::SetPrice => {
+                                let price = *state.bazaar_price_per_unit.read();
+                                info!("[Bazaar] Sign opened for price — writing: {}", price);
+                                price.to_string()
+                            }
+                            _ => {
+                                warn!("[Bazaar] Unexpected sign opened at step {:?}", step);
+                                return Ok(());
+                            }
+                        };
+
+                        let packet = ServerboundSignUpdate {
+                            pos,
+                            is_front_text: is_front,
+                            lines: [
+                                text_to_write,
+                                String::new(),
+                                String::new(),
+                                String::new(),
+                            ],
+                        };
+                        bot.write_packet(packet);
+                    }
+                }
                 
                 _ => {}
             }
@@ -814,26 +897,44 @@ async fn execute_command(
             // Set state to purchasing
             *state.bot_state.write() = BotState::Purchasing;
         }
-        CommandType::BazaarBuyOrder { item_name, item_tag, amount: _, price_per_unit: _ } => {
-            // Send /bz command with item tag or name
-            let search_term = item_tag.as_ref().unwrap_or(item_name);
-            let chat_command = format!("/bz {}", search_term);
-            
-            info!("Sending bazaar buy order command: {}", chat_command);
-            bot.write_chat_packet(&chat_command);
-            
-            // Set state to bazaar
+        CommandType::BazaarBuyOrder { item_name, item_tag, amount, price_per_unit } => {
+            // Store order context so window/sign handlers can use it
+            *state.bazaar_item_name.write() = item_name.clone();
+            *state.bazaar_amount.write() = *amount;
+            *state.bazaar_price_per_unit.write() = *price_per_unit;
+            *state.bazaar_is_buy_order.write() = true;
+            *state.bazaar_step.write() = BazaarStep::Initial;
+
+            // Use itemTag when available (skips search results page), else title-case itemName
+            let search_term = item_tag.as_ref().map(|s| s.as_str())
+                .unwrap_or_else(|| item_name.as_str());
+            let cmd = if item_tag.is_some() {
+                format!("/bz {}", search_term)
+            } else {
+                format!("/bz {}", crate::utils::to_title_case(search_term))
+            };
+            info!("Sending bazaar buy order command: {}", cmd);
+            bot.write_chat_packet(&cmd);
             *state.bot_state.write() = BotState::Bazaar;
         }
-        CommandType::BazaarSellOrder { item_name, item_tag, amount: _, price_per_unit: _ } => {
-            // Send /bz command with item tag or name
-            let search_term = item_tag.as_ref().unwrap_or(item_name);
-            let chat_command = format!("/bz {}", search_term);
-            
-            info!("Sending bazaar sell order command: {}", chat_command);
-            bot.write_chat_packet(&chat_command);
-            
-            // Set state to bazaar
+        CommandType::BazaarSellOrder { item_name, item_tag, amount, price_per_unit } => {
+            // Store order context so window/sign handlers can use it
+            *state.bazaar_item_name.write() = item_name.clone();
+            *state.bazaar_amount.write() = *amount;
+            *state.bazaar_price_per_unit.write() = *price_per_unit;
+            *state.bazaar_is_buy_order.write() = false;
+            *state.bazaar_step.write() = BazaarStep::Initial;
+
+            // Use itemTag when available, else title-case itemName
+            let search_term = item_tag.as_ref().map(|s| s.as_str())
+                .unwrap_or_else(|| item_name.as_str());
+            let cmd = if item_tag.is_some() {
+                format!("/bz {}", search_term)
+            } else {
+                format!("/bz {}", crate::utils::to_title_case(search_term))
+            };
+            info!("Sending bazaar sell order command: {}", cmd);
+            bot.write_chat_packet(&cmd);
             *state.bot_state.write() = BotState::Bazaar;
         }
         // Advanced command types (matching TypeScript BAF.ts)
@@ -1035,10 +1136,110 @@ async fn handle_window_interaction(
             }
         }
         BotState::Bazaar => {
-            // Handle bazaar windows
-            if window_title.contains("Bazaar") {
-                info!("Bazaar window opened: {}", window_title);
-                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+            // Full bazaar order-placement flow matching TypeScript placeBazaarOrder().
+            // Context (item_name, amount, price_per_unit, is_buy_order) was stored in
+            // execute_command when the BazaarBuyOrder / BazaarSellOrder command ran.
+            //
+            // Steps:
+            //  1. Search-results page  ("Bazaar" in title, step == Initial)
+            //     → find the item by name, click it.
+            //  2. Item-detail page  (has "Create Buy Order" / "Create Sell Offer" slot)
+            //     → click the right button.
+            //  3. Amount screen  (has "Custom Amount" slot, buy orders only)
+            //     → click Custom Amount, then write sign.
+            //  4. Price screen   (has "Custom Price" slot)
+            //     → click Custom Price, then write sign.
+            //  5. Confirm screen  (step == SetPrice, no other matching slot)
+            //     → click slot 13.
+            //
+            // Sign writing is handled separately in the OpenSignEditor packet handler below.
+
+            // Wait 300ms for ContainerSetContent to arrive before reading slots
+            tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+
+            let item_name = state.bazaar_item_name.read().clone();
+            let is_buy_order = *state.bazaar_is_buy_order.read();
+            let current_step = *state.bazaar_step.read();
+
+            let menu = bot.menu();
+            let slots = menu.slots();
+
+            info!("[Bazaar] Window: \"{}\" | step: {:?}", window_title, current_step);
+
+            // Step 2: Item-detail page — identified by having the order-creation button.
+            // This MUST be checked before the "Bazaar" title check so that direct-tag
+            // lookups (which go straight to item-detail, no search results) still work.
+            let buy_slot  = find_slot_by_name(&slots, "Create Buy Order");
+            let sell_slot = find_slot_by_name(&slots, "Create Sell Offer");
+            // Only consider a button "found" for this order type
+            let order_button_slot = if is_buy_order { buy_slot } else { sell_slot };
+
+            if order_button_slot.is_some() && current_step != BazaarStep::SelectOrderType {
+                let i = order_button_slot.unwrap();
+                let btn = if is_buy_order { "Create Buy Order" } else { "Create Sell Offer" };
+                info!("[Bazaar] Item detail: clicking \"{}\" at slot {}", btn, i);
+                *state.bazaar_step.write() = BazaarStep::SelectOrderType;
+                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                click_window_slot(bot, window_id, i as i16).await;
+            }
+            // Step 1: Search-results page — "Bazaar" in title, still on Initial step
+            else if window_title.contains("Bazaar") && current_step == BazaarStep::Initial {
+                info!("[Bazaar] Search results: looking for \"{}\"", item_name);
+                *state.bazaar_step.write() = BazaarStep::SearchResults;
+
+                // Find item by name (exact → token → partial, same as TypeScript)
+                let found = find_slot_by_name(&slots, &item_name);
+                match found {
+                    Some(i) => {
+                        info!("[Bazaar] Found item at slot {}", i);
+                        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                        click_window_slot(bot, window_id, i as i16).await;
+                    }
+                    None => {
+                        warn!("[Bazaar] Item \"{}\" not found in search results; going idle", item_name);
+                        *state.bot_state.write() = BotState::Idle;
+                    }
+                }
+            }
+            // Step 3: Amount screen (buy orders only)
+            else if let (Some(i), true) = (find_slot_by_name(&slots, "Custom Amount"),
+                is_buy_order && current_step == BazaarStep::SelectOrderType)
+            {
+                info!("[Bazaar] Amount screen: clicking Custom Amount at slot {}", i);
+                *state.bazaar_step.write() = BazaarStep::SetAmount;
+                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                click_window_slot(bot, window_id, i as i16).await;
+                // Sign response is sent in the OpenSignEditor packet handler
+            }
+            // Step 4: Price screen
+            else if let (Some(i), true) = (find_slot_by_name(&slots, "Custom Price"),
+                current_step == BazaarStep::SelectOrderType || current_step == BazaarStep::SetAmount)
+            {
+                info!("[Bazaar] Price screen: clicking Custom Price at slot {}", i);
+                *state.bazaar_step.write() = BazaarStep::SetPrice;
+                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                click_window_slot(bot, window_id, i as i16).await;
+                // Sign response is sent in the OpenSignEditor packet handler
+            }
+            // Step 5: Confirm screen — anything that opens after SetPrice
+            else if current_step == BazaarStep::SetPrice {
+                info!("[Bazaar] Confirm screen: clicking slot 13");
+                *state.bazaar_step.write() = BazaarStep::Confirm;
+                tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+                click_window_slot(bot, window_id, 13).await;
+
+                // Order placement complete — emit event and go idle after short wait
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                let item = item_name.clone();
+                let amount = *state.bazaar_amount.read();
+                let price_per_unit = *state.bazaar_price_per_unit.read();
+                let _ = state.event_tx.send(BotEvent::BazaarOrderPlaced {
+                    item_name: item,
+                    amount,
+                    price_per_unit,
+                    is_buy_order,
+                });
+                info!("[Bazaar] ===== ORDER COMPLETE =====");
                 *state.bot_state.write() = BotState::Idle;
             }
         }
