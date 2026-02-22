@@ -111,8 +111,8 @@ async fn main() -> Result<()> {
     info!("WebSocket connected successfully");
 
     // Send "initialized" webhook notification
-    if let Some(ref webhook_url) = config.webhook_url {
-        let url = webhook_url.clone();
+    if let Some(webhook_url) = config.active_webhook_url() {
+        let url = webhook_url.to_string();
         let name = ingame_name.clone();
         let ah = config.enable_ah_flips;
         let bz = config.enable_bazaar_flips;
@@ -198,8 +198,8 @@ async fn main() -> Result<()> {
                         }
                     }
                     // Send startup complete webhook
-                    if let Some(ref webhook_url) = config_for_events.webhook_url {
-                        let url = webhook_url.clone();
+                    if let Some(webhook_url) = config_for_events.active_webhook_url() {
+                        let url = webhook_url.to_string();
                         let name = ingame_name_for_events.clone();
                         let ah = config_for_events.enable_ah_flips;
                         let bz = config_for_events.enable_bazaar_flips;
@@ -227,8 +227,8 @@ async fn main() -> Result<()> {
                         false,
                     );
                     // Send webhook
-                    if let Some(ref webhook_url) = config_for_events.webhook_url {
-                        let url = webhook_url.clone();
+                    if let Some(webhook_url) = config_for_events.active_webhook_url() {
+                        let url = webhook_url.to_string();
                         let name = ingame_name_for_events.clone();
                         let item = item_name.clone();
                         tokio::spawn(async move {
@@ -243,8 +243,8 @@ async fn main() -> Result<()> {
                         frikadellen_baf::types::CommandPriority::High,
                         true,
                     );
-                    if let Some(ref webhook_url) = config_for_events.webhook_url {
-                        let url = webhook_url.clone();
+                    if let Some(webhook_url) = config_for_events.active_webhook_url() {
+                        let url = webhook_url.to_string();
                         let name = ingame_name_for_events.clone();
                         let item = item_name.clone();
                         let b = buyer.clone();
@@ -257,8 +257,8 @@ async fn main() -> Result<()> {
                     let order_type = if is_buy_order { "BUY" } else { "SELL" };
                     info!("[Bazaar] {} order placed: {}x {} @ {:.1} coins/unit",
                         order_type, amount, item_name, price_per_unit);
-                    if let Some(ref webhook_url) = config_for_events.webhook_url {
-                        let url = webhook_url.clone();
+                    if let Some(webhook_url) = config_for_events.active_webhook_url() {
+                        let url = webhook_url.to_string();
                         let name = ingame_name_for_events.clone();
                         let item = item_name.clone();
                         let total = price_per_unit * amount as f64;
