@@ -175,11 +175,18 @@ impl Default for Config {
             proxy: None,
             proxy_username: None,
             proxy_password: None,
-            webhook_url: None,
+            webhook_url: Some(String::new()),
             web_gui_password: None,
             accounts: None,
             auto_switching: None,
             sessions: HashMap::new(),
         }
+    }
+}
+
+impl Config {
+    /// Returns the webhook URL only if it is non-empty.
+    pub fn active_webhook_url(&self) -> Option<&str> {
+        self.webhook_url.as_deref().filter(|u| !u.is_empty())
     }
 }

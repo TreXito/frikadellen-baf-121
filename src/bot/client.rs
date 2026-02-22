@@ -901,10 +901,12 @@ async fn event_handler(
 
                 ClientboundGamePacket::SetScore(pkt) => {
                     // Store score entry: objective -> owner -> (display, score)
+                    // Hypixel SkyBlock encodes sidebar text in the owner field;
+                    // the optional display override is absent for most entries.
                     let display_text = pkt.display
                         .as_ref()
-                        .map(|d| d.to_string())
-                        .unwrap_or_default();
+                        .and_then(|d| { let s = d.to_string(); if s.is_empty() { None } else { Some(s) } })
+                        .unwrap_or_else(|| pkt.owner.clone());
                     state.scoreboard_scores
                         .write()
                         .entry(pkt.objective_name.clone())
