@@ -3,6 +3,7 @@ use azalea::prelude::*;
 use azalea_protocol::packets::game::{
     ClientboundGamePacket,
     c_set_display_objective::DisplaySlot,
+    c_set_player_team::Method as TeamMethod,
     s_sign_update::ServerboundSignUpdate,
 };
 use azalea_inventory::operations::ClickType;
@@ -76,6 +77,8 @@ pub struct BotClient {
     scoreboard_scores: Arc<RwLock<HashMap<String, HashMap<String, (String, u32)>>>>,
     /// Which objective is displayed in the sidebar slot (shared with BotClientState)
     sidebar_objective: Arc<RwLock<Option<String>>>,
+    /// Team data for scoreboard rendering: team_name -> (prefix, suffix, members)
+    scoreboard_teams: Arc<RwLock<HashMap<String, (String, String, Vec<String>)>>>,
 }
 
 /// Events that can be emitted by the bot
@@ -127,6 +130,7 @@ impl BotClient {
             command_rx: Arc::new(tokio::sync::Mutex::new(command_rx)),
             scoreboard_scores: Arc::new(RwLock::new(HashMap::new())),
             sidebar_objective: Arc::new(RwLock::new(None)),
+            scoreboard_teams: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 
@@ -190,6 +194,7 @@ impl BotClient {
             bazaar_step: Arc::new(RwLock::new(BazaarStep::Initial)),
             scoreboard_scores: self.scoreboard_scores.clone(),
             sidebar_objective: self.sidebar_objective.clone(),
+            scoreboard_teams: self.scoreboard_teams.clone(),
         };
         
         // Build and start the client (this blocks until disconnection)
@@ -300,7 +305,21 @@ impl BotClient {
         // Sort entries by score descending (matches mineflayer sidebar order)
         let mut entries: Vec<(&String, &(String, u32))> = objective.iter().collect();
         entries.sort_by(|a, b| b.1.1.cmp(&a.1.1));
-        entries.iter().map(|(_, (display, _))| display.clone()).collect()
+        // Build a member -> (prefix+suffix) lookup from team data for proper display
+        let teams = self.scoreboard_teams.read();
+        let mut member_display: HashMap<String, String> = HashMap::new();
+        for (_, (prefix, suffix, members)) in teams.iter() {
+            let text = format!("{}{}", prefix, suffix);
+            for member in members {
+                member_display.insert(member.clone(), text.clone());
+            }
+        }
+        drop(teams);
+        entries.iter().map(|(owner, (display, _))| {
+            member_display.get(owner.as_str())
+                .cloned()
+                .unwrap_or_else(|| display.clone())
+        }).collect()
     }
 
     /// Documentation for sending chat messages
@@ -453,6 +472,8 @@ pub struct BotClientState {
     pub scoreboard_scores: Arc<RwLock<HashMap<String, HashMap<String, (String, u32)>>>>,
     /// Which objective is currently displayed in the sidebar slot
     pub sidebar_objective: Arc<RwLock<Option<String>>>,
+    /// Team data for scoreboard rendering: team_name -> (prefix, suffix, members)
+    pub scoreboard_teams: Arc<RwLock<HashMap<String, (String, String, Vec<String>)>>>,
 }
 
 impl Default for BotClientState {
@@ -479,6 +500,7 @@ impl Default for BotClientState {
             bazaar_step: Arc::new(RwLock::new(BazaarStep::Initial)),
             scoreboard_scores: Arc::new(RwLock::new(HashMap::new())),
             sidebar_objective: Arc::new(RwLock::new(None)),
+            scoreboard_teams: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 }
@@ -925,6 +947,45 @@ async fn event_handler(
                         // Remove from all objectives
                         for objective in scores.values_mut() {
                             objective.remove(&pkt.owner);
+                        }
+                    }
+                }
+
+                ClientboundGamePacket::SetPlayerTeam(pkt) => {
+                    // Track team prefix/suffix for scoreboard display.
+                    // Hypixel SkyBlock uses team-based encoding: the team prefix
+                    // contains the actual visible text; the score entry owner (e.g. §y)
+                    // is used only as a unique identifier.
+                    let mut teams = state.scoreboard_teams.write();
+                    match &pkt.method {
+                        TeamMethod::Add((params, members)) => {
+                            let prefix = params.player_prefix.to_string();
+                            let suffix = params.player_suffix.to_string();
+                            teams.insert(pkt.name.clone(), (prefix, suffix, members.clone()));
+                        }
+                        TeamMethod::Remove => {
+                            teams.remove(&pkt.name);
+                        }
+                        TeamMethod::Change(params) => {
+                            let prefix = params.player_prefix.to_string();
+                            let suffix = params.player_suffix.to_string();
+                            let (entry_prefix, entry_suffix, _) = teams
+                                .entry(pkt.name.clone())
+                                .or_insert_with(|| (String::new(), String::new(), Vec::new()));
+                            *entry_prefix = prefix;
+                            *entry_suffix = suffix;
+                        }
+                        TeamMethod::Join(members) => {
+                            let (_, _, entry_members) = teams
+                                .entry(pkt.name.clone())
+                                .or_insert_with(|| (String::new(), String::new(), Vec::new()));
+                            entry_members.extend(members.clone());
+                        }
+                        TeamMethod::Leave(members) => {
+                            if let Some((_, _, entry_members)) = teams.get_mut(&pkt.name) {
+                                let leaving: std::collections::HashSet<&String> = members.iter().collect();
+                                entry_members.retain(|m| !leaving.contains(m));
+                            }
                         }
                     }
                 }
