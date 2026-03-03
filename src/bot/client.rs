@@ -1147,10 +1147,15 @@ async fn event_handler(
                 // 100 ms until the Confirm Purchase window opens — matches
                 // AutoBuy.initBedSpam() which clicks whenever slotName === "gold_nugget".
                 if *state.bot_state.read() == BotState::Purchasing {
+                    if !state.freemoney {
+                        warn!("[AH] Grace period detected but bed timing is disabled; skipping spam clicks");
+                        return Ok(());
+                    }
                     let already_active = state.grace_period_spam_active.swap(true, Ordering::Relaxed);
                     if !already_active {
                         let bot_clone = bot.clone();
                         let window_id = *state.last_window_id.read();
+                        let last_window_id = state.last_window_id.clone();
                         let bot_state = state.bot_state.clone();
                         let spam_flag = state.grace_period_spam_active.clone();
                         info!("[AH] Grace period detected — starting bed spam ({} ms interval)", 100);
@@ -1160,6 +1165,10 @@ async fn event_handler(
                             let mut failed_clicks: usize = 0;
                             loop {
                                 tokio::time::sleep(tokio::time::Duration::from_millis(CLICK_INTERVAL_MS)).await;
+                                if *last_window_id.read() != window_id {
+                                    info!("[AH] Grace period spam: window changed, stopping stale clicks");
+                                    break;
+                                }
                                 let current_kind = {
                                     let menu = bot_clone.menu();
                                     let slots = menu.slots();
@@ -1780,6 +1789,11 @@ async fn handle_window_interaction(
                 };
 
                 if slot_31_kind.contains("bed") {
+                    if !state.freemoney {
+                        warn!("[AH] Bed detected in slot 31 but bed timing is disabled; skipping flip");
+                        *state.bot_state.write() = BotState::Idle;
+                        return;
+                    }
                     // Bed = auction is still in grace period.
                     // Signal the 5-second GUI watchdog to leave this window open.
                     state.bed_timing_active.store(true, Ordering::Relaxed);

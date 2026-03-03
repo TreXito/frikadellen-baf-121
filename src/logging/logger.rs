@@ -22,6 +22,9 @@ pub fn init_logger() -> Result<()> {
                 // Suppress Azalea chunk entity warnings (they're just noise)
                 .add_directive("azalea_world=error".parse().unwrap())
                 .add_directive("azalea_entity=error".parse().unwrap())
+                // Hypixel can send set_equipment slot variant 7 that upstream currently logs as
+                // repeated decode errors; keep this packet target out of default logs.
+                .add_directive("azalea_client::plugins::packet::game=off".parse().unwrap())
         });
 
     // Set up subscriber with both console and file output
