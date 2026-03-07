@@ -102,8 +102,6 @@ pub struct BotClient {
     auto_cookie_hours: Arc<RwLock<u64>>,
     /// Hidden config gate for purchaseAt bed timing mode.
     pub freemoney: bool,
-    /// Interval in milliseconds for grace-period bed/gold_nugget click loops.
-    pub bed_spam_click_delay: u64,
     /// Item name to sell via bazaar "Sell Instantly" when inventory is full
     insta_sell_item: Arc<RwLock<Option<String>>>,
 }
@@ -175,7 +173,6 @@ impl BotClient {
             cached_inventory_json: Arc::new(RwLock::new(None)),
             auto_cookie_hours: Arc::new(RwLock::new(0)),
             freemoney: false,
-            bed_spam_click_delay: 100,
             insta_sell_item: Arc::new(RwLock::new(None)),
         }
     }
@@ -258,7 +255,6 @@ impl BotClient {
             cached_inventory_json: self.cached_inventory_json.clone(),
             auto_cookie_hours: self.auto_cookie_hours.clone(),
             freemoney: self.freemoney,
-            bed_spam_click_delay: self.bed_spam_click_delay,
             cookie_time_secs: Arc::new(RwLock::new(0)),
             cookie_step: Arc::new(RwLock::new(CookieStep::Initial)),
             command_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -651,8 +647,6 @@ pub struct BotClientState {
     pub auto_cookie_hours: Arc<RwLock<u64>>,
     /// Hidden config gate for purchaseAt bed timing mode.
     pub freemoney: bool,
-    /// Interval in milliseconds for grace-period bed/gold_nugget click loops.
-    pub bed_spam_click_delay: u64,
     /// Measured remaining cookie time in seconds (set during CheckingCookie).
     pub cookie_time_secs: Arc<RwLock<u64>>,
     /// Sub-step within the BuyingCookie flow.
@@ -712,7 +706,6 @@ impl Default for BotClientState {
             cached_inventory_json: Arc::new(RwLock::new(None)),
             auto_cookie_hours: Arc::new(RwLock::new(0)),
             freemoney: false,
-            bed_spam_click_delay: 100,
             cookie_time_secs: Arc::new(RwLock::new(0)),
             cookie_step: Arc::new(RwLock::new(CookieStep::Initial)),
             command_generation: Arc::new(std::sync::atomic::AtomicU64::new(0)),
@@ -1161,13 +1154,13 @@ async fn event_handler(
                         let shared_window_id = state.last_window_id.clone();
                         let bot_state = state.bot_state.clone();
                         let spam_flag = state.grace_period_spam_active.clone();
-                        let click_interval_ms = state.bed_spam_click_delay.max(1);
-                        info!("[AH] Grace period detected — starting bed spam ({} ms interval)", click_interval_ms);
+                        info!("[AH] Grace period detected — starting bed spam ({} ms interval)", 100);
                         tokio::spawn(async move {
+                            const CLICK_INTERVAL_MS: u64 = 100;
                             const MAX_FAILED_CLICKS: usize = 5;
                             let mut failed_clicks: usize = 0;
                             loop {
-                                tokio::time::sleep(tokio::time::Duration::from_millis(click_interval_ms)).await;
+                                tokio::time::sleep(tokio::time::Duration::from_millis(CLICK_INTERVAL_MS)).await;
                                 let current_window_id = *shared_window_id.read();
                                 if current_window_id != window_id {
                                     info!(
@@ -1801,12 +1794,13 @@ async fn handle_window_interaction(
                     state.bed_timing_active.store(true, Ordering::Relaxed);
 
                     const PRE_CLICK_LEAD_MS: u64 = 100; // start clicking this many ms before expiry
-                    const BED_TIMING_INTERVAL_MS: u64 = 100;
+                    const BED_SPAM_INTERVAL_MS: u64 = 100;
+                    const BED_TIMING_INTERVAL_MS: u64 = 20;
                     const MAX_FAILED_CLICKS: usize = 5;
                     let click_interval_ms = if state.freemoney {
                         BED_TIMING_INTERVAL_MS
                     } else {
-                        state.bed_spam_click_delay.max(1)
+                        BED_SPAM_INTERVAL_MS
                     };
 
                     if state.freemoney {

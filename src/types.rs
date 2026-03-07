@@ -136,7 +136,7 @@ impl BazaarFlipRecommendation {
 
 #[cfg(test)]
 mod tests {
-    use super::{BotState, Flip};
+    use super::Flip;
 
     #[test]
     fn test_flip_purchase_at_rfc3339_deserialization() {
@@ -162,15 +162,6 @@ mod tests {
         });
         let flip: Flip = serde_json::from_value(value).expect("flip should deserialize");
         assert_eq!(flip.purchase_at_ms, Some(1_772_456_420_000));
-    }
-
-    #[test]
-    fn test_allows_commands_only_when_idle_or_grace_period() {
-        assert!(BotState::Idle.allows_commands());
-        assert!(BotState::GracePeriod.allows_commands());
-        assert!(!BotState::Bazaar.allows_commands());
-        assert!(!BotState::Selling.allows_commands());
-        assert!(!BotState::Purchasing.allows_commands());
     }
 }
 
@@ -199,10 +190,11 @@ pub enum BotState {
 impl BotState {
     /// Returns true if the bot can accept flip/trade commands.
     ///
-    /// Matches TypeScript frikadellen-baf command-queue safety: only "idle"
-    /// style states may accept new commands while GUI workflows are active.
+    /// Matches TypeScript frikadellen-baf behaviour: `startup` and the active
+    /// claiming states block commands (TypeScript: `if (bot.state)` blocks when
+    /// state is non-null, which includes 'startup' and 'claiming').
     pub fn allows_commands(&self) -> bool {
-        matches!(self, BotState::Idle | BotState::GracePeriod)
+        !matches!(self, BotState::Startup | BotState::ClaimingPurchased | BotState::ClaimingSold | BotState::ManagingOrders | BotState::CheckingCookie | BotState::BuyingCookie | BotState::InstaSelling)
     }
 }
 

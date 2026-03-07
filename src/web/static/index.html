@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+<title>Frikadellen BAF — Dashboard</title>
+<style>
+/* ── Reset & Base ───────────────────────────────────────────────── */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:        #0b0e14;
+  --surface:   #111620;
+  --card:      #161c28;
+  --border:    #1e2738;
+  --text:      #c5cdd9;
+  --text-dim:  #6b7a90;
+  --accent:    #e85d3a;
+  --accent2:   #f0a030;
+  --green:     #3ddc84;
+  --red:       #ff5252;
+  --blue:      #6ec1e4;
+  --purple:    #b388ff;
+  --radius:    10px;
+  --glow:      0 0 30px rgba(232,93,58,.12);
+}
+html{font-size:14px}
+body{
+  font-family:'Segoe UI',system-ui,-apple-system,sans-serif;
+  background:var(--bg);
+  color:var(--text);
+  min-height:100vh;
+  overflow-x:hidden;
+}
+a{color:var(--accent);text-decoration:none}
+
+/* ── Ambient background ─────────────────────────────────────────── */
+body::before{
+  content:'';position:fixed;inset:0;z-index:-1;
+  background:
+    radial-gradient(ellipse 80% 50% at 20% 0%,rgba(232,93,58,.08),transparent),
+    radial-gradient(ellipse 60% 40% at 80% 100%,rgba(240,160,48,.06),transparent);
+  pointer-events:none;
+}
+
+/* ── Header ─────────────────────────────────────────────────────── */
+header{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:18px 28px;
+  border-bottom:1px solid var(--border);
+  background:rgba(17,22,32,.85);
+  backdrop-filter:blur(12px);
+  position:sticky;top:0;z-index:100;
+}
+.logo{display:flex;align-items:center;gap:10px;font-size:1.25rem;font-weight:700;letter-spacing:-.02em}
+.logo span{background:linear-gradient(135deg,var(--accent),var(--accent2));-webkit-background-clip:text;-webkit-text-fill-color:transparent}
+.logo small{font-size:.7rem;color:var(--text-dim);font-weight:400;margin-left:4px}
+.header-right{display:flex;align-items:center;gap:16px;font-size:.85rem}
+.status-dot{width:8px;height:8px;border-radius:50%;display:inline-block;margin-right:4px}
+.status-dot.ok{background:var(--green);box-shadow:0 0 6px var(--green)}
+.status-dot.busy{background:var(--accent2);box-shadow:0 0 6px var(--accent2)}
+.status-dot.off{background:var(--red);box-shadow:0 0 6px var(--red)}
+
+/* ── Layout ─────────────────────────────────────────────────────── */
+.container{display:grid;grid-template-columns:1fr 320px;gap:20px;padding:20px 28px;max-width:1600px;margin:0 auto}
+@media(max-width:960px){.container{grid-template-columns:1fr}}
+
+/* ── Cards ──────────────────────────────────────────────────────── */
+.card{
+  background:var(--card);
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  padding:18px 20px;
+  transition:border-color .2s;
+}
+.card:hover{border-color:rgba(232,93,58,.25)}
+.card h2{font-size:.8rem;text-transform:uppercase;letter-spacing:.08em;color:var(--text-dim);margin-bottom:12px;display:flex;align-items:center;gap:6px}
+.card h2 .icon{font-size:1rem}
+
+/* ── Stat Cards Row ─────────────────────────────────────────────── */
+.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:14px;margin-bottom:20px;grid-column:1/-1}
+.stat-card{
+  background:var(--card);border:1px solid var(--border);
+  border-radius:var(--radius);padding:16px 18px;
+  display:flex;flex-direction:column;gap:4px;
+  transition:transform .15s,border-color .2s;
+}
+.stat-card:hover{transform:translateY(-2px);border-color:rgba(232,93,58,.3)}
+.stat-label{font-size:.7rem;text-transform:uppercase;letter-spacing:.06em;color:var(--text-dim)}
+.stat-value{font-size:1.5rem;font-weight:700;letter-spacing:-.02em}
+.stat-value.green{color:var(--green)}
+.stat-value.accent{color:var(--accent)}
+.stat-value.blue{color:var(--blue)}
+.stat-value.yellow{color:var(--accent2)}
+
+/* ── Event Feed ─────────────────────────────────────────────────── */
+.event-feed{max-height:520px;overflow-y:auto;display:flex;flex-direction:column;gap:6px;
+  scrollbar-width:thin;scrollbar-color:var(--border) transparent}
+.event-feed::-webkit-scrollbar{width:5px}
+.event-feed::-webkit-scrollbar-thumb{background:var(--border);border-radius:4px}
+.event{
+  display:flex;align-items:flex-start;gap:10px;
+  padding:8px 10px;border-radius:6px;
+  background:rgba(255,255,255,.015);
+  font-size:.82rem;line-height:1.45;
+  animation:fadeIn .25s ease;
+}
+@keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+.event .time{color:var(--text-dim);font-size:.72rem;white-space:nowrap;min-width:52px;padding-top:1px}
+.event .tag{
+  font-size:.62rem;font-weight:700;text-transform:uppercase;letter-spacing:.05em;
+  padding:2px 6px;border-radius:4px;white-space:nowrap;
+}
+.tag.flip{background:rgba(232,93,58,.15);color:var(--accent)}
+.tag.purchase{background:rgba(61,220,132,.15);color:var(--green)}
+.tag.sold{background:rgba(240,160,48,.15);color:var(--accent2)}
+.tag.chat{background:rgba(110,193,228,.15);color:var(--blue)}
+.tag.bazaar{background:rgba(179,136,255,.15);color:var(--purple)}
+.tag.command{background:rgba(255,255,255,.06);color:var(--text-dim)}
+.tag.system{background:rgba(255,255,255,.06);color:var(--text-dim)}
+.tag.error{background:rgba(255,82,82,.15);color:var(--red)}
+.event .msg{word-break:break-word;flex:1}
+
+/* ── Scoreboard ─────────────────────────────────────────────────── */
+.scoreboard-list{list-style:none;display:flex;flex-direction:column;gap:3px}
+.scoreboard-list li{
+  padding:5px 8px;border-radius:5px;font-size:.8rem;
+  background:rgba(255,255,255,.02);color:var(--text);
+  font-family:'Cascadia Code','Fira Code',monospace;
+}
+
+/* ── Command Input ──────────────────────────────────────────────── */
+.cmd-bar{
+  display:flex;gap:8px;margin-top:10px;
+}
+.cmd-input{
+  flex:1;padding:10px 14px;
+  background:var(--surface);border:1px solid var(--border);
+  border-radius:var(--radius);color:var(--text);
+  font-family:inherit;font-size:.85rem;
+  outline:none;transition:border-color .2s;
+}
+.cmd-input:focus{border-color:var(--accent)}
+.cmd-input::placeholder{color:var(--text-dim)}
+.cmd-btn{
+  padding:10px 18px;border:none;border-radius:var(--radius);
+  background:linear-gradient(135deg,var(--accent),#c94820);
+  color:#fff;font-weight:600;font-size:.82rem;
+  cursor:pointer;transition:opacity .15s,transform .1s;
+  white-space:nowrap;
+}
+.cmd-btn:hover{opacity:.88}
+.cmd-btn:active{transform:scale(.97)}
+
+/* ── Inventory Grid ─────────────────────────────────────────────── */
+.inv-grid{
+  display:grid;grid-template-columns:repeat(9,1fr);gap:4px;
+}
+.inv-slot{
+  aspect-ratio:1;background:rgba(255,255,255,.03);
+  border:1px solid var(--border);border-radius:4px;
+  display:flex;align-items:center;justify-content:center;
+  font-size:.65rem;color:var(--text-dim);
+  position:relative;overflow:hidden;
+  transition:border-color .15s;
+}
+.inv-slot.filled{border-color:rgba(232,93,58,.25);color:var(--text)}
+.inv-slot .count{
+  position:absolute;bottom:1px;right:3px;font-size:.55rem;
+  color:var(--accent2);font-weight:700;
+}
+.inv-slot .item-name{
+  font-size:.5rem;text-align:center;padding:2px;
+  overflow:hidden;text-overflow:ellipsis;
+  display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;
+}
+
+/* ── Sidebar ────────────────────────────────────────────────────── */
+.sidebar{display:flex;flex-direction:column;gap:16px}
+@media(max-width:960px){.sidebar{grid-row:auto}}
+
+/* ── Empty states ───────────────────────────────────────────────── */
+.empty{color:var(--text-dim);font-size:.8rem;font-style:italic;padding:12px 0}
+
+/* ── Toggle switches ────────────────────────────────────────────── */
+.toggles{display:flex;gap:12px;flex-wrap:wrap}
+.toggle{display:flex;align-items:center;gap:6px;font-size:.78rem}
+.toggle .pill{
+  width:34px;height:18px;border-radius:9px;position:relative;
+  transition:background .2s;
+}
+.toggle .pill::after{
+  content:'';position:absolute;top:2px;left:2px;
+  width:14px;height:14px;border-radius:50%;
+  background:#fff;transition:transform .2s;
+}
+.pill.on{background:var(--green)}
+.pill.on::after{transform:translateX(16px)}
+.pill.off{background:var(--text-dim)}
+</style>
+</head>
+<body>
+
+<!-- ── Header ────────────────────────────────────────────────────── -->
+<header>
+  <div class="logo">
+    <svg width="26" height="26" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" stroke="url(#g)" stroke-width="2"/><path d="M8 12l3 3 5-6" stroke="url(#g)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><defs><linearGradient id="g" x1="0" y1="0" x2="24" y2="24"><stop stop-color="#e85d3a"/><stop offset="1" stop-color="#f0a030"/></linearGradient></defs></svg>
+    <span>FRIKADELLEN BAF</span>
+    <small>v3.0</small>
+  </div>
+  <div class="header-right">
+    <span id="playerName">—</span>
+    <span><span class="status-dot off" id="statusDot"></span><span id="statusLabel">Connecting…</span></span>
+  </div>
+</header>
+
+<!-- ── Content ───────────────────────────────────────────────────── -->
+<div class="container">
+
+  <!-- Stat cards row -->
+  <div class="stats">
+    <div class="stat-card">
+      <span class="stat-label">Bot State</span>
+      <span class="stat-value accent" id="botState">—</span>
+    </div>
+    <div class="stat-card">
+      <span class="stat-label">Purse</span>
+      <span class="stat-value green" id="purse">—</span>
+    </div>
+    <div class="stat-card">
+      <span class="stat-label">Queue</span>
+      <span class="stat-value blue" id="queue">0</span>
+    </div>
+    <div class="stat-card">
+      <span class="stat-label">Uptime</span>
+      <span class="stat-value yellow" id="uptime">0s</span>
+    </div>
+    <div class="stat-card">
+      <span class="stat-label">AH Flips</span>
+      <span class="stat-value" id="ahToggle">—</span>
+    </div>
+    <div class="stat-card">
+      <span class="stat-label">Bazaar Flips</span>
+      <span class="stat-value" id="bzToggle">—</span>
+    </div>
+  </div>
+
+  <!-- Main Column -->
+  <div style="display:flex;flex-direction:column;gap:16px">
+
+    <!-- Event Feed -->
+    <div class="card" style="flex:1">
+      <h2><span class="icon">📡</span> Live Event Feed</h2>
+      <div class="event-feed" id="eventFeed">
+        <div class="empty">Waiting for events…</div>
+      </div>
+    </div>
+
+    <!-- Command Input -->
+    <div class="card">
+      <h2><span class="icon">⌨️</span> Console</h2>
+      <div class="cmd-bar">
+        <input class="cmd-input" id="cmdInput" placeholder="/cofl command · /mc command · chat message" autocomplete="off"/>
+        <button class="cmd-btn" id="cmdBtn">Send</button>
+      </div>
+    </div>
+
+    <!-- Inventory -->
+    <div class="card">
+      <h2><span class="icon">🎒</span> Inventory</h2>
+      <div class="inv-grid" id="invGrid">
+        <!-- 36 slots (hotbar 0-8 + main 9-35) filled by JS -->
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Sidebar -->
+  <div class="sidebar">
+
+    <!-- Scoreboard -->
+    <div class="card">
+      <h2><span class="icon">📋</span> Scoreboard</h2>
+      <ul class="scoreboard-list" id="scoreboard">
+        <li class="empty">No data yet</li>
+      </ul>
+    </div>
+
+  </div>
+
+</div>
+
+<script>
+/* ── Helpers ──────────────────────────────────────────────────────── */
+
+/** Strip Minecraft § colour codes for plain-text display. */
+function stripMc(t){return (t||'').replace(/§[0-9a-fk-or]/gi,'')}
+
+/** Convert Minecraft § colour codes to HTML spans. */
+function mcToHtml(raw){
+  const map={'0':'#000','1':'#0000AA','2':'#00AA00','3':'#00AAAA','4':'#AA0000',
+    '5':'#AA00AA','6':'#FFAA00','7':'#AAAAAA','8':'#555555','9':'#5555FF',
+    a:'#3ddc84',b:'#55FFFF',c:'#ff5252',d:'#FF55FF',e:'#FFFF55',f:'#FFFFFF'};
+  let html='',colour=null;
+  for(let i=0;i<raw.length;i++){
+    if(raw[i]==='§'&&i+1<raw.length){
+      const code=raw[i+1].toLowerCase();
+      if(code==='r'){colour=null}
+      else if(map[code]){colour=map[code]}
+      // skip formatting codes k-o
+      i++;continue;
+    }
+    if(colour) html+=`<span style="color:${colour}">${esc(raw[i])}</span>`;
+    else html+=esc(raw[i]);
+  }
+  return html;
+}
+function esc(c){return c==='<'?'&lt;':c==='>'?'&gt;':c==='&'?'&amp;':c}
+
+function fmtCoins(n){
+  if(n==null) return '—';
+  return Number(n).toLocaleString('en-US');
+}
+
+function fmtUptime(s){
+  if(s<60) return s+'s';
+  if(s<3600) return Math.floor(s/60)+'m '+s%60+'s';
+  const h=Math.floor(s/3600),m=Math.floor((s%3600)/60);
+  return h+'h '+m+'m';
+}
+
+function fmtTime(ts){
+  const d=new Date(ts);
+  return d.toLocaleTimeString([],{hour:'2-digit',minute:'2-digit',second:'2-digit'});
+}
+
+/* ── State ────────────────────────────────────────────────────────── */
+let lastEventCount=0;
+
+/* ── Poll /api/status ─────────────────────────────────────────────── */
+async function pollStatus(){
+  try{
+    const r=await fetch('/api/status');
+    const d=await r.json();
+    document.getElementById('playerName').textContent=d.player||'—';
+    document.getElementById('botState').textContent=d.state||'—';
+    document.getElementById('purse').textContent=fmtCoins(d.purse);
+    document.getElementById('queue').textContent=d.queueDepth??0;
+    document.getElementById('uptime').textContent=fmtUptime(d.uptimeSecs||0);
+
+    const dot=document.getElementById('statusDot');
+    const lbl=document.getElementById('statusLabel');
+    if(d.allowsCommands){dot.className='status-dot ok';lbl.textContent=d.state}
+    else{dot.className='status-dot busy';lbl.textContent=d.state}
+
+    // AH / Bazaar toggles
+    const ah=document.getElementById('ahToggle');
+    ah.textContent=d.ahFlips?'ON':'OFF';
+    ah.style.color=d.ahFlips?'var(--green)':'var(--red)';
+    const bz=document.getElementById('bzToggle');
+    bz.textContent=d.bazaarFlips?'ON':'OFF';
+    bz.style.color=d.bazaarFlips?'var(--green)':'var(--red)';
+
+    // Scoreboard
+    const sb=document.getElementById('scoreboard');
+    if(d.scoreboard&&d.scoreboard.length){
+      sb.innerHTML=d.scoreboard.map(l=>`<li>${mcToHtml(l)}</li>`).join('');
+    } else {
+      sb.innerHTML='<li class="empty">No scoreboard data</li>';
+    }
+  }catch(e){
+    document.getElementById('statusDot').className='status-dot off';
+    document.getElementById('statusLabel').textContent='Disconnected';
+  }
+}
+
+/* ── Poll /api/events ─────────────────────────────────────────────── */
+async function pollEvents(){
+  try{
+    const r=await fetch('/api/events');
+    const d=await r.json();
+    const events=d.events||[];
+    if(events.length===lastEventCount) return;
+    lastEventCount=events.length;
+    const feed=document.getElementById('eventFeed');
+    // Render last 100 (newest at bottom, auto-scroll)
+    const slice=events.slice(-100);
+    feed.innerHTML=slice.map(ev=>{
+      const tagClass=ev.kind||'system';
+      return `<div class="event">
+        <span class="time">${fmtTime(ev.timestamp)}</span>
+        <span class="tag ${tagClass}">${ev.kind}</span>
+        <span class="msg">${mcToHtml(ev.message)}</span>
+      </div>`;
+    }).join('');
+    feed.scrollTop=feed.scrollHeight;
+  }catch(e){}
+}
+
+/* ── Poll /api/inventory ──────────────────────────────────────────── */
+async function pollInventory(){
+  try{
+    const r=await fetch('/api/inventory');
+    const d=await r.json();
+    renderInventory(d.inventory);
+  }catch(e){}
+}
+
+function renderInventory(inv){
+  const grid=document.getElementById('invGrid');
+  // Build 36 empty slots
+  let slots=[];
+  for(let i=0;i<36;i++) slots.push({name:'',count:0});
+
+  // Try to parse inventory data — the format can vary based on the azalea serialisation
+  if(inv&&typeof inv==='object'){
+    // Try common patterns: inv.slots (array), inv itself as array, inv.items
+    let items=null;
+    if(Array.isArray(inv)) items=inv;
+    else if(Array.isArray(inv.slots)) items=inv.slots;
+    else if(Array.isArray(inv.items)) items=inv.items;
+
+    if(items){
+      for(let i=0;i<items.length&&i<36;i++){
+        const it=items[i];
+        if(!it) continue;
+        const name=it.name||it.display_name||it.id||'';
+        const count=it.count||it.amount||1;
+        if(name) slots[i]={name:stripMc(name),count};
+      }
+    }
+  }
+
+  grid.innerHTML=slots.map(s=>{
+    if(s.name){
+      return `<div class="inv-slot filled" title="${esc2(s.name)} x${s.count}">
+        <span class="item-name">${esc2(s.name)}</span>
+        ${s.count>1?`<span class="count">${s.count}</span>`:''}
+      </div>`;
+    }
+    return '<div class="inv-slot"></div>';
+  }).join('');
+}
+function esc2(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
+
+/* ── Command Bar ──────────────────────────────────────────────────── */
+const cmdInput=document.getElementById('cmdInput');
+const cmdBtn=document.getElementById('cmdBtn');
+const cmdHistory=[];
+let histIdx=-1;
+
+async function sendCmd(){
+  const v=cmdInput.value.trim();
+  if(!v) return;
+  cmdHistory.push(v);
+  histIdx=cmdHistory.length;
+  cmdInput.value='';
+  try{
+    await fetch('/api/command',{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({command:v})
+    });
+  }catch(e){console.error('send failed',e)}
+}
+cmdBtn.addEventListener('click',sendCmd);
+cmdInput.addEventListener('keydown',e=>{
+  if(e.key==='Enter'){sendCmd();return}
+  if(e.key==='ArrowUp'&&cmdHistory.length){
+    histIdx=Math.max(0,histIdx-1);
+    cmdInput.value=cmdHistory[histIdx]||'';
+    e.preventDefault();
+  }
+  if(e.key==='ArrowDown'&&cmdHistory.length){
+    histIdx=Math.min(cmdHistory.length,histIdx+1);
+    cmdInput.value=cmdHistory[histIdx]||'';
+    e.preventDefault();
+  }
+});
+
+/* ── Kick off polling ─────────────────────────────────────────────── */
+pollStatus();pollEvents();pollInventory();
+setInterval(pollStatus,2000);
+setInterval(pollEvents,1500);
+setInterval(pollInventory,10000);
+</script>
+</body>
+</html>

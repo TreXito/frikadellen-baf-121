@@ -256,10 +256,4 @@ mod tests {
         let config: Config = toml::from_str("confirm_skip = true").expect("config should parse");
         assert!(!config.fastbuy_enabled());
     }
-
-    #[test]
-    fn parses_bed_spam_click_delay() {
-        let config: Config = toml::from_str("bed_spam_click_delay = 125").expect("config should parse");
-        assert_eq!(config.bed_spam_click_delay, 125);
-    }
 }

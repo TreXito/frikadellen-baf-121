@@ -4,6 +4,7 @@ use frikadellen_baf::{
     config::ConfigLoader,
     logging::{init_logger, print_mc_chat},
     state::CommandQueue,
+    web::{WebEventLog, WebState},
     websocket::CoflWebSocket,
     bot::BotClient,
     types::Flip,
@@ -176,6 +177,9 @@ async fn main() -> Result<()> {
         new_id
     };
 
+    // ── Web event log (shared with the web GUI dashboard) ──────────
+    let web_event_log = WebEventLog::new();
+
     info!("Connecting to Coflnet WebSocket...");
     
     // Connect to Coflnet WebSocket
@@ -215,7 +219,6 @@ async fn main() -> Result<()> {
     bot_client.fastbuy = config.fastbuy_enabled();
     bot_client.set_auto_cookie_hours(config.auto_cookie);
     bot_client.freemoney = config.freemoney_enabled();
-    bot_client.bed_spam_click_delay = config.bed_spam_click_delay;
     
     // Connect to Hypixel - Azalea will handle Microsoft OAuth in browser
     match bot_client.connect(ingame_name.clone(), Some(ws_client.clone())).await {
@@ -229,6 +232,23 @@ async fn main() -> Result<()> {
         }
     }
 
+    // ── Spawn the web GUI server ──────────────────────────────────────
+    {
+        let web_state = Arc::new(WebState {
+            bot_client: bot_client.clone(),
+            command_queue: command_queue.clone(),
+            ws_client: ws_client.clone(),
+            event_log: web_event_log.clone(),
+            config: config.clone(),
+            start_time: std::time::Instant::now(),
+            ingame_name: ingame_name.clone(),
+        });
+        tokio::spawn(frikadellen_baf::web::start_web_server(
+            web_state,
+            config.web_gui_port,
+        ));
+    }
+
     // Spawn bot event handler
     let bot_client_clone = bot_client.clone();
     let ws_client_for_events = ws_client.clone();
@@ -238,18 +258,21 @@ async fn main() -> Result<()> {
     let flip_tracker_events = flip_tracker.clone();
     let cofl_connection_id_events = cofl_connection_id.clone();
     let cofl_premium_events = cofl_premium.clone();
+    let web_log_events = web_event_log.clone();
     tokio::spawn(async move {
         while let Some(event) = bot_client_clone.next_event().await {
             match event {
                 frikadellen_baf::bot::BotEvent::Login => {
                     info!("✓ Bot logged into Minecraft successfully");
+                    web_log_events.push("system", "Bot logged into Minecraft".to_string());
                 }
                 frikadellen_baf::bot::BotEvent::Spawn => {
                     info!("✓ Bot spawned in world and ready");
+                    web_log_events.push("system", "Bot spawned in world".to_string());
                 }
                 frikadellen_baf::bot::BotEvent::ChatMessage(msg) => {
-                    // Print Minecraft chat with color codes converted to ANSI
                     print_mc_chat(&msg);
+                    web_log_events.push("chat", msg.clone());
                 }
                 frikadellen_baf::bot::BotEvent::WindowOpen(id, window_type, title) => {
                     debug!("Window opened: {} (ID: {}, Type: {})", title, id, window_type);
@@ -259,6 +282,7 @@ async fn main() -> Result<()> {
                 }
                 frikadellen_baf::bot::BotEvent::Disconnected(reason) => {
                     warn!("Bot disconnected: {}", reason);
+                    web_log_events.push("error", format!("Disconnected: {}", reason));
                     if is_ban_disconnect(&reason) {
                         if let Some(webhook_url) = config_for_events.active_webhook_url() {
                             let url = webhook_url.to_string();
@@ -272,9 +296,11 @@ async fn main() -> Result<()> {
                 }
                 frikadellen_baf::bot::BotEvent::Kicked(reason) => {
                     warn!("Bot kicked: {}", reason);
+                    web_log_events.push("error", format!("Kicked: {}", reason));
                 }
                 frikadellen_baf::bot::BotEvent::StartupComplete { orders_cancelled } => {
                     info!("[Startup] Startup complete - bot is ready to flip! ({} order(s) cancelled)", orders_cancelled);
+                    web_log_events.push("system", format!("Startup complete — {} order(s) cancelled", orders_cancelled));
                     // Upload scoreboard to COFL (with real data matching TypeScript runStartupWorkflow)
                     {
                         let scoreboard_lines = bot_client_clone.get_scoreboard_lines();
@@ -371,6 +397,10 @@ async fn main() -> Result<()> {
                         "§f[§4BAF§f]: §a✦ PURCHASED §r{}§r §7for §6{}§7 coins!{}{}",
                         colored_name, format_coins(price as i64), profit_str, speed_str
                     ));
+                    web_log_events.push("purchase", format!(
+                        "§a✦ PURCHASED §r{}§r §7for §6{}§7 coins!{}{}",
+                        colored_name, format_coins(price as i64), profit_str, speed_str
+                    ));
                     // Send webhook
                     if let Some(webhook_url) = config_for_events.active_webhook_url() {
                         let url = webhook_url.to_string();
@@ -426,6 +456,10 @@ async fn main() -> Result<()> {
                         "§f[§4BAF§f]: §6⚡ SOLD §r{} §7to §e{}§7 for §6{}§7 coins!{}",
                         item_name, buyer, format_coins(price as i64), profit_str
                     ));
+                    web_log_events.push("sold", format!(
+                        "§6⚡ SOLD §r{} §7to §e{}§7 for §6{}§7 coins!{}",
+                        item_name, buyer, format_coins(price as i64), profit_str
+                    ));
                     if let Some(webhook_url) = config_for_events.active_webhook_url() {
                         let url = webhook_url.to_string();
                         let name = ingame_name_for_events.clone();
@@ -447,6 +481,10 @@ async fn main() -> Result<()> {
                         "§f[§4BAF§f]: §6[BZ] {}{}§7 order placed: {}x {} @ §6{}§7 coins/unit",
                         order_color, order_type, amount, item_name, format_coins(price_per_unit as i64)
                     ));
+                    web_log_events.push("bazaar", format!(
+                        "§6[BZ] {}{}§7 order placed: {}x {} @ §6{}§7 coins/unit",
+                        order_color, order_type, amount, item_name, format_coins(price_per_unit as i64)
+                    ));
                     if let Some(webhook_url) = config_for_events.active_webhook_url() {
                         let url = webhook_url.to_string();
                         let name = ingame_name_for_events.clone();
@@ -463,6 +501,10 @@ async fn main() -> Result<()> {
                 frikadellen_baf::bot::BotEvent::AuctionListed { item_name, starting_bid, duration_hours } => {
                     print_mc_chat(&format!(
                         "§f[§4BAF§f]: §a🏷️ BIN listed: §r{} §7@ §6{}§7 coins for §e{}h",
+                        item_name, format_coins(starting_bid as i64), duration_hours
+                    ));
+                    web_log_events.push("sold", format!(
+                        "§a🏷️ BIN listed: §r{} §7@ §6{}§7 coins for §e{}h",
                         item_name, format_coins(starting_bid as i64), duration_hours
                     ));
                     if let Some(webhook_url) = config_for_events.active_webhook_url() {
@@ -503,6 +545,7 @@ async fn main() -> Result<()> {
     let flip_tracker_ws = flip_tracker.clone();
     let cofl_connection_id_ws = cofl_connection_id.clone();
     let cofl_premium_ws = cofl_premium.clone();
+    let web_log_ws = web_event_log.clone();
     
     tokio::spawn(async move {
         use frikadellen_baf::websocket::CoflEvent;
@@ -526,6 +569,13 @@ async fn main() -> Result<()> {
                     let profit = flip.target.saturating_sub(flip.starting_bid);
                     print_mc_chat(&format!(
                         "§f[§4BAF§f]: §eTrying to purchase flip: §r{}§r §7for §6{}§7 coins §7(Target: §6{}§7, Profit: §a{}§7)",
+                        flip.item_name,
+                        format_coins(flip.starting_bid as i64),
+                        format_coins(flip.target as i64),
+                        format_coins(profit as i64)
+                    ));
+                    web_log_ws.push("flip", format!(
+                        "§eTrying to purchase: §r{}§r §7for §6{}§7 (Target: §6{}§7, Profit: §a{}§7)",
                         flip.item_name,
                         format_coins(flip.starting_bid as i64),
                         format_coins(flip.target as i64),
@@ -580,6 +630,13 @@ async fn main() -> Result<()> {
                     let (order_color, order_label) = if effective_is_buy { ("§a", "BUY") } else { ("§c", "SELL") };
                     print_mc_chat(&format!(
                         "§f[§4BAF§f]: §6[BZ] {}{}§7 order: §r{}§r §7x{} @ §6{}§7 coins/unit",
+                        order_color, order_label,
+                        bazaar_flip.item_name,
+                        bazaar_flip.amount,
+                        format_coins(bazaar_flip.price_per_unit as i64)
+                    ));
+                    web_log_ws.push("bazaar", format!(
+                        "§6[BZ] {}{}§7 order: §r{}§r §7x{} @ §6{}§7 coins/unit",
                         order_color, order_label,
                         bazaar_flip.item_name,
                         bazaar_flip.amount,
@@ -654,6 +711,7 @@ async fn main() -> Result<()> {
                     if config_clone.use_cofl_chat {
                         // Print with color codes if the message contains them
                         print_mc_chat(&msg);
+                        web_log_ws.push("chat", msg.clone());
                     } else {
                         // Still show in debug mode but without color formatting
                         debug!("[COFL Chat] {}", msg);
