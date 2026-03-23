@@ -1,0 +1,50 @@
+name: Sync webpage to frikadellenbaf-site
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'webpage/**'
+      - '.github/workflows/sync-site.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source repo
+        uses: actions/checkout@v4
+
+      - name: Push webpage files to frikadellenbaf-site
+        env:
+          TARGET_REPO: TreXito/frikadellenbaf-site
+          GH_TOKEN: ${{ secrets.SITE_DEPLOY_TOKEN }}
+        run: |
+          # Configure git
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Clone the target repo
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/${TARGET_REPO}.git" /tmp/target-repo
+
+          # Remove old files in target repo (keep .git)
+          find /tmp/target-repo -maxdepth 1 -not -name '.git' -not -name '.' -exec rm -rf {} +
+
+          # Copy only the page files (exclude .nojekyll and CNAME)
+          cp webpage/index.html /tmp/target-repo/
+          cp webpage/script.js  /tmp/target-repo/
+          cp webpage/style.css  /tmp/target-repo/
+
+          # Commit and push if there are changes
+          cd /tmp/target-repo
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to sync."
+          else
+            git commit -m "Sync webpage from ${GITHUB_REPOSITORY}@${GITHUB_SHA::7}"
+            git push
+          fi
