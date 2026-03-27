@@ -12,9 +12,16 @@ pub struct VpsMessage {
 
 impl VpsMessage {
     pub fn new(msg_type: &str, data: impl Serialize) -> Self {
+        let data = match serde_json::to_string(&data) {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!("[VPS] Failed to serialize message data: {e}");
+                String::new()
+            }
+        };
         Self {
             msg_type: msg_type.to_string(),
-            data: serde_json::to_string(&data).unwrap_or_default(),
+            data,
         }
     }
 }

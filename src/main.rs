@@ -2522,9 +2522,10 @@ async fn main() -> Result<()> {
             let webhook_url = webhook_url.to_string();
             let name = ingame_name.clone();
             let started = std::time::Instant::now();
+            let interval_secs = profit_interval_mins.saturating_mul(60);
             tokio::spawn(async move {
                 loop {
-                    sleep(Duration::from_secs(profit_interval_mins * 60)).await;
+                    sleep(Duration::from_secs(interval_secs)).await;
                     let (ah, bz) = profit_tracker_webhook.totals();
                     let uptime = started.elapsed().as_secs();
                     frikadellen_baf::webhook::send_webhook_profit_summary(

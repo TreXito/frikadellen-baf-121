@@ -64,7 +64,26 @@ impl VpsSocket {
     /// Build the full connection URL with query parameters.
     fn connection_url(&self) -> String {
         let ip = Self::resolve_local_ip();
-        format!("{}?ip={}&secret={}", self.url, ip, self.secret)
+        // URL-encode parameters to handle special characters in the secret.
+        let ip_encoded = Self::url_encode(&ip);
+        let secret_encoded = Self::url_encode(&self.secret);
+        format!("{}?ip={}&secret={}", self.url, ip_encoded, secret_encoded)
+    }
+
+    /// Percent-encode a string for safe use in URL query parameters.
+    fn url_encode(s: &str) -> String {
+        let mut encoded = String::with_capacity(s.len());
+        for b in s.bytes() {
+            match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    encoded.push(b as char);
+                }
+                _ => {
+                    encoded.push_str(&format!("%{:02X}", b));
+                }
+            }
+        }
+        encoded
     }
 
     /// Start the connection loop.  Automatically reconnects on disconnect.
