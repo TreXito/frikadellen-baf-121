@@ -48,145 +48,199 @@ mod opt_f64_as_zero {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
-    /// Ingame Minecraft username(s). Supports multiple comma-separated accounts:
-    /// `ingame_name = "Account1"` for a single account, or
-    /// `ingame_name = "Account1,Account2"` for automatic switching.
-    #[serde(default)]
+    // ─── Account ──────────────────────────────────────────────────────────
+
+    /// Minecraft username(s). Use a single name or comma-separated names for
+    /// automatic account switching: `"Account1"` or `"Account1,Account2"`.
+    #[serde(default, with = "opt_string_as_empty")]
     pub ingame_name: Option<String>,
 
-    /// Time in hours after which the bot switches to the next account in `ingame_name`.
-    /// Only used when multiple accounts are specified. E.g. `multi_switch_time = 12.0`
-    /// means switch accounts every 12 hours. Set to `0` to disable automatic switching.
+    /// Hours between automatic account switches when multiple names are set
+    /// in `ingame_name`. For example, `12.0` switches every 12 hours.
+    /// Set to `0` to disable automatic switching.
     #[serde(default, with = "opt_f64_as_zero")]
     pub multi_switch_time: Option<f64>,
-    
-    #[serde(default = "default_websocket_url")]
-    pub websocket_url: String,
-    
-    #[serde(default = "default_web_gui_port")]
-    pub web_gui_port: u16,
 
-    /// Minimum delay between consecutive queued commands in milliseconds.
-    /// Prevents back-to-back Hypixel interactions from overlapping.
-    /// Default: 500ms.
-    #[serde(default = "default_command_delay_ms")]
-    pub command_delay_ms: u64,
-    
-    #[serde(default = "default_bed_spam_click_delay")]
-    pub bed_spam_click_delay: u64,
-    
-    #[serde(default)]
-    pub bed_multiple_clicks_delay: u64,
-    
-    /// How many ms before the COFL `purchaseAt` deadline to start clicking (default: 30).
-    /// Only used when `freemoney = true`. Without freemoney, bed spam starts immediately
-    /// using `bed_spam_click_delay` and this value is ignored.
-    #[serde(default = "default_bed_pre_click_ms")]
-    pub bed_pre_click_ms: u64,
-    
+    // ─── Flip Modes ───────────────────────────────────────────────────────
+
+    /// Enable auction house (AH) flip buying & selling.
+    #[serde(default = "default_true")]
+    pub enable_ah_flips: bool,
+
+    /// Enable bazaar flip buying & selling.
+    #[serde(default = "default_true")]
+    pub enable_bazaar_flips: bool,
+
+    // ─── Auction House ────────────────────────────────────────────────────
+
+    /// Duration in hours for new auction listings (default: 24).
+    #[serde(default = "default_auction_duration_hours")]
+    pub auction_duration_hours: u64,
+
+    /// Delay in milliseconds between consecutive auction listing commands.
+    /// Prevents Hypixel "Sending packets too fast!" kicks during bulk
+    /// listings (default: 1500).
+    #[serde(default = "default_auction_listing_delay_ms")]
+    pub auction_listing_delay_ms: u64,
+
+    // ─── Bazaar ───────────────────────────────────────────────────────────
+
+    /// How often (seconds) to check and manage open bazaar orders (default: 60).
     #[serde(default = "default_bazaar_order_check_interval_seconds")]
     pub bazaar_order_check_interval_seconds: u64,
-    
+
+    /// Minutes to wait per million coins of order value before cancelling a
+    /// stale bazaar order. E.g. a 5M order waits 5 × this value (default: 1).
     #[serde(default = "default_bazaar_order_cancel_minutes_per_million", alias = "bazaar_order_cancel_minutes")]
     pub bazaar_order_cancel_minutes_per_million: u64,
 
-    /// Bazaar sell tax rate as a percentage (e.g. 1.25 = 1.25%).
-    /// Hypixel applies 1.25% by default. The Bazaar Flipper perk from the
-    /// Community Shop reduces it by up to 0.25% (two levels × 0.125%).
-    /// Set to 1.0 if you have the max perk level.
+    /// Bazaar sell tax rate as a percentage (default: 1.25 = 1.25%).
+    /// The Bazaar Flipper perk in the Community Shop reduces it by up to
+    /// 0.25% (two levels × 0.125%). Set to `1.0` for max perk level.
     #[serde(default = "default_bazaar_tax_rate")]
     pub bazaar_tax_rate: f64,
 
-    /// Delay in milliseconds between consecutive auction listing commands
-    /// (SellToAuction). Prevents Hypixel from kicking the bot with
-    /// "Sending packets too fast!" during bulk listings. Default: 1500ms.
-    #[serde(default = "default_auction_listing_delay_ms")]
-    pub auction_listing_delay_ms: u64,
-    
-    #[serde(default = "default_true")]
-    pub enable_bazaar_flips: bool,
-    
-    #[serde(default = "default_true")]
-    pub enable_ah_flips: bool,
-    
+    // ─── Buy Speed / Click Timings ────────────────────────────────────────
+
+    /// Use bed-spam buying instead of the default nugget method.
     #[serde(default)]
     pub bed_spam: bool,
 
-    /// Advanced: enable fast-buy skip-click on predicted Confirm Purchase window.
-    /// Not shown in serialized configs unless explicitly set by the user.
+    /// Delay in milliseconds between clicks when bed-spam is active
+    /// (default: 100). Recommended range: 100–125.
+    #[serde(default = "default_bed_spam_click_delay")]
+    pub bed_spam_click_delay: u64,
+
+    /// Extra delay in milliseconds for secondary bed-spam clicks (default: 0).
+    #[serde(default)]
+    pub bed_multiple_clicks_delay: u64,
+
+    /// Milliseconds before the COFL `purchaseAt` deadline to start clicking
+    /// (default: 30). Only used when `freemoney = true`; ignored otherwise.
+    #[serde(default = "default_bed_pre_click_ms")]
+    pub bed_pre_click_ms: u64,
+
+    /// Advanced: enable fast-buy skip-click on predicted Confirm Purchase
+    /// window. Faster but riskier. Hidden unless explicitly set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fastbuy: Option<bool>,
 
+    /// Advanced: enable auto-buy mode with timed clicks. Hidden unless
+    /// explicitly set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub freemoney: Option<bool>,
-    
+
+    // ─── Commands & Bot Behaviour ─────────────────────────────────────────
+
+    /// Minimum delay in milliseconds between consecutive queued commands.
+    /// Prevents back-to-back Hypixel interactions from overlapping
+    /// (default: 500).
+    #[serde(default = "default_command_delay_ms")]
+    pub command_delay_ms: u64,
+
+    /// Show COFL chat messages in the Minecraft chat window (default: true).
     #[serde(default = "default_true")]
     pub use_cofl_chat: bool,
-    
+
+    /// Automatically buy a booster cookie when it expires (hours).
+    /// Set to `0` to disable automatic cookie purchase.
     #[serde(default)]
     pub auto_cookie: u64,
 
-    
+    /// Allow typing commands in the terminal console (default: true).
     #[serde(default = "default_true")]
     pub enable_console_input: bool,
-    
-    #[serde(default = "default_auction_duration_hours")]
-    pub auction_duration_hours: u64,
-    
-    /// Enable proxy for both the Minecraft and WebSocket connections.
-    #[serde(default)]
-    pub proxy_enabled: bool,
-    
-    /// Proxy server address in `host:port` format, e.g. `"121.124.241.211:3313"`.
-    /// Only used when `proxy_enabled = true`. Leave empty to disable.
-    #[serde(default, with = "opt_string_as_empty")]
-    pub proxy_address: Option<String>,
-    
-    /// Proxy credentials in `username:password` format, e.g. `"myuser:mypassword"`.
-    /// Leave empty if the proxy requires no authentication.
-    #[serde(default, with = "opt_string_as_empty")]
-    pub proxy_credentials: Option<String>,
-    
-    #[serde(default)]
-    /// Discord webhook URL for notifications.
-    /// `None` = not yet configured (prompts on next startup).
-    /// `Some("")` = explicitly disabled (no further prompts).
-    /// `Some(url)` = active webhook.
-    pub webhook_url: Option<String>,
 
-    /// Separate Discord webhook URL for bazaar-specific notifications
-    /// (order placed, collected, cancelled). Leave empty to use the regular
-    /// `webhook_url` for all notifications.
-    #[serde(default, with = "opt_string_as_empty")]
-    pub bazaar_webhook_url: Option<String>,
+    // ─── Connection ───────────────────────────────────────────────────────
 
-    /// Discord user ID for pinging on legendary/divine flips and bans.
-    /// Leave empty to disable pings.
-    #[serde(default, with = "opt_string_as_empty")]
-    pub discord_id: Option<String>,
-    
-    /// Password to protect the web control panel. Leave empty to disable authentication.
+    /// Coflnet mod WebSocket URL. Only change if you run a custom server.
+    #[serde(default = "default_websocket_url")]
+    pub websocket_url: String,
+
+    /// Port for the local web control panel (default: 8080).
+    #[serde(default = "default_web_gui_port")]
+    pub web_gui_port: u16,
+
+    /// Password to protect the web control panel. Leave empty for no auth.
     #[serde(default, with = "opt_string_as_empty")]
     pub web_gui_password: Option<String>,
 
-    /// Hypixel API key for fetching active auctions. Obtain one from https://developer.hypixel.net/
-    /// Leave empty to use the Coflnet API as a fallback.
+    // ─── Proxy ────────────────────────────────────────────────────────────
+
+    /// Enable a SOCKS/HTTP proxy for both Minecraft and WebSocket connections.
+    #[serde(default)]
+    pub proxy_enabled: bool,
+
+    /// Proxy server address in `host:port` format, e.g. `"121.124.241.211:3313"`.
+    #[serde(default, with = "opt_string_as_empty")]
+    pub proxy_address: Option<String>,
+
+    /// Proxy credentials in `username:password` format. Leave empty if the
+    /// proxy requires no authentication.
+    #[serde(default, with = "opt_string_as_empty")]
+    pub proxy_credentials: Option<String>,
+
+    // ─── Discord / Webhooks ───────────────────────────────────────────────
+
+    /// Discord webhook URL for flip notifications and profit summaries.
+    /// Leave empty to disable. On first run you will be prompted.
+    #[serde(default, with = "opt_string_as_empty")]
+    pub webhook_url: Option<String>,
+
+    /// Separate Discord webhook for bazaar-specific notifications (orders
+    /// placed / collected / cancelled). Falls back to `webhook_url` if empty.
+    #[serde(default, with = "opt_string_as_empty")]
+    pub bazaar_webhook_url: Option<String>,
+
+    /// Your Discord user ID for @-mention pings on legendary/divine flips
+    /// and bans. Leave empty to disable pings.
+    #[serde(default, with = "opt_string_as_empty")]
+    pub discord_id: Option<String>,
+
+    /// How often (in minutes) to send a profit summary to the webhook.
+    /// Set to `0` to disable periodic profit summaries (default: 30).
+    #[serde(default = "default_profit_summary_interval_minutes")]
+    pub profit_summary_interval_minutes: u64,
+
+    // ─── API Keys ─────────────────────────────────────────────────────────
+
+    /// Hypixel API key for fetching active auctions. Get one at
+    /// https://developer.hypixel.net/. Leave empty to use the Coflnet API
+    /// as a fallback.
     #[serde(default, with = "opt_string_as_empty")]
     pub hypixel_api_key: Option<String>,
 
-    /// Whether to share legendary/divine flip purchases to the public Discord channel.
-    /// Defaults to true. Set to false to opt out.
+    // ─── Miscellaneous ────────────────────────────────────────────────────
+
+    /// Share legendary/divine flip purchases (>100M) to the public Discord
+    /// channel (default: true). Set to `false` to opt out.
     #[serde(default = "default_true")]
     pub share_legendary_flips: bool,
 
-    /// Whether to anonymize the username in the web GUI panel and profit summary webhooks.
-    /// When true, account names and avatars in the web panel are hidden, and the IGN is
-    /// replaced with random characters in webhooks.  Defaults to false.
-    /// **Deprecated**: This config value is ignored. Anonymization is now a session-only
-    /// toggle in the web panel that always defaults to OFF on page load.
+    /// **Deprecated** — this field is ignored. Anonymization is now a
+    /// session-only toggle in the web panel.
     #[serde(default)]
     pub anonymize_webhook_name: bool,
-    
+
+    // ─── VPS (Coflnet Hosted) ─────────────────────────────────────────────
+
+    /// Enable the Coflnet VPS socket to receive instance management commands
+    /// from the Coflnet backend. Only enable this if running on a Coflnet VPS.
+    #[serde(default)]
+    pub vps_enabled: bool,
+
+    /// WebSocket URL for the Coflnet VPS instance management endpoint.
+    #[serde(default = "default_vps_url")]
+    pub vps_url: String,
+
+    /// Shared secret for authenticating with the Coflnet VPS service.
+    /// Provided by Coflnet when provisioning a VPS host.
+    #[serde(default, with = "opt_string_as_empty")]
+    pub vps_secret: Option<String>,
+
+    // ─── Internal (do not edit) ───────────────────────────────────────────
+
+    /// Persisted Coflnet session tokens. Managed automatically.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub sessions: HashMap<String, CoflSession>,
 }
@@ -197,7 +251,8 @@ pub struct CoflSession {
     pub expires: DateTime<Utc>,
 }
 
-// Default values
+// ── Default value functions ────────────────────────────────────────────────
+
 fn default_websocket_url() -> String {
     "wss://sky.coflnet.com/modsocket".to_string()
 }
@@ -238,6 +293,14 @@ fn default_auction_duration_hours() -> u64 {
     24
 }
 
+fn default_profit_summary_interval_minutes() -> u64 {
+    30
+}
+
+fn default_vps_url() -> String {
+    "wss://sky.coflnet.com/instances".to_string()
+}
+
 fn default_true() -> bool {
     true
 }
@@ -245,37 +308,54 @@ fn default_true() -> bool {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            // Account
             ingame_name: None,
             multi_switch_time: None,
-            websocket_url: default_websocket_url(),
-            web_gui_port: default_web_gui_port(),
-            command_delay_ms: default_command_delay_ms(),
-            bed_spam_click_delay: default_bed_spam_click_delay(),
-            bed_multiple_clicks_delay: 0,
-            bed_pre_click_ms: default_bed_pre_click_ms(),
+            // Flip modes
+            enable_ah_flips: true,
+            enable_bazaar_flips: true,
+            // Auction house
+            auction_duration_hours: default_auction_duration_hours(),
+            auction_listing_delay_ms: default_auction_listing_delay_ms(),
+            // Bazaar
             bazaar_order_check_interval_seconds: default_bazaar_order_check_interval_seconds(),
             bazaar_order_cancel_minutes_per_million: default_bazaar_order_cancel_minutes_per_million(),
             bazaar_tax_rate: default_bazaar_tax_rate(),
-            auction_listing_delay_ms: default_auction_listing_delay_ms(),
-            enable_bazaar_flips: true,
-            enable_ah_flips: true,
+            // Buy speed / click timings
             bed_spam: false,
+            bed_spam_click_delay: default_bed_spam_click_delay(),
+            bed_multiple_clicks_delay: 0,
+            bed_pre_click_ms: default_bed_pre_click_ms(),
             fastbuy: None,
             freemoney: None,
+            // Commands & bot behaviour
+            command_delay_ms: default_command_delay_ms(),
             use_cofl_chat: true,
             auto_cookie: 0,
             enable_console_input: true,
-            auction_duration_hours: default_auction_duration_hours(),
+            // Connection
+            websocket_url: default_websocket_url(),
+            web_gui_port: default_web_gui_port(),
+            web_gui_password: None,
+            // Proxy
             proxy_enabled: false,
             proxy_address: None,
             proxy_credentials: None,
+            // Discord / webhooks
             webhook_url: None,
             bazaar_webhook_url: None,
             discord_id: None,
-            web_gui_password: None,
+            profit_summary_interval_minutes: default_profit_summary_interval_minutes(),
+            // API keys
             hypixel_api_key: None,
+            // Miscellaneous
             share_legendary_flips: true,
             anonymize_webhook_name: false,
+            // VPS
+            vps_enabled: false,
+            vps_url: default_vps_url(),
+            vps_secret: None,
+            // Internal
             sessions: HashMap::new(),
         }
     }
@@ -539,6 +619,50 @@ bazaar_webhook_url = "https://discord.com/api/webhooks/bazaar""#
 bazaar_webhook_url = """#
         ).expect("config should parse");
         assert_eq!(config.active_bazaar_webhook_url(), Some("https://discord.com/api/webhooks/main"));
+    }
+
+    #[test]
+    fn profit_summary_interval_defaults_to_30() {
+        let config = Config::default();
+        assert_eq!(config.profit_summary_interval_minutes, 30);
+    }
+
+    #[test]
+    fn profit_summary_interval_zero_parses() {
+        let config: Config = toml::from_str("profit_summary_interval_minutes = 0").expect("config should parse");
+        assert_eq!(config.profit_summary_interval_minutes, 0);
+    }
+
+    #[test]
+    fn profit_summary_interval_custom_value() {
+        let config: Config = toml::from_str("profit_summary_interval_minutes = 15").expect("config should parse");
+        assert_eq!(config.profit_summary_interval_minutes, 15);
+    }
+
+    #[test]
+    fn vps_defaults() {
+        let config = Config::default();
+        assert!(!config.vps_enabled);
+        assert_eq!(config.vps_url, "wss://sky.coflnet.com/instances");
+        assert_eq!(config.vps_secret, None);
+    }
+
+    #[test]
+    fn vps_fields_parse() {
+        let config: Config = toml::from_str(
+            r#"vps_enabled = true
+vps_url = "wss://custom.server.com/instances"
+vps_secret = "my-secret""#,
+        ).expect("config should parse");
+        assert!(config.vps_enabled);
+        assert_eq!(config.vps_url, "wss://custom.server.com/instances");
+        assert_eq!(config.vps_secret.as_deref(), Some("my-secret"));
+    }
+
+    #[test]
+    fn vps_secret_empty_is_none() {
+        let config: Config = toml::from_str(r#"vps_secret = """#).expect("config should parse");
+        assert_eq!(config.vps_secret, None);
     }
 
 }

@@ -2514,23 +2514,55 @@ async fn main() -> Result<()> {
         }
     }
 
-    // Periodic profit summary webhook every 30 minutes
-    if let Some(webhook_url) = config.active_webhook_url() {
-        let profit_tracker_webhook = profit_tracker.clone();
-        let webhook_url = webhook_url.to_string();
-        let name = ingame_name.clone();
-        let started = std::time::Instant::now();
-        tokio::spawn(async move {
-            loop {
-                sleep(Duration::from_secs(30 * 60)).await;
-                let (ah, bz) = profit_tracker_webhook.totals();
-                let uptime = started.elapsed().as_secs();
-                frikadellen_baf::webhook::send_webhook_profit_summary(
-                    &name, ah, bz, uptime, &webhook_url,
-                )
-                .await;
-            }
-        });
+    // Periodic profit summary webhook (configurable interval, 0 = disabled)
+    let profit_interval_mins = config.profit_summary_interval_minutes;
+    if profit_interval_mins > 0 {
+        if let Some(webhook_url) = config.active_webhook_url() {
+            let profit_tracker_webhook = profit_tracker.clone();
+            let webhook_url = webhook_url.to_string();
+            let name = ingame_name.clone();
+            let started = std::time::Instant::now();
+            tokio::spawn(async move {
+                loop {
+                    sleep(Duration::from_secs(profit_interval_mins * 60)).await;
+                    let (ah, bz) = profit_tracker_webhook.totals();
+                    let uptime = started.elapsed().as_secs();
+                    frikadellen_baf::webhook::send_webhook_profit_summary(
+                        &name, ah, bz, uptime, &webhook_url,
+                    )
+                    .await;
+                }
+            });
+        }
+    }
+
+    // ── VPS Socket (Coflnet hosted instance management) ──────────────────
+    if config.vps_enabled {
+        if let Some(secret) = config.vps_secret.as_deref().filter(|s| !s.is_empty()) {
+            info!("[VPS] VPS mode enabled — connecting to {}", config.vps_url);
+            frikadellen_baf::vps::spawn_vps_socket(
+                config.vps_url.clone(),
+                secret.to_string(),
+                std::sync::Arc::new(|update: frikadellen_baf::vps::VpsStateUpdate| {
+                    let turned_off = update.instance.context.contains_key("turnedOff");
+                    if turned_off {
+                        info!(
+                            "[VPS] Instance {} marked as turned off",
+                            update.instance.id
+                        );
+                    } else {
+                        info!(
+                            "[VPS] Instance {} active (owner={}, kind={})",
+                            update.instance.id,
+                            update.instance.owner_id,
+                            update.instance.app_kind
+                        );
+                    }
+                }),
+            );
+        } else {
+            warn!("[VPS] vps_enabled is true but vps_secret is empty — skipping VPS socket");
+        }
     }
 
     // Keep the application running
