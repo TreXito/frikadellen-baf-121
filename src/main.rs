@@ -19,7 +19,7 @@ use std::collections::HashMap;
 use std::time::Instant;
 use frikadellen_baf::utils::restart_process;
 
-const VERSION: &str = "af-3.0";
+const VERSION: &str = env!("FRIKADELLEN_VERSION");
 const PERIODIC_AH_CLAIM_CHECK_INTERVAL_SECS: u64 = 300;
 const GITHUB_REPO: &str = "TreXito/frikadellen-baf-121";
 

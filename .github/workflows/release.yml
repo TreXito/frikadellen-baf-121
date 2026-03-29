@@ -84,8 +84,22 @@ jobs:
           path: target
           key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
 
+      - name: Get build version
+        id: build_version
+        shell: bash
+        run: |
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/}
+          else
+            VERSION="build-$(date -u +%Y%m%d)-${GITHUB_SHA::7}"
+          fi
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Build version: $VERSION"
+
       - name: Build release binaries
         run: cargo build --release --target ${{ matrix.target }}
+        env:
+          FRIKADELLEN_VERSION: ${{ steps.build_version.outputs.version }}
 
       - name: Strip binaries (Linux and macOS)
         if: matrix.os == 'ubuntu-latest' || matrix.os == 'macos-latest'
@@ -142,7 +156,7 @@ jobs:
             VERSION=${GITHUB_REF#refs/tags/}
           else
             # Otherwise use the commit SHA
-            VERSION="build-$(date +%Y%m%d)-${GITHUB_SHA::7}"
+            VERSION="build-$(date -u +%Y%m%d)-${GITHUB_SHA::7}"
           fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
           echo "Version: $VERSION"
