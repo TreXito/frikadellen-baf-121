@@ -1,12 +1,12 @@
 use std::process::Command;
 
 fn main() {
-    println!("cargo:rerun-if-env-changed=FRIKADELLEN_VERSION");
+    println!("cargo:rerun-if-env-changed=FRIKADELLEN_BUILD_VERSION");
 
-    // Prefer an explicit version supplied by CI or the user.
-    if let Ok(v) = std::env::var("FRIKADELLEN_VERSION") {
+    // Prefer an explicit build version supplied by CI or the user.
+    if let Ok(v) = std::env::var("FRIKADELLEN_BUILD_VERSION") {
         if !v.is_empty() {
-            println!("cargo:rustc-env=FRIKADELLEN_VERSION={v}");
+            println!("cargo:rustc-env=FRIKADELLEN_BUILD_VERSION={v}");
             return;
         }
     }
@@ -29,7 +29,7 @@ fn main() {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_else(|| "unknown".into());
 
-    println!("cargo:rustc-env=FRIKADELLEN_VERSION=build-{date}-{sha}");
+    println!("cargo:rustc-env=FRIKADELLEN_BUILD_VERSION=build-{date}-{sha}");
 
     // Rebuild when git HEAD changes (new commit / branch switch).
     println!("cargo:rerun-if-changed=.git/HEAD");

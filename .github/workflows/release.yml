@@ -99,7 +99,7 @@ jobs:
       - name: Build release binaries
         run: cargo build --release --target ${{ matrix.target }}
         env:
-          FRIKADELLEN_VERSION: ${{ steps.build_version.outputs.version }}
+          FRIKADELLEN_BUILD_VERSION: ${{ steps.build_version.outputs.version }}
 
       - name: Strip binaries (Linux and macOS)
         if: matrix.os == 'ubuntu-latest' || matrix.os == 'macos-latest'

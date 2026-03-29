@@ -19,7 +19,8 @@ use std::collections::HashMap;
 use std::time::Instant;
 use frikadellen_baf::utils::restart_process;
 
-const VERSION: &str = env!("FRIKADELLEN_VERSION");
+const VERSION: &str = "af-3.0";
+const BUILD_VERSION: &str = env!("FRIKADELLEN_BUILD_VERSION");
 const PERIODIC_AH_CLAIM_CHECK_INTERVAL_SECS: u64 = 300;
 const GITHUB_REPO: &str = "TreXito/frikadellen-baf-121";
 
@@ -237,12 +238,22 @@ struct GithubRelease {
 }
 
 /// Check the GitHub releases API to see if the current binary is outdated.
-/// Logs a prominent warning if the latest release tag differs from `VERSION`.
+/// Compares the build version (or the loader's `.version` file) against the
+/// latest GitHub release tag.  The `VERSION` constant is intentionally NOT
+/// used here — it holds the cofl socket protocol version, not the build id.
 async fn check_version_outdated() {
 
-    // If the loader is managing updates it writes a `.version` file next to the binary.
-    // When that file exists and matches the latest release we can trust the loader, so
-    // the check is still useful even for loader users who have stale binaries.
+    // Determine our local version.  The loader writes a `.version` file next
+    // to the binary after every successful update.  If that file exists we
+    // trust it; otherwise fall back to BUILD_VERSION baked in at compile time.
+    let local_version: String = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join(".version")))
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| BUILD_VERSION.to_string());
+
     let client = match reqwest::Client::builder()
         .user_agent("FrikadellenBAF/version-check")
         .timeout(std::time::Duration::from_secs(8))
@@ -261,7 +272,7 @@ async fn check_version_outdated() {
         Err(_) => return,
     };
     let latest_tag = release.tag_name.trim();
-    if latest_tag == VERSION {
+    if latest_tag == local_version {
         return; // Up to date
     }
     let date_info = release.published_at
@@ -270,7 +281,7 @@ async fn check_version_outdated() {
         .unwrap_or("unknown date");
     warn!("========================================");
     warn!("YOU ARE USING AN OUTDATED CLIENT, BUG REPORTS ARE NOT VALID FOR OUTDATED CLIENTS");
-    warn!("Current version: {}  |  Latest release: {} ({})", VERSION, latest_tag, date_info);
+    warn!("Current version: {}  |  Latest release: {} ({})", local_version, latest_tag, date_info);
     warn!("Download the latest release or use the FrikadellenBAF-loader for automatic updates.");
     warn!("========================================");
 }
