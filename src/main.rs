@@ -1711,12 +1711,40 @@ async fn main() -> Result<()> {
                         continue;
                     }
 
+                    // Cap BUY amounts for unstackable items (e.g. Enchanted Books)
+                    // to available inventory slots so the bot doesn't order more
+                    // than it can hold.  Each unstackable unit occupies one slot.
+                    let order_amount = if effective_is_buy
+                        && frikadellen_baf::utils::is_unstackable_item(
+                            &bazaar_flip.item_name,
+                            bazaar_flip.item_tag.as_deref(),
+                        )
+                    {
+                        let empty = bot_client_for_ws.empty_slot_count() as u64;
+                        // Keep at least 2 slots free for AH/sell operations.
+                        let max_buy = empty.saturating_sub(2);
+                        if max_buy == 0 {
+                            debug!("Skipping unstackable BUY — not enough inventory space ({} empty): {}", empty, bazaar_flip.item_name);
+                            continue;
+                        }
+                        let capped = bazaar_flip.amount.min(max_buy);
+                        if capped < bazaar_flip.amount {
+                            info!(
+                                "[BazaarFlips] Capping unstackable BUY amount {} → {} (only {} empty slots): {}",
+                                bazaar_flip.amount, capped, empty, bazaar_flip.item_name
+                            );
+                        }
+                        capped
+                    } else {
+                        bazaar_flip.amount
+                    };
+
                     let (order_color, order_label) = if effective_is_buy { ("§a", "BUY") } else { ("§c", "SELL") };
                     let baf_msg = format!(
                         "§f[§4BAF§f]: §6[BZ] {}{}§7 order: §r{}§r §7x{} @ §6{}§7 coins/unit",
                         order_color, order_label,
                         bazaar_flip.item_name,
-                        bazaar_flip.amount,
+                        order_amount,
                         format_coins_f64(bazaar_flip.price_per_unit)
                     );
                     print_mc_chat(&baf_msg);
@@ -1735,14 +1763,14 @@ async fn main() -> Result<()> {
                         CommandType::BazaarBuyOrder {
                             item_name: bazaar_flip.item_name.clone(),
                             item_tag: bazaar_flip.item_tag.clone(),
-                            amount: bazaar_flip.amount,
+                            amount: order_amount,
                             price_per_unit: bazaar_flip.price_per_unit,
                         }
                     } else {
                         CommandType::BazaarSellOrder {
                             item_name: bazaar_flip.item_name.clone(),
                             item_tag: bazaar_flip.item_tag.clone(),
-                            amount: bazaar_flip.amount,
+                            amount: order_amount,
                             price_per_unit: bazaar_flip.price_per_unit,
                         }
                     };
@@ -1947,12 +1975,37 @@ async fn main() -> Result<()> {
                                     debug!("Skipping BUY bazaar flip from chat — filled orders pending: {}", rec.item_name);
                                 } else {
 
+                                // Cap BUY amounts for unstackable items (e.g. Enchanted Books)
+                                let order_amount = if effective_is_buy
+                                    && frikadellen_baf::utils::is_unstackable_item(
+                                        &rec.item_name,
+                                        rec.item_tag.as_deref(),
+                                    )
+                                {
+                                    let empty = bot_client_for_ws.empty_slot_count() as u64;
+                                    let max_buy = empty.saturating_sub(2);
+                                    if max_buy == 0 {
+                                        debug!("Skipping unstackable BUY from chat — not enough space ({} empty): {}", empty, rec.item_name);
+                                        continue;
+                                    }
+                                    let capped = rec.amount.min(max_buy);
+                                    if capped < rec.amount {
+                                        info!(
+                                            "[BazaarFlips] Capping unstackable BUY amount {} → {} (chat): {}",
+                                            rec.amount, capped, rec.item_name
+                                        );
+                                    }
+                                    capped
+                                } else {
+                                    rec.amount
+                                };
+
                                 let (order_color, order_label) = if effective_is_buy { ("§a", "BUY") } else { ("§c", "SELL") };
                                 let baf_msg = format!(
                                     "§f[§4BAF§f]: §6[BZ] {}{}§7 order: §r{}§r §7x{} @ §6{}§7 coins/unit",
                                     order_color, order_label,
                                     rec.item_name,
-                                    rec.amount,
+                                    order_amount,
                                     format_coins_f64(rec.price_per_unit)
                                 );
                                 print_mc_chat(&baf_msg);
@@ -1967,14 +2020,14 @@ async fn main() -> Result<()> {
                                     CommandType::BazaarBuyOrder {
                                         item_name: rec.item_name.clone(),
                                         item_tag: rec.item_tag.clone(),
-                                        amount: rec.amount,
+                                        amount: order_amount,
                                         price_per_unit: rec.price_per_unit,
                                     }
                                 } else {
                                     CommandType::BazaarSellOrder {
                                         item_name: rec.item_name.clone(),
                                         item_tag: rec.item_tag.clone(),
-                                        amount: rec.amount,
+                                        amount: order_amount,
                                         price_per_unit: rec.price_per_unit,
                                     }
                                 };
@@ -2481,8 +2534,8 @@ async fn main() -> Result<()> {
                         debug!("[Queue] Dropping {:?} — inventory full (selling mode)", cmd.command_type);
                         // Proactively request /cofl sellinventory to get sell
                         // recommendations (especially bazaar) when inventory is full.
-                        // Debounce to avoid spamming COFL.
-                        if last_sellinventory_request.elapsed() > Duration::from_secs(120) {
+                        // Debounce to avoid spamming COFL — 60s between requests.
+                        if last_sellinventory_request.elapsed() > Duration::from_secs(60) {
                             last_sellinventory_request = Instant::now();
                             let ws = ws_client_proc.clone();
                             let inv_client = bot_client_proc_inv.clone();
@@ -2507,6 +2560,16 @@ async fn main() -> Result<()> {
                             });
                         }
                         command_queue_processor.complete_current();
+                        // When inventory is full, also ensure ManageOrders is queued
+                        // to collect filled SELL orders (which yield coins, not items)
+                        // and free up bazaar order slots.
+                        if !command_queue_processor.has_manage_orders() {
+                            command_queue_processor.enqueue(
+                                frikadellen_baf::types::CommandType::ManageOrders { cancel_open: false },
+                                frikadellen_baf::types::CommandPriority::High,
+                                false,
+                            );
+                        }
                         sleep(Duration::from_millis(50)).await;
                         continue;
                     }
@@ -3164,9 +3227,19 @@ async fn main() -> Result<()> {
     // When multiple accounts are configured and `multi_switch_time` is set, switch to the
     // next account after the specified number of hours by persisting the next account index
     // and restarting the process.
+    // Subtract previously accumulated session time so the timer continues from where
+    // it left off after a restart (e.g. humanization break, manual restart, crash).
     if ingame_names.len() > 1 {
         if let Some(switch_hours) = config.multi_switch_time {
             let switch_secs = (switch_hours * 3600.0) as u64;
+            let remaining_secs = switch_secs.saturating_sub(previous_session_secs);
+            if remaining_secs == 0 {
+                // Session time already exceeds switch threshold — switch immediately.
+                info!(
+                    "[AccountSwitch] Session time ({:.1}h) already exceeds switch threshold ({:.1}h) — switching now",
+                    previous_session_secs as f64 / 3600.0, switch_hours
+                );
+            }
             let next_index = (current_account_index + 1) % ingame_names.len();
             let next_name = ingame_names[next_index].clone();
             let index_path = account_index_path.clone();
@@ -3176,11 +3249,12 @@ async fn main() -> Result<()> {
             let session_times_path_switch = session_times_path.clone();
             let ign_switch = ingame_name.clone();
             info!(
-                "[AccountSwitch] Will switch from {} to {} in {:.1}h",
-                ingame_name, next_name, switch_hours
+                "[AccountSwitch] Will switch from {} to {} in {:.1}h (total {:.1}h, already {:.1}h)",
+                ingame_name, next_name, remaining_secs as f64 / 3600.0,
+                switch_hours, previous_session_secs as f64 / 3600.0
             );
             tokio::spawn(async move {
-                sleep(Duration::from_secs(switch_secs)).await;
+                sleep(Duration::from_secs(remaining_secs)).await;
                 info!(
                     "[AccountSwitch] Switch time reached — switching to account {} ({})",
                     next_index + 1, next_name
@@ -3263,6 +3337,7 @@ async fn main() -> Result<()> {
         let session_times_path_human = session_times_path.clone();
         let prev_secs_human = previous_session_secs;
         let started_human = std::time::Instant::now();
+        let macro_paused_human = macro_paused.clone();
         let min_interval = config.humanization_min_interval_minutes.max(5); // floor at 5 min
         let max_interval = config.humanization_max_interval_minutes.max(min_interval + 1);
         let min_break = config.humanization_min_break_minutes.max(1); // floor at 1 min
@@ -3285,6 +3360,20 @@ async fn main() -> Result<()> {
                 interval_secs as f64 / 60.0
             );
             sleep(Duration::from_secs(interval_secs)).await;
+
+            // If the macro is paused by the user, wait until it's unpaused
+            // before starting the rest break.  This prevents the scheduler
+            // from overriding the user's manual pause.
+            if macro_paused_human.load(std::sync::atomic::Ordering::Relaxed) {
+                info!("[Humanization] Macro is paused — deferring rest break until resumed");
+                loop {
+                    sleep(Duration::from_secs(5)).await;
+                    if !macro_paused_human.load(std::sync::atomic::Ordering::Relaxed) {
+                        info!("[Humanization] Macro resumed — proceeding with rest break");
+                        break;
+                    }
+                }
+            }
 
             // Pick random break duration
             let break_secs = {

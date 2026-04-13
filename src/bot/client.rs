@@ -878,6 +878,13 @@ impl BotClient {
         empty <= NEAR_FULL_SLOT_THRESHOLD
     }
 
+    /// Returns the number of empty player inventory slots (cached).
+    /// Used to cap BUY order amounts for unstackable items so the bot
+    /// doesn't try to buy more items than it can hold.
+    pub fn empty_slot_count(&self) -> u8 {
+        self.cached_empty_player_slots.load(Ordering::Relaxed)
+    }
+
     /// Clear window tracking state so the bot is no longer associated with
     /// any open window.  Used during the AH flip countdown to ensure the
     /// bot is free to process incoming flips.  The server-side window will
@@ -4705,6 +4712,10 @@ async fn handle_window_interaction(
                                 break;
                             }
                             if state.inventory_full.load(Ordering::Relaxed) && order_is_buy {
+                                // Inventory is full — BUY items can't be claimed.
+                                // Treat as if Order options opened so we do NOT falsely
+                                // emit a BazaarOrderCollected event.
+                                order_options_opened = true;
                                 break;
                             }
                             if tokio::time::Instant::now() >= click_deadline {
