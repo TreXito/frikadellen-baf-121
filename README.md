@@ -290,8 +290,6 @@ The `config.toml` file is created automatically on first run. You can edit it wi
 
 | Field | Type | Default | Description |
 |---|---|---|---|
-| `fastbuy` | boolean | — | Skip AH confirmation window for faster buys |
-| `freemoney` | boolean | — | Advanced fast-buy mode |
 | `use_cofl_chat` | boolean | `true` | Use Coflnet in-game chat |
 | `auto_cookie` | integer | `0` | Auto-purchase booster cookie interval (0 = disabled) |
 | `hypixel_api_key` | string | — | Hypixel API key for fetching active auctions |
