@@ -3367,13 +3367,24 @@ async fn handle_window_interaction(
                     let poll_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(500);
                     let mut kind;
                     loop {
-                        // Register the Notify listener BEFORE reading slots.
-                        // notify_waiters() drops the notification when no task
-                        // is waiting, so if ContainerSetContent fires between
-                        // the slot read and the select! below, the notification
-                        // would be lost and we'd stall for the full 500ms
-                        // deadline.  Registering first guarantees we capture it.
+                        // Register the Notify waiter BEFORE reading slots.
+                        // `Notified::notified()` alone only creates the future;
+                        // the waiter is registered when the future is first
+                        // polled.  If ContainerSetContent fires between the
+                        // slot read and the `select!` below, `notify_waiters`
+                        // drops the notification and the loop stalls for the
+                        // full 500ms deadline — a worst-case nugget-detection
+                        // stall on fast servers where the packet lands in the
+                        // same frame as OpenScreen.
+                        //
+                        // `Notified::enable` pins the future and registers the
+                        // waiter without awaiting, closing that race so any
+                        // notification fired after this point is guaranteed to
+                        // wake us — the slot data lookup sees nugget/potato in
+                        // a single iteration instead of after a timeout.
                         let notified = state.slot_data_notify.notified();
+                        tokio::pin!(notified);
+                        notified.as_mut().enable();
 
                         let menu = bot.menu();
                         let slots = menu.slots();

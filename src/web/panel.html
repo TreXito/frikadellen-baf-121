@@ -261,9 +261,11 @@ a{color:var(--accent2);text-decoration:none}
 
     <div class="card">
         <h2>Controls</h2>
-        <div style="display:flex;gap:10px;margin-bottom:16px">
+        <div style="display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap">
             <button class="btn btn-pause" id="btn-pause" onclick="pauseMacro()">⏸ Pause</button>
             <button class="btn btn-resume" id="btn-resume" onclick="resumeMacro()">▶ Resume</button>
+            <button class="btn btn-sm" id="btn-conn" style="background:var(--warn);color:#1a1a1a" onclick="toggleConnection()">🔌 Disconnect</button>
+            <button class="btn btn-sm" style="background:var(--danger);color:#fff" onclick="killSession()">🛑 Kill Session</button>
             <a class="btn btn-sm btn-download" href="/api/logs/latest" download="latest.log">📥 Download Logs</a>
         </div>
         <div style="display:flex;gap:10px;margin-bottom:16px">
@@ -299,12 +301,20 @@ a{color:var(--accent2);text-decoration:none}
 <!-- Row 3: Active Auctions + Bazaar Orders (side by side) -->
 <div class="grid">
 <div class="card">
+    <h2>Recent Flips <span style="font-size:.8rem;color:var(--text-dim);font-weight:400">(estimated profit from Cofl)</span></h2>
+    <div id="recent-flips-container">
+        <p class="auction-empty">Waiting for flip recommendations...</p>
+    </div>
+</div>
+<div class="card">
     <h2>Active Auctions</h2>
     <div id="auction-container">
         <p class="auction-empty">Loading...</p>
     </div>
 </div>
-<div class="card">
+</div>
+<div class="grid">
+<div class="card" style="grid-column:1 / -1">
     <h2>Bazaar Orders</h2>
     <div id="bazaar-orders-container">
         <p class="auction-empty">Loading...</p>
@@ -627,6 +637,19 @@ async function fetchStatus() {
         isAnonymized = d.anonymize_webhook_name;
         $('btn-pause').style.display = d.macro_paused ? 'none' : '';
         $('btn-resume').style.display = d.macro_paused ? '' : 'none';
+        isConnected = !!d.connected;
+        const connBtn = document.getElementById('btn-conn');
+        if (connBtn) {
+            if (isConnected) {
+                connBtn.textContent = '🔌 Disconnect';
+                connBtn.style.background = 'var(--warn)';
+                connBtn.style.color = '#1a1a1a';
+            } else {
+                connBtn.textContent = '🔗 Connect';
+                connBtn.style.background = 'var(--success)';
+                connBtn.style.color = '#0b0d17';
+            }
+        }
         accounts = d.accounts || [];
         currentAccountIndex = d.current_account_index || 0;
         renderAccounts();
@@ -672,6 +695,66 @@ function renderAccounts() {
 async function pauseMacro() { await fetch('/api/pause', {method:'POST'}); fetchStatus(); }
 async function resumeMacro() { await fetch('/api/resume', {method:'POST'}); fetchStatus(); }
 
+async function killSession() {
+    if (!confirm('Kill the bot session? This terminates the bot process.')) return;
+    try { await fetch('/api/kill_session', {method:'POST'}); } catch(e) {}
+}
+
+let isConnected = true;
+async function toggleConnection() {
+    if (isConnected) {
+        if (!confirm('Disconnect the bot from Hypixel? Flips will stop until you reconnect.')) return;
+        try { await fetch('/api/disconnect', {method:'POST'}); } catch(e) {}
+    } else {
+        if (!confirm('Reconnect to Hypixel? The process will restart.')) return;
+        try { await fetch('/api/connect', {method:'POST'}); } catch(e) {}
+    }
+    fetchStatus();
+}
+
+async function fetchRecentFlips() {
+    try {
+        const r = await fetch('/api/recent_flips');
+        if (r.status === 401) return;
+        const d = await r.json();
+        renderRecentFlips(Array.isArray(d) ? d : []);
+    } catch(e) { console.error('Recent flips fetch failed', e); }
+}
+
+function renderRecentFlips(flips) {
+    const c = document.getElementById('recent-flips-container');
+    if (!c) return;
+    if (!flips.length) {
+        c.innerHTML = '<p class="auction-empty">Waiting for flip recommendations...</p>';
+        return;
+    }
+    const now = Math.floor(Date.now() / 1000);
+    const rows = flips.slice(0, 20).map(f => {
+        const ageSecs = Math.max(0, now - (f.received_at || 0));
+        const ageStr = ageSecs < 60 ? ageSecs + 's ago' : Math.floor(ageSecs / 60) + 'm ago';
+        const profitClass = f.estimated_profit >= 0 ? 'success' : 'danger';
+        const profitPerc = (typeof f.profit_perc === 'number') ? ' (' + f.profit_perc.toFixed(1) + '%)' : '';
+        return '<tr>'
+            + '<td>' + escapeHtml(f.item_name) + '</td>'
+            + '<td style="text-align:right">' + formatCoins(f.starting_bid) + '</td>'
+            + '<td style="text-align:right">' + formatCoins(f.target) + '</td>'
+            + '<td style="text-align:right;color:var(--' + profitClass + ');font-weight:600">'
+              + formatCoins(f.estimated_profit) + profitPerc + '</td>'
+            + '<td style="color:var(--text-dim);font-size:.78rem">' + ageStr + '</td>'
+            + '</tr>';
+    }).join('');
+    c.innerHTML = '<table class="auction-table" style="width:100%;font-size:.82rem">'
+        + '<thead><tr>'
+        + '<th>Item</th><th style="text-align:right">Buy</th><th style="text-align:right">Target</th>'
+        + '<th style="text-align:right">Est. Profit</th><th>When</th>'
+        + '</tr></thead><tbody>' + rows + '</tbody></table>';
+}
+
+function escapeHtml(s) {
+    return String(s || '')
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
 async function toggleAnonymize(enabled) {
     await fetch('/api/toggle_anonymize', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({enabled})});
 }
@@ -1578,11 +1661,13 @@ fetchStatus();
 fetchInventory();
 fetchAuctions();
 fetchBazaarOrders();
+fetchRecentFlips();
 connectChat();
 setInterval(fetchStatus, 3000);
 setInterval(fetchInventory, 10000);
 setInterval(fetchAuctions, 30000);
 setInterval(fetchBazaarOrders, 10000);
+setInterval(fetchRecentFlips, 3000);
 </script>
 </body>
 </html>

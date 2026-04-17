@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc, Mutex,
@@ -70,7 +70,34 @@ pub struct WebSharedState {
     pub bazaar_tracker: Arc<BazaarOrderTracker>,
     /// Config loader for persisting changes to config.toml.
     pub config_loader: Arc<crate::config::ConfigLoader>,
+    /// Whether the Minecraft connection is currently live.
+    /// Updated on `BotEvent::Disconnected` (→ false) and after a successful
+    /// reconnect / startup (→ true).  Used by the web GUI to show a
+    /// Connect/Disconnect toggle and by the flip intake to drop flips while
+    /// the bot is offline.
+    pub connected: Arc<AtomicBool>,
+    /// Rolling buffer of recent auction flip recommendations with estimated
+    /// profit — displayed live in the web GUI so each flip surfaces the
+    /// expected profit as reported by Coflnet.
+    pub recent_flips: Arc<Mutex<VecDeque<RecentFlip>>>,
 }
+
+/// A recent auction flip recommendation as shown in the web panel.
+/// `estimated_profit = target - starting_bid` (in coins).
+#[derive(Clone, Serialize)]
+pub struct RecentFlip {
+    pub item_name: String,
+    pub starting_bid: u64,
+    pub target: u64,
+    pub estimated_profit: i64,
+    pub profit_perc: Option<f64>,
+    pub finder: Option<String>,
+    /// Unix seconds when the flip was received.
+    pub received_at: u64,
+}
+
+/// Maximum number of recent flips retained for the web panel.
+pub const RECENT_FLIPS_CAPACITY: usize = 50;
 
 // ── JSON payloads ────────────────────────────────────────────
 
@@ -90,6 +117,7 @@ struct StatusResponse {
     bazaar_at_limit: bool,
     auction_at_limit: bool,
     inventory_full: bool,
+    connected: bool,
 }
 
 #[derive(Deserialize)]
@@ -264,6 +292,10 @@ pub async fn start_web_server(state: WebSharedState, port: u16) {
         .route("/api/status", get(get_status))
         .route("/api/pause", get(pause_macro).post(pause_macro))
         .route("/api/resume", get(resume_macro).post(resume_macro))
+        .route("/api/kill_session", axum::routing::post(kill_session))
+        .route("/api/disconnect", axum::routing::post(disconnect_bot))
+        .route("/api/connect", axum::routing::post(connect_bot))
+        .route("/api/recent_flips", get(get_recent_flips))
         .route("/api/inventory", get(get_inventory))
         .route("/api/game-view", get(get_game_view))
         .route("/api/toggle_ah", axum::routing::post(toggle_ah))
@@ -469,6 +501,7 @@ async fn get_status(State(s): State<WebSharedState>) -> Json<StatusResponse> {
         bazaar_at_limit: s.bot_client.is_bazaar_at_limit(),
         auction_at_limit: s.bot_client.is_auction_at_limit(),
         inventory_full: s.bot_client.is_inventory_full(),
+        connected: s.connected.load(Ordering::Relaxed),
     })
 }
 
@@ -488,6 +521,69 @@ async fn resume_macro(State(s): State<WebSharedState>) -> impl IntoResponse {
     print_mc_chat(&msg);
     let _ = s.chat_tx.send(msg);
     StatusCode::OK
+}
+
+/// Terminate the BAF process.  The loader (if used) will restart it; otherwise
+/// the bot stops entirely.  Used from the web panel "Kill Session" button.
+async fn kill_session(State(s): State<WebSharedState>) -> impl IntoResponse {
+    info!("[WebGUI] Kill session requested via web panel — exiting process");
+    let msg = "[BAF Web] Kill session triggered — shutting down".to_string();
+    print_mc_chat(&msg);
+    let _ = s.chat_tx.send(msg);
+
+    // Give the HTTP response a chance to flush, then exit.
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        std::process::exit(0);
+    });
+    StatusCode::OK
+}
+
+/// Disconnect the bot from Hypixel.  Pauses the macro so no flips are queued
+/// while offline and enqueues `/quit` at critical priority.  The user can
+/// reconnect via the `/api/connect` endpoint.
+async fn disconnect_bot(State(s): State<WebSharedState>) -> impl IntoResponse {
+    info!("[WebGUI] Disconnect requested via web panel");
+    s.macro_paused.store(true, Ordering::Relaxed);
+    // Optimistically mark as disconnected so the UI flips the button label
+    // immediately; the BotEvent::Disconnected handler will confirm this.
+    s.connected.store(false, Ordering::Relaxed);
+    let msg = "[BAF Web] Disconnecting from Hypixel".to_string();
+    print_mc_chat(&msg);
+    let _ = s.chat_tx.send(msg);
+    s.command_queue.enqueue(
+        CommandType::SendChat {
+            message: "/quit".to_string(),
+        },
+        CommandPriority::Critical,
+        false,
+    );
+    StatusCode::OK
+}
+
+/// Reconnect by restarting the process.  This re-runs the full startup
+/// workflow (login + 4 steps) before flips resume.
+async fn connect_bot(State(s): State<WebSharedState>) -> impl IntoResponse {
+    info!("[WebGUI] Connect requested via web panel — restarting process");
+    s.macro_paused.store(false, Ordering::Relaxed);
+    let msg = "[BAF Web] Reconnecting to Hypixel — restarting session".to_string();
+    print_mc_chat(&msg);
+    let _ = s.chat_tx.send(msg);
+    tokio::spawn(async {
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        crate::utils::process::restart_process();
+    });
+    StatusCode::OK
+}
+
+/// Return the most recent auction flip recommendations (with estimated profit)
+/// for the live flips list in the web GUI.
+async fn get_recent_flips(State(s): State<WebSharedState>) -> impl IntoResponse {
+    let snapshot: Vec<RecentFlip> = match s.recent_flips.lock() {
+        Ok(buf) => buf.iter().rev().cloned().collect(),
+        Err(_) => Vec::new(),
+    };
+    Json(snapshot)
 }
 
 async fn get_inventory(State(s): State<WebSharedState>) -> impl IntoResponse {
