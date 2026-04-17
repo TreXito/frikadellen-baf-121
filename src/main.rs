@@ -1648,9 +1648,10 @@ async fn main() -> Result<()> {
                         continue;
                     }
 
-                    // Block flips until startup workflow is complete — the bot
-                    // state can briefly be Idle between queued startup commands,
-                    // so checking is_startup_in_progress() covers that gap.
+                    // Secondary guard covering the gap where the authoritative
+                    // `startup_completed` flag may not yet reflect a freshly
+                    // started workflow (startup steps can briefly leave the
+                    // bot in Idle between queued commands).
                     if bot_client_for_ws.is_startup_in_progress() {
                         debug!("Skipping AH flip during startup: {}", flip.item_name);
                         continue;
