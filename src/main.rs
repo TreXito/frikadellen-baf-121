@@ -641,7 +641,7 @@ async fn main() -> Result<()> {
     let mut bot_client = BotClient::new();
     bot_client.set_auto_cookie_hours(config.auto_cookie);
     bot_client.freemoney = config.freemoney_enabled();
-    bot_client.fastbuy = config.fastbuy_enabled();
+    bot_client.skip = config.skip_enabled();
     bot_client.bed_spam_click_delay = config.bed_spam_click_delay;
     bot_client.bed_pre_click_ms = config.bed_pre_click_ms;
     bot_client.bazaar_order_cancel_minutes_per_million = config.bazaar_order_cancel_minutes_per_million;

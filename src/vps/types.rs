@@ -116,6 +116,7 @@ pub const FBAF_DEFAULT_SETTINGS: &str = r#"{
     "bazaar_tax_rate": 1.25,
     "auction_listing_delay_ms": 1500,
     "bed_spam": false,
+    "skip": false,
     "use_cofl_chat": true,
     "auto_cookie": 0,
     "auction_duration_hours": 24,

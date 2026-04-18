@@ -314,8 +314,8 @@ pub struct BotClient {
     auto_cookie_hours: Arc<RwLock<u64>>,
     /// Hidden config gate for purchaseAt bed timing mode.
     pub freemoney: bool,
-    /// Enable fast-buy: skip-click on predicted Confirm Purchase window.
-    pub fastbuy: bool,
+    /// Enable skip-click: pre-click confirm on predicted Confirm Purchase window.
+    pub skip: bool,
     /// Interval in milliseconds for grace-period bed/gold_nugget click loops.
     pub bed_spam_click_delay: u64,
     /// Item name to sell via bazaar "Sell Instantly" when inventory is full
@@ -362,6 +362,9 @@ pub struct BotClient {
     /// Whether bazaar flips are enabled in the config.  Used by the startup
     /// workflow to decide whether to cancel all open bazaar orders.
     pub enable_bazaar_flips: Arc<AtomicBool>,
+    /// Ensures the dedicated command processor is only spawned once, using the
+    /// first live Azalea `Client` handle delivered to `event_handler`.
+    command_processor_started: Arc<AtomicBool>,
 }
 #[derive(Debug, Clone)]
 pub enum BotEvent {
@@ -471,7 +474,7 @@ impl BotClient {
             cached_inventory_json: Arc::new(RwLock::new(None)),
             auto_cookie_hours: Arc::new(RwLock::new(0)),
             freemoney: false,
-            fastbuy: false,
+            skip: false,
             bed_spam_click_delay: 100,
             insta_sell_item: Arc::new(RwLock::new(None)),
             bed_pre_click_ms: 100,
@@ -489,6 +492,7 @@ impl BotClient {
             command_queue: Arc::new(RwLock::new(None)),
             startup_in_progress: Arc::new(AtomicBool::new(false)),
             enable_bazaar_flips: Arc::new(AtomicBool::new(true)),
+            command_processor_started: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -580,7 +584,7 @@ impl BotClient {
             cached_inventory_json: self.cached_inventory_json.clone(),
             auto_cookie_hours: self.auto_cookie_hours.clone(),
             freemoney: self.freemoney,
-            fastbuy: self.fastbuy,
+            skip: self.skip,
             bed_spam_click_delay: self.bed_spam_click_delay,
             cookie_time_secs: Arc::new(RwLock::new(0)),
             cookie_step: Arc::new(RwLock::new(CookieStep::Initial)),
@@ -608,6 +612,7 @@ impl BotClient {
             startup_in_progress: self.startup_in_progress.clone(),
             enable_bazaar_flips: self.enable_bazaar_flips.clone(),
             order_cancel_failures: Arc::new(RwLock::new(HashMap::new())),
+            command_processor_started: self.command_processor_started.clone(),
         };
         
         // Build and start the client (this blocks until disconnection)
@@ -1175,8 +1180,8 @@ pub struct BotClientState {
     pub auto_cookie_hours: Arc<RwLock<u64>>,
     /// Hidden config gate for purchaseAt bed timing mode.
     pub freemoney: bool,
-    /// Enable fast-buy: skip-click on predicted Confirm Purchase window.
-    pub fastbuy: bool,
+    /// Enable skip-click: pre-click confirm on predicted Confirm Purchase window.
+    pub skip: bool,
     /// Interval in milliseconds for grace-period bed/gold_nugget click loops.
     pub bed_spam_click_delay: u64,
     /// Measured remaining cookie time in seconds (set during CheckingCookie).
@@ -1265,6 +1270,8 @@ pub struct BotClientState {
     /// After `MAX_CANCEL_RETRIES` failures for the same order, the order is skipped.
     /// Cleared on successful cancel or at the start of a `cancel_open` ManageOrders run.
     pub order_cancel_failures: Arc<RwLock<HashMap<String, u32>>>,
+    /// Ensures the dedicated command processor is only spawned once.
+    pub command_processor_started: Arc<AtomicBool>,
 }
 
 impl Default for BotClientState {
@@ -1319,7 +1326,7 @@ impl Default for BotClientState {
             cached_inventory_json: Arc::new(RwLock::new(None)),
             auto_cookie_hours: Arc::new(RwLock::new(0)),
             freemoney: false,
-            fastbuy: false,
+            skip: false,
             bed_spam_click_delay: 100,
             cookie_time_secs: Arc::new(RwLock::new(0)),
             cookie_step: Arc::new(RwLock::new(CookieStep::Initial)),
@@ -1347,6 +1354,7 @@ impl Default for BotClientState {
             startup_in_progress: Arc::new(AtomicBool::new(false)),
             enable_bazaar_flips: Arc::new(AtomicBool::new(true)),
             order_cancel_failures: Arc::new(RwLock::new(HashMap::new())),
+            command_processor_started: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -2064,13 +2072,16 @@ async fn event_handler(
     event: Event,
     state: BotClientState,
 ) -> Result<()> {
-    // Process any pending commands first
-    // We use try_recv() to avoid blocking on command reception
-    if let Ok(mut command_rx) = state.command_rx.try_lock() {
-        if let Ok(command) = command_rx.try_recv() {
-            // Execute the command
-            execute_command(&bot, &command, &state).await;
-        }
+    // Spawn the dedicated command processor on the first event_handler call.
+    // This replaces the opportunistic try_recv() drain: commands are now
+    // processed as soon as they arrive, eliminating jitter from waiting for
+    // the next Azalea event.
+    if !state.command_processor_started.swap(true, Ordering::AcqRel) {
+        let command_bot = bot.clone();
+        let command_state = state.clone();
+        tokio::spawn(async move {
+            command_processor(command_bot, command_state).await;
+        });
     }
 
     match event {
@@ -3036,6 +3047,27 @@ async fn event_handler(
     Ok(())
 }
 
+/// Process queued bot commands independently from the Azalea event stream.
+///
+/// Previously commands were only drained opportunistically from `event_handler`,
+/// which meant a `PurchaseAuction` could sit idle until the next packet/event.
+/// This dedicated loop removes that extra scheduling jitter.
+async fn command_processor(bot: Client, state: BotClientState) {
+    loop {
+        let command = {
+            let mut command_rx = state.command_rx.lock().await;
+            command_rx.recv().await
+        };
+
+        let Some(command) = command else {
+            debug!("Bot command channel closed; stopping command processor");
+            break;
+        };
+
+        execute_command(&bot, &command, &state).await;
+    }
+}
+
 /// Execute a command from the command queue
 async fn execute_command(
     bot: &Client,
@@ -3479,8 +3511,6 @@ async fn handle_window_interaction(
                     let bed_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(70);
                     let mut failed_clicks: usize = 0;
                     loop {
-                        tokio::time::sleep(tokio::time::Duration::from_millis(click_interval_ms)).await;
-
                         if tokio::time::Instant::now() >= bed_deadline {
                             warn!("[AH] Bed timing: grace period did not end — giving up");
                             state.bed_timing_active.store(false, Ordering::Relaxed);
@@ -3512,7 +3542,10 @@ async fn handle_window_interaction(
                             }
                             break;
                         } else if current_kind.contains("potato") {
-                            info!("[AH] Bed timing: potato detected — auction not purchasable, closing");
+                            warn!("[AH] Bed timing: potato detected — auction not purchasable, closing");
+                            let _ = state.event_tx.send(BotEvent::ChatMessage(
+                                "\u{00A7}f[\u{00A7}4BAF\u{00A7}f]: \u{00A7}cAuction already bought by someone else".to_string()
+                            ));
                             state.bed_timing_active.store(false, Ordering::Relaxed);
                             send_raw_close(bot, window_id, &state.handlers);
                             *state.bot_state.write() = BotState::Idle;
@@ -3537,6 +3570,7 @@ async fn handle_window_interaction(
                                 return;
                             }
                         }
+                        tokio::time::sleep(tokio::time::Duration::from_millis(click_interval_ms)).await;
                     }
                 } else if slot_31_kind.contains("gold_nugget") {
                     // ---- Buyable auction (SAFE: gold_nugget confirmed) ----
@@ -3558,20 +3592,20 @@ async fn handle_window_interaction(
                             t0.elapsed().as_secs_f64() * 1000.0
                         );
                     }
-                    if state.fastbuy {
-                        info!("[AH] gold_nugget confirmed — sending buy + skip (fastbuy)");
+                    if state.skip {
+                        info!("[AH] gold_nugget confirmed — sending buy + skip-click");
                     } else {
                         info!("[AH] gold_nugget confirmed — sending buy click");
                     }
                     // Use raw connection to bypass ECS queue for the buy click.
                     send_raw_click(bot, window_id, 31);
 
-                    // Skip-click: only when fastbuy is explicitly enabled,
+                    // Skip-click: only when skip is enabled,
                     // pre-click slot 11 on the predicted Confirm Purchase
                     // window in the same TCP burst as the buy-click.
-                    // When fastbuy is off the Confirm Purchase handler will
+                    // When skip is off the Confirm Purchase handler will
                     // click confirm reactively when the window opens.
-                    if state.fastbuy {
+                    if state.skip {
                         // Redundant second buy click to guard against packet
                         // loss — only needed when we also send the skip-click,
                         // because a lost buy-click + queued confirm-click on a
@@ -3579,7 +3613,7 @@ async fn handle_window_interaction(
                         send_raw_click(bot, window_id, 31);
 
                         let next_wid = if window_id == 255 { 1u8 } else { window_id + 1 };
-                        info!("[AH] Fastbuy: pre-clicking slot 11 on predicted window {} (same burst)", next_wid);
+                        info!("[AH] Skip: pre-clicking slot 11 on predicted window {} (same burst)", next_wid);
                         state.skip_click_sent.store(true, Ordering::Relaxed);
                         // Use raw connection for the skip-click too.
                         send_raw_click(bot, next_wid, 11);
@@ -3605,7 +3639,17 @@ async fn handle_window_interaction(
                         }
                     };
                     if should_close {
+                        let msg = if slot_31_kind.contains("poisonous_potato") {
+                            "\u{00A7}f[\u{00A7}4BAF\u{00A7}f]: \u{00A7}cCan't afford auction"
+                        } else if slot_31_kind.contains("potato") {
+                            "\u{00A7}f[\u{00A7}4BAF\u{00A7}f]: \u{00A7}cAuction already bought by someone else"
+                        } else if slot_31_kind.contains("feather") {
+                            "\u{00A7}f[\u{00A7}4BAF\u{00A7}f]: \u{00A7}cAuction no longer available"
+                        } else {
+                            "\u{00A7}f[\u{00A7}4BAF\u{00A7}f]: \u{00A7}cAuction not purchasable"
+                        };
                         warn!("[AH] Slot 31 = {} — auction not purchasable, closing window", slot_31_kind);
+                        let _ = state.event_tx.send(BotEvent::ChatMessage(msg.to_string()));
                         *state.purchase_start_time.write() = None;
                         *state.pending_purchase_at_ms.write() = None;
                         send_raw_close(bot, window_id, &state.handlers);
@@ -3635,17 +3679,10 @@ async fn handle_window_interaction(
                 }
 
                 // When skip-click was sent, the server already has the confirm
-                // click queued from the same TCP burst as the buy-click.  Wait
-                // just long enough for the server to process it (2 ticks =
-                // 100 ms) before retrying.  The previous 300 ms value was
-                // overly conservative and caused a redundant retry click on
-                // low-latency connections where the purchase completes in
-                // ~50 ms but the window lingers for ~300 ms.
-                //
-                // Without skip-click the initial wait is shorter because the
-                // click was just sent above and we want to retry quickly if it
-                // was lost.
-                let initial_wait_ms = if skip_was_sent { 100u64 } else { CONFIRM_PURCHASE_RETRY_MS };
+                // click queued from the same TCP burst as the buy-click.  Use
+                // the same retry interval — the safety loop below handles any
+                // cases where the server needs more time.
+                let initial_wait_ms = CONFIRM_PURCHASE_RETRY_MS;
                 tokio::time::sleep(tokio::time::Duration::from_millis(initial_wait_ms)).await;
 
                 // Safety retry loop: if the window is still open (pre-click failed,
