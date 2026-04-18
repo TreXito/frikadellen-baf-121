@@ -1485,7 +1485,7 @@ function buildTomlFromGUI(originalToml) {
         lines.push(tomlLine(key, val, CONFIG_FIELDS[key]));
     }
 
-    // Also preserve fields that aren't in our GUI (e.g. freemoney, fastbuy, enable_ah_flips, etc.)
+    // Also preserve fields that aren't in our GUI (e.g. freemoney, skip, enable_ah_flips, etc.)
     for (const [key, val] of Object.entries(parsed)) {
         if (written.has(key)) continue;
         written.add(key);

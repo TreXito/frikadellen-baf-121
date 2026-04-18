@@ -116,10 +116,11 @@ pub struct Config {
     #[serde(default)]
     pub bed_spam: bool,
 
-    /// Advanced: enable fast-buy skip-click on predicted Confirm Purchase window.
-    /// Not shown in serialized configs unless explicitly set by the user.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub fastbuy: Option<bool>,
+    /// Enable fast-buy skip-click on predicted Confirm Purchase window.
+    /// When true, the bot pre-clicks slot 11 (confirm) in the same TCP burst as
+    /// the buy-click, saving one round-trip to the server.
+    #[serde(default, alias = "fastbuy")]
+    pub skip: bool,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub freemoney: Option<bool>,
@@ -313,7 +314,7 @@ impl Default for Config {
             enable_bazaar_flips: true,
             enable_ah_flips: true,
             bed_spam: false,
-            fastbuy: None,
+            skip: false,
             freemoney: None,
             use_cofl_chat: true,
             auto_cookie: 0,
@@ -345,8 +346,8 @@ impl Config {
         self.freemoney.unwrap_or(false)
     }
 
-    pub fn fastbuy_enabled(&self) -> bool {
-        self.fastbuy.unwrap_or(false)
+    pub fn skip_enabled(&self) -> bool {
+        self.skip
     }
 
     /// Returns the webhook URL only if it is non-empty.
@@ -549,21 +550,33 @@ proxy_credentials = "myuser:mypassword"
     }
 
     #[test]
-    fn fastbuy_defaults_to_false() {
+    fn skip_defaults_to_false() {
         let config = Config::default();
-        assert!(!config.fastbuy_enabled());
+        assert!(!config.skip_enabled());
     }
 
     #[test]
-    fn parses_fastbuy_true() {
+    fn parses_skip_true() {
+        let config: Config = toml::from_str("skip = true").expect("config should parse");
+        assert!(config.skip_enabled());
+    }
+
+    #[test]
+    fn parses_skip_false() {
+        let config: Config = toml::from_str("skip = false").expect("config should parse");
+        assert!(!config.skip_enabled());
+    }
+
+    #[test]
+    fn fastbuy_alias_still_works() {
         let config: Config = toml::from_str("fastbuy = true").expect("config should parse");
-        assert!(config.fastbuy_enabled());
+        assert!(config.skip_enabled());
     }
 
     #[test]
-    fn parses_fastbuy_false() {
-        let config: Config = toml::from_str("fastbuy = false").expect("config should parse");
-        assert!(!config.fastbuy_enabled());
+    fn skip_appears_in_default_config() {
+        let toml = toml::to_string_pretty(&Config::default()).expect("default config should serialize");
+        assert!(toml.contains("skip = false"), "skip should appear in default config");
     }
 
     #[test]
