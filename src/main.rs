@@ -872,16 +872,16 @@ async fn main() -> Result<()> {
                             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                             if let Some(window_json) = bot_upload.get_cached_window_json() {
                                 let msg = serde_json::json!({
-                                    "type": "UploadBazaar",
+                                    "type": "UploadBazaarOrders",
                                     "data": window_json
                                 }).to_string();
                                 if let Err(e) = ws_upload.send_message(&msg).await {
-                                    tracing::warn!("[UploadBazaar] Failed to send bazaar window data: {}", e);
+                                    tracing::warn!("[UploadBazaarOrders] Failed to send bazaar window data: {}", e);
                                 } else {
-                                    tracing::info!("[UploadBazaar] Sent bazaar window data to COFL");
+                                    tracing::info!("[UploadBazaarOrders] Sent bazaar window data to COFL");
                                 }
                             } else {
-                                tracing::debug!("[UploadBazaar] No cached window JSON available");
+                                tracing::debug!("[UploadBazaarOrders] No cached window JSON available");
                             }
                         });
                     }
