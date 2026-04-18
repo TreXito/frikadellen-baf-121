@@ -101,40 +101,35 @@ pub struct VpsStateUpdate {
 
 /// FBAF default settings — analogous to TPM's `NormalDefault` in VpsSocket.cs.
 /// These settings are auto-generated for the managed backend UI when no custom
-/// config is provided.
+/// config is provided.  Field names and defaults match the `Config` struct in
+/// `src/config/types.rs`.
 pub const FBAF_DEFAULT_SETTINGS: &str = r#"{
-    "igns": [""],
-    "discordID": "",
-    "webhook": "",
-    "webhookFormat": "You bought [``{0}``](https:\/\/sky.coflnet.com\/auction\/{7}) for ``{2}`` (``{1}`` profit) in ``{4}ms``",
-    "useCookie": true,
-    "autoCookie": "1h",
-    "relist": true,
-    "delay": 500,
-    "percentOfTarget": ["0", "10b", 97],
-    "listHours": ["0", "10b", 48],
-    "clickDelay": 125,
-    "bedSpam": false,
-    "blockUselessMessages": true,
-    "roundTo": 6,
-    "skip": {
-        "always": false,
-        "minProfit": "25m",
-        "profitPercentage": "500",
-        "minPrice": "500m",
-        "userFinder": true,
-        "skins": true
-    },
-    "doNotRelist": {
-        "profitOver": "50m",
-        "skinned": true,
-        "tags": ["HYPERION"],
-        "finders": ["USER", "CraftCost"],
-        "stacks": false,
-        "pingOnFailedListing": false,
-        "drillWithParts": true,
-        "expiredAuctions": false,
-        "slots": []
-    },
-    "autoRotate": {}
+    "ingame_name": "",
+    "multi_switch_time": 0,
+    "web_gui_port": 8080,
+    "command_delay_ms": 500,
+    "bed_spam_click_delay": 100,
+    "bed_multiple_clicks_delay": 0,
+    "bed_pre_click_ms": 30,
+    "bazaar_order_check_interval_seconds": 60,
+    "bazaar_order_cancel_minutes_per_million": 1,
+    "bazaar_tax_rate": 1.25,
+    "auction_listing_delay_ms": 1500,
+    "bed_spam": false,
+    "use_cofl_chat": true,
+    "auto_cookie": 0,
+    "auction_duration_hours": 24,
+    "max_items_in_inventory": 12,
+    "proxy_enabled": false,
+    "proxy_address": "",
+    "proxy_credentials": "",
+    "webhook_url": "",
+    "bazaar_webhook_url": "",
+    "discord_id": "",
+    "share_legendary_flips": true,
+    "humanization_enabled": false,
+    "humanization_min_interval_minutes": 45,
+    "humanization_max_interval_minutes": 120,
+    "humanization_min_break_minutes": 2,
+    "humanization_max_break_minutes": 10
 }"#;
