@@ -4925,6 +4925,16 @@ async fn handle_window_interaction(
                     *state.manage_orders_deadline.write() = None;
                     *state.bot_state.write() = BotState::Idle;
                 } else {
+                // Protect recently-placed orders (< 5 min) from cancellation,
+                // even in cancel_open (startup) mode.
+                let too_young_to_cancel = is_order_below_min_cancel_age(&order_identity);
+                if too_young_to_cancel {
+                    info!(
+                        "[ManageOrders] Order \"{}\" is less than {} seconds old — too young to cancel",
+                        order_name, MIN_ORDER_AGE_BEFORE_CANCEL_SECS
+                    );
+                }
+
                 // Determine cancel_due_to_age BEFORE deciding whether to skip.
                 // This allows stale orders to be cancelled even in collect-only mode.
                 let cancel_due_to_age = !cancel_open
@@ -4935,7 +4945,7 @@ async fn handle_window_interaction(
                 let prior_failures = *state.order_cancel_failures.read().get(&cancel_fail_key).unwrap_or(&0);
                 let cancel_exceeded = prior_failures >= MAX_CANCEL_RETRIES;
 
-                if cancel_exceeded && (cancel_open || cancel_due_to_age) {
+                if cancel_exceeded && (cancel_open || cancel_due_to_age) && !too_young_to_cancel {
                     warn!(
                         "[ManageOrders] Order \"{}\" exceeded {} cancel attempts — closing GUI and giving up",
                         order_name, MAX_CANCEL_RETRIES
@@ -4949,8 +4959,8 @@ async fn handle_window_interaction(
                     *state.manage_orders_deadline.write() = None;
                     state.bazaar_at_limit.store(false, Ordering::Relaxed);
                     *state.bot_state.write() = BotState::Idle;
-                } else if !cancel_open && !cancel_due_to_age {
-                    // Collect-only mode and order is NOT stale.
+                } else if (!cancel_open && !cancel_due_to_age) || too_young_to_cancel {
+                    // Collect-only mode (or order too young to cancel).
                     // "Order options" opened, so this order is not 100% filled (those
                     // collect on click).  It may be PARTIALLY filled (has a Collect
                     // button) or completely open (no Collect button).
@@ -4994,7 +5004,9 @@ async fn handle_window_interaction(
                                     // collecting the partial fill.  This lets cofl send
                                     // sell recommendations for all collected items at
                                     // once instead of waiting for the full order to fill.
-                                    if *ctx_is_buy {
+                                    // Skip if order is too young (< 5 min) — give it
+                                    // more time to fill.
+                                    if *ctx_is_buy && !too_young_to_cancel {
                                         let cancel_slot = find_slot_by_name(&bot.menu().slots(), "Cancel")
                                             .or_else(|| find_slot_by_lore_contains(&bot.menu().slots(), "click to cancel"))
                                             .or_else(|| find_slot_by_lore_contains(&bot.menu().slots(), "cancel order"));
@@ -5022,7 +5034,8 @@ async fn handle_window_interaction(
                             }
                         }
                     } else {
-                        debug!("[ManageOrders] Order \"{}\" is open — skipping in collect-only mode", order_name);
+                        debug!("[ManageOrders] Order \"{}\" is open — skipping ({})", order_name,
+                            if too_young_to_cancel { "too young to cancel" } else { "collect-only mode" });
                     }
 
                     if !name_key.is_empty() {
@@ -6159,9 +6172,10 @@ fn should_cancel_open_order_due_to_age(order_identity: Option<(bool, String)>, c
     let (last_logged, total_value) = match last_logged_order_info(is_buy, &item_name) {
         Some(info) => info,
         // No log entry for this order — it was placed before tracking started
-        // or the log was cleared.  Treat it as stale so it gets cancelled
-        // instead of sitting around forever.
-        None => return true,
+        // or the log was cleared.  We cannot determine the age, so err on the
+        // side of caution and leave the order alone.  It will be cleaned up
+        // on the next startup (cancel_open mode) or when the log is populated.
+        None => return false,
     };
     let now = chrono::Utc::now().timestamp();
     let age_secs = if now > last_logged {
@@ -6179,6 +6193,26 @@ fn should_cancel_open_order_due_to_age(order_identity: Option<(bool, String)>, c
     let millions = (total_value / 1_000_000.0).max(1.0);
     let cancel_secs = (cancel_minutes_per_million as f64 * millions * 60.0) as u64;
     age_secs >= cancel_secs
+}
+
+/// Returns true if the order has a known placement time that is less than
+/// `MIN_ORDER_AGE_BEFORE_CANCEL_SECS` ago.  Used to protect recently-placed
+/// orders from cancellation even in cancel_open (startup) mode.
+/// Returns false when the identity is unknown or no log entry exists (cannot
+/// determine age → assume old enough).
+fn is_order_below_min_cancel_age(order_identity: &Option<(bool, String)>) -> bool {
+    let (is_buy, item_name) = match order_identity {
+        Some(ref id) => (id.0, id.1.as_str()),
+        None => return false,
+    };
+    match last_logged_order_info(is_buy, item_name) {
+        Some((last_logged, _)) => {
+            let now = chrono::Utc::now().timestamp();
+            let age_secs = if now > last_logged { (now - last_logged) as u64 } else { 0 };
+            age_secs < MIN_ORDER_AGE_BEFORE_CANCEL_SECS
+        }
+        None => false,
+    }
 }
 
 /// Append an unclaimed bazaar order to `pending_claims.log` with an RFC 3339 timestamp.
