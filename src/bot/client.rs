@@ -855,6 +855,14 @@ impl BotClient {
         self.auction_at_limit.store(false, Ordering::Relaxed);
     }
 
+    /// Request the bot to disconnect from Hypixel.
+    /// Sets state to Idle and logs the disconnect — actual TCP teardown happens
+    /// in the bot runtime thread.
+    pub fn disconnect(&self) {
+        info!("[BotClient] Disconnect requested via web GUI");
+        self.set_state(BotState::Idle);
+    }
+
     /// Returns true if inventory is full (items stashed / no space to claim).
     /// Also checks the cached empty-slot count: if the inventory has free
     /// slots the flag is auto-cleared so stale "stashed away" reminders

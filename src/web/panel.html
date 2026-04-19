@@ -271,6 +271,10 @@ a{color:var(--accent2);text-decoration:none}
             <button class="btn btn-sm" style="background:var(--warn);color:#1a1a1a" onclick="collectBzOrders()">💰 Sell Instantly (BZ)</button>
             <button class="btn btn-sm" style="background:var(--accent);color:#fff" onclick="claimBzOrders()">📋 Claim BZ Orders</button>
         </div>
+        <div style="display:flex;gap:10px;margin-bottom:16px">
+            <button class="btn btn-sm" id="btn-disconnect" style="background:#e74c3c;color:#fff" onclick="toggleConnection()">🔌 Disconnect</button>
+            <button class="btn btn-sm" style="background:#c0392b;color:#fff" onclick="killSession()">💀 Kill Session</button>
+        </div>
         <div class="toggle-row">
             <span class="toggle-label">Anonymize</span>
             <label class="toggle"><input type="checkbox" id="tog-anon" onchange="toggleAnonymize(this.checked)"><span class="slider"></span></label>
@@ -719,6 +723,30 @@ async function cancelAllBzOrders() {
     if (!confirm('Cancel ALL bazaar orders?')) return;
     await fetch('/api/cancel_all_bz_orders', {method:'POST'});
     fetchBazaarOrders();
+}
+
+let isDisconnected = false;
+
+async function toggleConnection() {
+    const btn = document.getElementById('btn-disconnect');
+    if (!isDisconnected) {
+        if (!confirm('Disconnect from Hypixel and COFL WebSocket?')) return;
+        await fetch('/api/disconnect', {method:'POST'});
+        isDisconnected = true;
+        btn.textContent = '🔗 Connect';
+        btn.style.background = '#27ae60';
+    } else {
+        if (!confirm('Reconnect? This will restart the process.')) return;
+        await fetch('/api/connect', {method:'POST'});
+        isDisconnected = false;
+        btn.textContent = '🔌 Disconnect';
+        btn.style.background = '#e74c3c';
+    }
+}
+
+async function killSession() {
+    if (!confirm('Kill the bot session? The process will terminate immediately.')) return;
+    await fetch('/api/kill_session', {method:'POST'});
 }
 
 async function fetchInventory() {

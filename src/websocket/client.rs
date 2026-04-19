@@ -328,6 +328,15 @@ impl CoflWebSocket {
         info!("[LicenseDefault] Sent /cofl license default {}", ign);
         Ok(())
     }
+
+    /// Close the COFL WebSocket connection gracefully.
+    pub async fn close(&self) -> Result<()> {
+        let mut write = self.write.lock().await;
+        write.close().await
+            .context("Failed to close COFL WebSocket")?;
+        info!("[COFL] WebSocket closed");
+        Ok(())
+    }
 }
 
 /// Prefix for license entry text lines in COFL's licenses list response: `§7> §a`

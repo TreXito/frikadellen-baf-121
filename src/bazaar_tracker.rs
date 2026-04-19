@@ -171,6 +171,10 @@ impl BazaarOrderTracker {
     /// order whose item+type does **not** appear in this list is removed so the
     /// web panel stays in sync with the actual in-game state.
     ///
+    /// Orders visible in-game but NOT yet tracked (e.g. placed before the bot
+    /// started, or placed manually) are added as new entries so the web panel
+    /// shows all active orders from startup.
+    ///
     /// Duplicate same-item orders are handled by counting occurrences: if the
     /// in-game window shows 2 "Coal" buy orders, at most 2 tracked "Coal" buy
     /// orders are kept.
@@ -203,8 +207,36 @@ impl BazaarOrderTracker {
             }
         });
         let removed = original_len - orders.len();
+
+        // Add in-game orders that aren't already tracked.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let mut added = 0usize;
+        for (name, is_buy) in ingame_orders {
+            let key = (normalize_for_match(name), *is_buy);
+            let tracked = kept_counts.get(&key).copied().unwrap_or(0);
+            let needed = ingame_counts.get(&key).copied().unwrap_or(0);
+            if tracked < needed {
+                orders.push(TrackedBazaarOrder {
+                    item_name: name.clone(),
+                    amount: 0, // unknown at reconciliation time
+                    price_per_unit: 0.0,
+                    is_buy_order: *is_buy,
+                    status: "open".to_string(),
+                    placed_at: now,
+                });
+                *kept_counts.entry(key).or_insert(0) += 1;
+                added += 1;
+            }
+        }
+
         drop(orders);
-        if removed > 0 {
+        if removed > 0 || added > 0 {
+            if added > 0 {
+                debug!("[BazaarTracker] Added {} in-game orders not previously tracked", added);
+            }
             self.save_orders_to_disk();
         }
         removed
