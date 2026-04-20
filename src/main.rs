@@ -872,6 +872,21 @@ async fn main() -> Result<()> {
                             // Wait for ContainerSetContent to populate all slots.
                             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
                             if let Some(window_json) = bot_upload.get_cached_window_json() {
+                                // Verify the cached window is still the Bazaar Orders window.
+                                // The macro may have clicked an order which opens "Order Options",
+                                // overwriting the cached window JSON. Only upload if the title
+                                // still matches "Bazaar Orders" (not "Order Options" or other windows).
+                                let is_bazaar_orders = serde_json::from_str::<serde_json::Value>(&window_json)
+                                    .ok()
+                                    .and_then(|v| v.get("title").and_then(|t| t.as_str()).map(|s| s.to_lowercase()))
+                                    .map(|t| t.contains("bazaar orders"))
+                                    .unwrap_or(false);
+
+                                if !is_bazaar_orders {
+                                    tracing::debug!("[UploadBazaarOrders] Skipping upload — window changed from Bazaar Orders");
+                                    return;
+                                }
+
                                 let msg = serde_json::json!({
                                     "type": "UploadBazaarOrders",
                                     "data": window_json
