@@ -2947,6 +2947,7 @@ async fn main() -> Result<()> {
         let bazaar_flips_paused_orders = bazaar_flips_paused.clone();
         let bazaar_tracker_orders = bazaar_tracker.clone();
         let order_interval = config.bazaar_order_check_interval_seconds;
+        let cancel_minutes_per_million = config.bazaar_order_cancel_minutes_per_million;
         tokio::spawn(async move {
             use frikadellen_baf::types::{CommandType, CommandPriority};
             // Give startup workflow time to complete before starting periodic checks
@@ -2959,13 +2960,13 @@ async fn main() -> Result<()> {
                     debug!("[BazaarOrders] Skipping periodic order check — AH flips incoming");
                     continue;
                 }
-                // Skip when the tracker has no filled orders to collect.
-                // The BazaarOrderFilled event already triggers an immediate
-                // ManageOrders run, so the periodic timer only needs to fire
-                // when a fill notification was missed or on startup.  This
-                // avoids constant GUI cycling that generates packet spam and
-                // slows down the macro.
-                if !bazaar_tracker_orders.has_filled_orders() {
+                // Skip when the tracker has no filled orders AND age-based
+                // cancellation is disabled.  When cancel_minutes_per_million > 0
+                // the periodic run is the only mechanism that cancels stale
+                // unfilled orders, so we must not skip it even when nothing
+                // appears filled — the ManageOrders handler will close
+                // immediately if it finds nothing actionable.
+                if !bazaar_tracker_orders.has_filled_orders() && cancel_minutes_per_million == 0 {
                     debug!("[BazaarOrders] No filled orders in tracker — skipping periodic ManageOrders");
                     continue;
                 }
