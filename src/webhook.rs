@@ -709,6 +709,7 @@ pub const DIVINE_PROFIT_THRESHOLD: u64 = 1_000_000_000;
 
 /// Send a legendary flip (100M+ profit) notification to the user's webhook.
 /// Like a normal purchase webhook but with yellow color, legendary title, and optional Discord ping.
+/// If `share` is true, also sends an anonymized notification to the shared public channel.
 pub async fn send_webhook_legendary_flip(
     ingame_name: &str,
     item_name: &str,
@@ -721,6 +722,7 @@ pub async fn send_webhook_legendary_flip(
     finder: Option<&str>,
     discord_id: Option<&str>,
     webhook_url: &str,
+    share: bool,
 ) {
     let fields = build_purchase_fields(price, target, Some(profit), buy_speed_ms, finder, auction_uuid);
     let safe_item = sanitize_item_name(item_name);
@@ -740,10 +742,14 @@ pub async fn send_webhook_legendary_flip(
     });
     let ping = discord_id.map(|id| format!("<@{}>", id));
     post_embed_with_content(webhook_url, ping.as_deref(), payload).await;
+    if share {
+        send_webhook_flip_channel(item_name, price, target, profit, buy_speed_ms, finder).await;
+    }
 }
 
 /// Send a divine flip (1B+ profit) notification to the user's webhook.
 /// Like a normal purchase webhook but with cyan color, divine title, and optional Discord ping.
+/// If `share` is true, also sends an anonymized notification to the shared public channel.
 pub async fn send_webhook_divine_flip(
     ingame_name: &str,
     item_name: &str,
@@ -756,6 +762,7 @@ pub async fn send_webhook_divine_flip(
     finder: Option<&str>,
     discord_id: Option<&str>,
     webhook_url: &str,
+    share: bool,
 ) {
     let fields = build_purchase_fields(price, target, Some(profit), buy_speed_ms, finder, auction_uuid);
     let safe_item = sanitize_item_name(item_name);
@@ -775,6 +782,9 @@ pub async fn send_webhook_divine_flip(
     });
     let ping = discord_id.map(|id| format!("<@{}>", id));
     post_embed_with_content(webhook_url, ping.as_deref(), payload).await;
+    if share {
+        send_webhook_flip_channel(item_name, price, target, profit, buy_speed_ms, finder).await;
+    }
 }
 
 /// Send an anonymized legendary/divine flip notification to the shared channel.
