@@ -1863,6 +1863,14 @@ async fn main() -> Result<()> {
 
         while let Some(event) = ws_rx.recv().await {
             match event {
+                CoflEvent::LoggedIn => {
+                    if !cofl_authenticated_ws.swap(true, Ordering::Relaxed) {
+                        info!("[Coflnet] loggedIn received — flips enabled");
+                        let baf_msg = "§f[§4BAF§f]: §aCoflnet authenticated — flip buying enabled".to_string();
+                        print_mc_chat(&baf_msg);
+                        let _ = chat_tx_ws.send(baf_msg);
+                    }
+                }
                 CoflEvent::AuctionFlip(flip) => {
                     // Skip if AH flips are disabled
                     if !enable_ah_flips_ws.load(Ordering::Relaxed) {
@@ -2126,11 +2134,12 @@ async fn main() -> Result<()> {
                             // Expect "(…@…)" somewhere after "Hello "
                             if let (Some(open), Some(close)) = (after_hello.find('('), after_hello.find(')')) {
                                 if open < close && after_hello[open..close].contains('@') {
-                                    info!("[Coflnet] Authentication confirmed — flips enabled");
-                                    cofl_authenticated_ws.store(true, Ordering::Relaxed);
-                                    let baf_msg = "§f[§4BAF§f]: §aCoflnet authenticated — flip buying enabled".to_string();
-                                    print_mc_chat(&baf_msg);
-                                    let _ = chat_tx_ws.send(baf_msg);
+                                    if !cofl_authenticated_ws.swap(true, Ordering::Relaxed) {
+                                        info!("[Coflnet] Authentication confirmed via chat — flips enabled");
+                                        let baf_msg = "§f[§4BAF§f]: §aCoflnet authenticated — flip buying enabled".to_string();
+                                        print_mc_chat(&baf_msg);
+                                        let _ = chat_tx_ws.send(baf_msg);
+                                    }
                                 }
                             }
                         }

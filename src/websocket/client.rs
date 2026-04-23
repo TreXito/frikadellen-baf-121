@@ -8,6 +8,7 @@ use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 pub enum CoflEvent {
+    LoggedIn,
     AuctionFlip(Flip),
     BazaarFlip(BazaarFlipRecommendation),
     ChatMessage(String),
@@ -148,6 +149,10 @@ impl CoflWebSocket {
         info!("[COFL <-] type={} data={}", msg.msg_type, msg.data);
 
         match msg.msg_type.as_str() {
+            "loggedIn" => {
+                debug!("Received loggedIn");
+                let _ = tx.send(CoflEvent::LoggedIn);
+            }
             "flip" => {
                 if let Ok(value) = parse_message_data::<serde_json::Value>(&msg.data) {
                     // Normalize: COFL sends itemName/startingBid nested inside "auction"
@@ -796,5 +801,15 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0], ("Player1".to_string(), 1, "NONE".to_string()));
         assert_eq!(entries[1], ("Player2".to_string(), 2, "PREMIUM".to_string()));
+    }
+
+    #[test]
+    fn test_handle_logged_in_message() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let message = r#"{"type":"loggedIn","data":"true"}"#;
+
+        CoflWebSocket::handle_message(message, &tx).expect("loggedIn message should parse");
+
+        assert!(matches!(rx.try_recv(), Ok(CoflEvent::LoggedIn)));
     }
 }
