@@ -823,7 +823,18 @@ async fn kill_session() -> impl IntoResponse {
 async fn disconnect_session(State(s): State<WebSharedState>) -> impl IntoResponse {
     info!("[WebGUI] Disconnect requested");
 
-    let msg = "[BAF Web] Disconnecting from Hypixel and COFL...".to_string();
+    // Pause flip intake so the COFL event loop in main.rs drops new flips
+    // instead of queueing them. Without this, the bot would keep accepting
+    // flips via the COFL WS (which auto-reconnects) while the user thinks
+    // it's disconnected.
+    s.enable_ah_flips.store(false, Ordering::Relaxed);
+    s.enable_bazaar_flips.store(false, Ordering::Relaxed);
+
+    // Clear any already-queued flips/orders so they don't fire after the
+    // user pressed Disconnect.
+    s.command_queue.clear();
+
+    let msg = "[BAF Web] Disconnect: flip intake paused, queue cleared, COFL closed".to_string();
     print_mc_chat(&msg);
     let _ = s.chat_tx.send(msg);
 
@@ -835,14 +846,20 @@ async fn disconnect_session(State(s): State<WebSharedState>) -> impl IntoRespons
         }
     });
 
-    // Disconnect the bot from Hypixel
+    // Disconnect the bot from Hypixel (logs + parks state in Idle)
     s.bot_client.disconnect();
 
-    (StatusCode::OK, "Disconnected from Hypixel and COFL")
+    (StatusCode::OK, "Disconnected: flip intake paused, queue cleared, COFL closed")
 }
 
 async fn connect_session(State(s): State<WebSharedState>) -> impl IntoResponse {
     info!("[WebGUI] Reconnect requested — restarting process");
+
+    // Safety net: re-enable flip intake in case the restart is skipped or
+    // delayed for any reason. The restart itself re-reads config which is
+    // the authoritative source.
+    s.enable_ah_flips.store(true, Ordering::Relaxed);
+    s.enable_bazaar_flips.store(true, Ordering::Relaxed);
 
     let msg = "[BAF Web] Reconnecting — restarting process...".to_string();
     let _ = s.chat_tx.send(msg);
