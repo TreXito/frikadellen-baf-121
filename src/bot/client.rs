@@ -3136,6 +3136,19 @@ async fn event_handler(
     Ok(())
 }
 
+/// If `disconnect_requested` is set, clears it, calls `bot.disconnect()`, and returns `true`.
+/// The caller should return immediately when this returns `true`.
+fn handle_disconnect_if_requested(bot: &Client, state: &BotClientState) -> bool {
+    if state.disconnect_requested.load(Ordering::Acquire) {
+        info!("[CommandProcessor] Disconnect requested — calling bot.disconnect()");
+        state.disconnect_requested.store(false, Ordering::Release);
+        bot.disconnect();
+        true
+    } else {
+        false
+    }
+}
+
 /// Process queued bot commands independently from the Azalea event stream.
 ///
 /// Previously commands were only drained opportunistically from `event_handler`,
@@ -3144,10 +3157,7 @@ async fn event_handler(
 async fn command_processor(bot: Client, state: BotClientState) {
     loop {
         // Check for a pending disconnect request before waiting for the next command.
-        if state.disconnect_requested.load(Ordering::Acquire) {
-            info!("[CommandProcessor] Disconnect requested — calling bot.disconnect()");
-            state.disconnect_requested.store(false, Ordering::Release);
-            bot.disconnect();
+        if handle_disconnect_if_requested(&bot, &state) {
             return;
         }
 
@@ -3170,10 +3180,7 @@ async fn command_processor(bot: Client, state: BotClientState) {
             }
             Ok(Some(cmd)) => {
                 // Re-check disconnect flag; don't execute more commands if we're about to disconnect.
-                if state.disconnect_requested.load(Ordering::Acquire) {
-                    info!("[CommandProcessor] Disconnect requested — calling bot.disconnect()");
-                    state.disconnect_requested.store(false, Ordering::Release);
-                    bot.disconnect();
+                if handle_disconnect_if_requested(&bot, &state) {
                     return;
                 }
                 execute_command(&bot, &cmd, &state).await;

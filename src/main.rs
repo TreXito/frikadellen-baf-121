@@ -137,11 +137,16 @@ fn check_ufw_port(port: u16) {
     if text.contains("Status: inactive") {
         return;
     }
-    // Check if the port appears in the UFW rules.
-    // We match both "8080" (plain) and "8080/tcp" style entries.
+    // Check if the port appears in the UFW rules using exact token matching.
+    // UFW formats rules as "<port>" or "<port>/tcp" or "<port>/udp" at the start of a rule line.
+    // We split by whitespace to avoid e.g. port 80 matching "8080".
     let port_str = port.to_string();
     let port_tcp = format!("{}/tcp", port);
-    if !text.contains(&port_str) && !text.contains(&port_tcp) {
+    let port_udp = format!("{}/udp", port);
+    let allowed = text.split_whitespace().any(|token| {
+        token == port_str || token == port_tcp || token == port_udp
+    });
+    if !allowed {
         warn!("========================================");
         warn!("! WARNING: YOU HAVE SET A PORT FOR THE WEB APP BUT THE PORT ISN'T ALLOWED ON YOUR FIREWALL");
         warn!("! PLEASE EXECUTE THE FOLLOWING COMMAND TO ACCESS IT VIA THE INTERNET:");
