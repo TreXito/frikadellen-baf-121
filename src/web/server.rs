@@ -127,6 +127,19 @@ struct CancelBzOrderPayload {
 }
 
 #[derive(Deserialize)]
+struct ListItemPayload {
+    /// Display name of the item (for logging / confirmation message).
+    item_name: String,
+    /// Mineflayer inventory slot index (9–44).
+    item_slot: u64,
+    /// Desired BIN price in coins.
+    starting_bid: u64,
+    /// Auction duration in hours (1–168).
+    #[serde(default = "default_auction_duration")]
+    duration_hours: u64,
+}
+
+#[derive(Deserialize)]
 struct LoginPayload {
     password: String,
 }
@@ -144,6 +157,9 @@ struct ProfitResponse {
     bz_total: i64,
     uptime_seconds: u64,
 }
+
+/// Default auction duration used when the client doesn't provide one.
+fn default_auction_duration() -> u64 { 24 }
 
 /// Public (unauthenticated) profit summary — no IGN, no account info.
 /// Used by the login page and OpenGraph embeds.
@@ -280,6 +296,7 @@ pub async fn start_web_server(state: WebSharedState, port: u16) {
         .route("/api/chat/ws", get(chat_ws_handler))
         .route("/api/switch_account", axum::routing::post(switch_account))
         .route("/api/cancel_auction", axum::routing::post(cancel_auction))
+        .route("/api/list_item", axum::routing::post(list_item))
         .route("/api/claim_purchases", axum::routing::post(claim_purchases))
         .route("/api/collect_bz_orders", axum::routing::post(collect_bz_orders))
         .route("/api/claim_bz_orders", axum::routing::post(claim_bz_orders))
@@ -702,6 +719,43 @@ async fn cancel_auction(
     );
 
     (StatusCode::OK, "Cancel auction command queued")
+}
+
+async fn list_item(
+    State(s): State<WebSharedState>,
+    Json(payload): Json<ListItemPayload>,
+) -> impl IntoResponse {
+    // Basic validation
+    if payload.starting_bid == 0 {
+        return (StatusCode::BAD_REQUEST, "Starting bid must be greater than 0").into_response();
+    }
+    let duration = payload.duration_hours.clamp(1, 168);
+
+    info!(
+        "[WebGUI] Manual AH listing: '{}' slot={} bid={} duration={}h",
+        payload.item_name, payload.item_slot, payload.starting_bid, duration
+    );
+
+    let msg = format!(
+        "[BAF Web] Listing '{}' on AH for {} coins...",
+        payload.item_name, payload.starting_bid
+    );
+    print_mc_chat(&msg);
+    let _ = s.chat_tx.send(msg);
+
+    s.command_queue.enqueue(
+        CommandType::SellToAuction {
+            item_name: payload.item_name,
+            starting_bid: payload.starting_bid,
+            duration_hours: duration,
+            item_slot: Some(payload.item_slot),
+            item_id: None,
+        },
+        CommandPriority::Critical,
+        false,
+    );
+
+    (StatusCode::OK, "List item command queued").into_response()
 }
 
 async fn claim_purchases(

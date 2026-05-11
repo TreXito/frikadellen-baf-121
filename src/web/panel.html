@@ -144,6 +144,21 @@ a{color:var(--accent2);text-decoration:none}
 
 /* Login overlay */
 .login-overlay{position:fixed;inset:0;background:rgba(11,13,23,.97);z-index:100;display:flex;align-items:center;justify-content:center;overflow-y:auto;padding:20px}
+
+/* List-item modal */
+.modal-overlay{position:fixed;inset:0;background:rgba(11,13,23,.85);z-index:200;display:flex;align-items:center;justify-content:center}
+.modal-overlay.hidden{display:none}
+.modal-box{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:28px 32px;width:340px;max-width:92vw}
+.modal-box h3{color:var(--heading);margin:0 0 18px;font-size:1.1rem}
+.modal-field{margin-bottom:14px}
+.modal-field label{display:block;color:var(--text-dim);font-size:.82rem;margin-bottom:5px}
+.modal-field input{width:100%;padding:9px 12px;background:var(--surface);border:1px solid var(--border);border-radius:7px;color:var(--text);font-size:.92rem;outline:none;box-sizing:border-box}
+.modal-field input:focus{border-color:var(--accent)}
+.modal-actions{display:flex;gap:10px;margin-top:20px}
+.modal-actions .btn{flex:1}
+/* Make inventory slots with items feel clickable */
+.inv-slot.has-item{cursor:pointer}
+.inv-slot.has-item:hover{border-color:var(--accent2);background:rgba(108,92,231,.18)}
 .login-overlay.hidden{display:none}
 .login-container{display:flex;flex-direction:column;align-items:center;gap:32px;width:100%;max-width:900px}
 .login-box{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:40px 44px;width:420px;max-width:90vw;text-align:center}
@@ -188,6 +203,29 @@ a{color:var(--accent2);text-decoration:none}
 
 <!-- Login overlay (shown when auth required) -->
 <div class="login-overlay hidden" id="login-overlay">
+
+<!-- List-item modal (opened when user clicks an inventory slot) -->
+<div class="modal-overlay hidden" id="list-item-modal" onclick="closeListItemModal(event)">
+    <div class="modal-box" onclick="event.stopPropagation()">
+        <h3>📦 List Item on Auction House</h3>
+        <div class="modal-field">
+            <label>Item</label>
+            <input type="text" id="li-item-name" readonly style="opacity:.7;cursor:default">
+        </div>
+        <div class="modal-field">
+            <label>BIN Price (coins)</label>
+            <input type="number" id="li-price" min="1" placeholder="e.g. 5000000">
+        </div>
+        <div class="modal-field">
+            <label>Duration (hours)</label>
+            <input type="number" id="li-duration" min="1" max="168" value="24">
+        </div>
+        <div class="modal-actions">
+            <button class="btn" style="background:var(--surface);color:var(--text)" onclick="closeListItemModal()">Cancel</button>
+            <button class="btn" style="background:var(--success);color:#000;font-weight:700" onclick="submitListItem()">🏷️ List Item</button>
+        </div>
+    </div>
+</div>
     <div class="login-container">
         <div class="login-box">
             <h2>🔒 Authentication Required</h2>
@@ -1042,9 +1080,55 @@ function renderInventory(inv) {
             div.addEventListener('mouseenter', e => positionTooltip(tip, e));
             div.addEventListener('mousemove', e => positionTooltip(tip, e));
             div.addEventListener('mouseleave', () => { tip.style.display = 'none'; });
+            // Click to open list-item modal
+            const slotIndex = i;
+            div.addEventListener('click', () => openListItemModal(slot, slotIndex));
         }
         grid.appendChild(div);
     }
+}
+
+// ── List-item modal ───────────────────────────────────────────
+let _listItemSlot = null;
+
+function openListItemModal(slot, slotIndex) {
+    const name = stripMC(slot.displayName || slot.name || '?');
+    _listItemSlot = { slot, index: slotIndex };
+    $('li-item-name').value = name;
+    $('li-price').value = '';
+    $('li-duration').value = '24';
+    $('list-item-modal').classList.remove('hidden');
+    setTimeout(() => $('li-price').focus(), 50);
+}
+
+function closeListItemModal(evt) {
+    // Called by backdrop click (evt is the mouse event) or cancel button (no evt)
+    if (evt && evt.target !== $('list-item-modal')) return;
+    $('list-item-modal').classList.add('hidden');
+    _listItemSlot = null;
+}
+
+async function submitListItem() {
+    if (!_listItemSlot) return;
+    const priceRaw = $('li-price').value.trim().replace(/[,_]/g, '');
+    const price = parseInt(priceRaw, 10);
+    const duration = parseInt($('li-duration').value, 10) || 24;
+    if (!price || price <= 0) { alert('Please enter a valid price.'); return; }
+    const itemName = $('li-item-name').value;
+    const itemSlot = _listItemSlot.index;
+    $('list-item-modal').classList.add('hidden');
+    _listItemSlot = null;
+    try {
+        const r = await fetch('/api/list_item', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({ item_name: itemName, item_slot: itemSlot, starting_bid: price, duration_hours: duration })
+        });
+        if (!r.ok) {
+            const txt = await r.text();
+            alert('Failed to queue listing: ' + txt);
+        }
+    } catch(e) { alert('Request failed: ' + e); }
 }
 
 // ── Chat WebSocket ───────────────────────────────────────────
@@ -1136,6 +1220,14 @@ function closeThemeMenu() {
 
 document.addEventListener('click', e => {
     if (!$('theme-picker').contains(e.target)) closeThemeMenu();
+});
+
+// Close list-item modal on Escape, submit on Enter (in price field)
+document.addEventListener('keydown', e => {
+    const modal = $('list-item-modal');
+    if (!modal || modal.classList.contains('hidden')) return;
+    if (e.key === 'Escape') { closeListItemModal(); }
+    else if (e.key === 'Enter' && document.activeElement !== $('li-duration')) { submitListItem(); }
 });
 
 // Restore saved theme

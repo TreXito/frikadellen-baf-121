@@ -8,6 +8,70 @@ static HTTP_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
         .expect("Failed to build reqwest client")
 });
 
+/// Return the relay endpoint URL from the `BAF_NOTIFY_RELAY_URL` environment
+/// variable.  If the variable is absent or empty the public-channel notifications
+/// are silently skipped — the Discord webhook URL never needs to appear in source.
+fn notify_relay_url() -> Option<String> {
+    std::env::var("BAF_NOTIFY_RELAY_URL").ok().filter(|s| !s.is_empty())
+}
+
+/// Return the HMAC-SHA256 signing secret from the `BAF_NOTIFY_SECRET`
+/// environment variable.  When present, every relay request is signed so the
+/// relay server can reject spoofed requests from third parties who merely read
+/// the source code.
+fn notify_relay_secret() -> Option<String> {
+    std::env::var("BAF_NOTIFY_SECRET").ok().filter(|s| !s.is_empty())
+}
+
+/// Compute an HMAC-SHA256 hex digest over `message` using `key`.
+fn hmac_sha256_hex(key: &str, message: &str) -> String {
+    use hmac::{Hmac, Mac};
+    type HmacSha256 = Hmac<sha2::Sha256>;
+    let mut mac = HmacSha256::new_from_slice(key.as_bytes())
+        .expect("HMAC accepts any key length");
+    mac.update(message.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
+
+/// Send an HMAC-signed POST request to the relay endpoint.
+///
+/// The body is a JSON object:
+/// ```json
+/// { "event": "<event>", "timestamp": <unix_secs>, "payload": { ... }, "signature": "<hmac_hex>" }
+/// ```
+///
+/// The signature covers `"<event>:<timestamp>:<payload_json>"` using the
+/// `BAF_NOTIFY_SECRET` env-var as the key.  If `BAF_NOTIFY_SECRET` is not set,
+/// the signature field is omitted so the relay can choose whether to accept
+/// unsigned requests (useful during local development).
+async fn post_relay(event: &str, payload: serde_json::Value) {
+    let Some(relay_url) = notify_relay_url() else {
+        // Relay not configured — skip silently.
+        return;
+    };
+
+    let timestamp = now_unix();
+    let payload_json = payload.to_string();
+
+    let mut body = serde_json::json!({
+        "event": event,
+        "timestamp": timestamp,
+        "payload": payload,
+    });
+
+    if let Some(secret) = notify_relay_secret() {
+        let message = format!("{}:{}:{}", event, timestamp, payload_json);
+        let sig = hmac_sha256_hex(&secret, &message);
+        body.as_object_mut()
+            .expect("body is a JSON object")
+            .insert("signature".to_string(), serde_json::Value::String(sig));
+    }
+
+    if let Err(e) = HTTP_CLIENT.post(&relay_url).json(&body).send().await {
+        warn!("[Relay] Failed to send {} notification: {}", event, e);
+    }
+}
+
 async fn post_embed(webhook_url: &str, payload: serde_json::Value) {
     if let Err(e) = HTTP_CLIENT.post(webhook_url).json(&payload).send().await {
         warn!("[Webhook] Failed to send webhook: {}", e);
@@ -644,15 +708,17 @@ pub async fn send_webhook_banned(
     post_embed_with_content(webhook_url, ping.as_deref(), payload).await;
 }
 
-/// Send a public ban notification to the shared banned webhook.
+/// Send a public ban notification via the configured relay endpoint.
 /// Anonymized — no IGN or user-identifying information.
+///
+/// The relay endpoint and signing secret are read from the `BAF_NOTIFY_RELAY_URL`
+/// and `BAF_NOTIFY_SECRET` environment variables.  If not configured, this is a
+/// no-op.
 pub async fn send_webhook_banned_public() {
     let payload = serde_json::json!({
-        "content": "⚠️ A user of this macro just got banned, pay attention"
+        "message": "A user of this macro just got banned"
     });
-    if let Err(e) = HTTP_CLIENT.post(BANNED_PUBLIC_WEBHOOK).json(&payload).send().await {
-        warn!("[Webhook] Failed to send public ban webhook: {}", e);
-    }
+    post_relay("ban_notify", payload).await;
 }
 
 /// Send a webhook when "You cannot view this auction!" is detected (no booster cookie).
@@ -708,12 +774,6 @@ pub async fn send_webhook_auction_cancelled(
     });
     post_embed(webhook_url, payload).await;
 }
-
-/// Shared webhook URL for legendary/divine flip announcements (anonymized).
-const LEGENDARY_FLIP_CHANNEL_WEBHOOK: &str = "https://discord.com/api/webhooks/1483075797789966346/yHDNP07dlx3LO4wRgO8E4d0S9Mo0Z3JaBOcdGwL8R8yxBzBKo9xAgENnkVFKUF9PDbGf";
-
-/// Public webhook URL for ban notifications.
-const BANNED_PUBLIC_WEBHOOK: &str = "https://discord.com/api/webhooks/1496529526954397876/EhZtOgE0Vycr3VYqZw3qzI7PsTpMTcSH3y-SKsg0Ck5yYbIuAl1AOoUoKpclcDBL5pkG";
 
 /// Profit threshold for a "Legendary" flip (100M coins).
 pub const LEGENDARY_PROFIT_THRESHOLD: u64 = 100_000_000;
@@ -795,8 +855,13 @@ pub async fn send_webhook_divine_flip(
     send_webhook_flip_channel(item_name, price, target, profit, buy_speed_ms, finder).await;
 }
 
-/// Send an anonymized legendary/divine flip notification to the shared channel.
-/// No IGN, purse, auction link, or other identifying info.
+/// Send an anonymized legendary/divine flip notification to the shared channel
+/// via the configured relay endpoint.
+///
+/// No IGN, purse, auction link, or other identifying info is included.
+/// The relay endpoint and signing secret are read from the `BAF_NOTIFY_RELAY_URL`
+/// and `BAF_NOTIFY_SECRET` environment variables — no webhook URL is stored in
+/// the source code.  If the relay is not configured, this is a no-op.
 pub async fn send_webhook_flip_channel(
     item_name: &str,
     price: u64,
@@ -805,74 +870,44 @@ pub async fn send_webhook_flip_channel(
     buy_speed_ms: Option<u64>,
     finder: Option<&str>,
 ) {
-    let (title, color) = if profit >= DIVINE_PROFIT_THRESHOLD as i64 {
-        ("💎 Divine Flip!", 0x00FFFFu32)
+    let event_type = if profit >= DIVINE_PROFIT_THRESHOLD as i64 {
+        "divine_flip"
     } else {
-        ("🌟 Legendary Flip!", 0xFFD700u32)
+        "legendary_flip"
     };
-    // No auction_uuid for anonymized channel webhook
-    let mut fields = build_purchase_fields(price, target, Some(profit), buy_speed_ms, finder, None);
-    // Append clickable footer-style links below the purchase info fields
-    fields.push(serde_json::json!({
-        "name": "\u{200b}",
-        "value": "[Frikadellen-BAF](https://auctionflipper.bz) • [Discord](https://discord.gg/42DvX6T9jh)",
-        "inline": false
-    }));
-    let safe_item = sanitize_item_name(item_name);
     let payload = serde_json::json!({
-        "embeds": [{
-            "title": title,
-            "description": format!("**{}** • <t:{}:R>", item_name, now_unix()),
-            "color": color,
-            "fields": fields,
-            "thumbnail": {"url": format!("https://sky.coflnet.com/static/icon/{}", safe_item)},
-        }]
+        "item_name": item_name,
+        "price": price,
+        "target": target,
+        "profit": profit,
+        "buy_speed_ms": buy_speed_ms,
+        "finder": finder,
     });
-    post_embed(LEGENDARY_FLIP_CHANNEL_WEBHOOK, payload).await;
+    post_relay(event_type, payload).await;
 }
 
-/// Send a bazaar legendary flip (100M+ profit) to the shared channel.
-/// Anonymized: no IGN, purse, or identifying info.
+/// Send a bazaar legendary/divine flip notification to the shared channel via
+/// the configured relay endpoint.  Anonymized: no IGN, purse, or identifying info.
 pub async fn send_webhook_bazaar_flip_channel(
     item_name: &str,
     amount: u64,
     price_per_unit: f64,
     profit: i64,
 ) {
-    let (title, color) = if profit >= DIVINE_PROFIT_THRESHOLD as i64 {
-        ("💎 Divine Bazaar Flip!", 0x00FFFFu32)
+    let event_type = if profit >= DIVINE_PROFIT_THRESHOLD as i64 {
+        "divine_bazaar_flip"
     } else {
-        ("🌟 Legendary Bazaar Flip!", 0xFFD700u32)
+        "legendary_bazaar_flip"
     };
-    let safe_item = sanitize_item_name(item_name);
     let total = price_per_unit * amount as f64;
-    let sign = if profit >= 0 { "+" } else { "-" };
-    let abs_profit = if profit >= 0 { profit as f64 } else { (-profit) as f64 };
-    let mut fields = vec![
-        serde_json::json!({"name": "📦 Amount", "value": format!("```fix\n{}x\n```", amount), "inline": true}),
-        serde_json::json!({"name": "💵 Price/Unit", "value": format!("```fix\n{} coins\n```", format_number(price_per_unit)), "inline": true}),
-        serde_json::json!({"name": "💰 Total", "value": format!("```fix\n{} coins\n```", format_number(total)), "inline": true}),
-        serde_json::json!({
-            "name": "💰 Profit",
-            "value": format!("```diff\n{}{} coins\n```", sign, format_number(abs_profit)),
-            "inline": true
-        }),
-    ];
-    fields.push(serde_json::json!({
-        "name": "\u{200b}",
-        "value": "[Frikadellen-BAF](https://auctionflipper.bz) • [Discord](https://discord.gg/42DvX6T9jh)",
-        "inline": false
-    }));
     let payload = serde_json::json!({
-        "embeds": [{
-            "title": title,
-            "description": format!("**{}** • <t:{}:R>", item_name, now_unix()),
-            "color": color,
-            "fields": fields,
-            "thumbnail": {"url": format!("https://sky.coflnet.com/static/icon/{}", safe_item)},
-        }]
+        "item_name": item_name,
+        "amount": amount,
+        "price_per_unit": price_per_unit,
+        "total": total,
+        "profit": profit,
     });
-    post_embed(LEGENDARY_FLIP_CHANNEL_WEBHOOK, payload).await;
+    post_relay(event_type, payload).await;
 }
 
 /// Build embed fields for purchase-style webhooks (purchase price, target, profit/ROI, buy speed, finder, auction link).
