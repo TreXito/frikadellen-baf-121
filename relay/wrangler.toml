@@ -1,0 +1,11 @@
+name = "baf-relay"
+main = "worker.js"
+compatibility_date = "2024-01-01"
+
+# Deploy with:
+#   cd relay
+#   npx wrangler deploy
+#
+# Then add secrets (one-time, after first deploy):
+#   npx wrangler secret put DISCORD_WEBHOOK_URL
+#   npx wrangler secret put BAF_NOTIFY_SECRET

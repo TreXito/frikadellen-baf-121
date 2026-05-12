@@ -7,15 +7,27 @@
  *
  * ─── Setup (one-time) ────────────────────────────────────────────────────────
  *
- * 1. Create a new Cloudflare Worker and paste this file as its source.
+ * 1. Install Wrangler (Cloudflare's CLI) if you haven't already:
+ *      npm install -g wrangler
+ *      wrangler login
  *
- * 2. Add two encrypted Worker Secrets (Dashboard → Worker → Settings → Variables):
- *      DISCORD_WEBHOOK_URL   — the full Discord webhook URL for your channel
- *      BAF_NOTIFY_SECRET     — any random string (≥ 32 chars); must match the
- *                              value you set in the GitHub Actions secret of the
- *                              same name so the CI bakes it into every binary.
+ * 2. Deploy the worker from the relay/ directory:
+ *      cd relay
+ *      npx wrangler deploy
  *
- * 3. Copy the Worker URL (e.g. https://baf-relay.yourname.workers.dev) and add
+ *    NOTE: Do NOT upload worker.js via the Cloudflare Dashboard file uploader —
+ *    it does not support ES module workers.  Use `wrangler deploy` as above.
+ *
+ * 3. Add two encrypted Worker Secrets (run these after the first deploy):
+ *      npx wrangler secret put DISCORD_WEBHOOK_URL
+ *      npx wrangler secret put BAF_NOTIFY_SECRET
+ *
+ *    DISCORD_WEBHOOK_URL   — the full Discord webhook URL for your channel
+ *    BAF_NOTIFY_SECRET     — any random string (≥ 32 chars); must match the
+ *                            value you set in the GitHub Actions secret of the
+ *                            same name so the CI bakes it into every binary.
+ *
+ * 4. Copy the Worker URL (e.g. https://baf-relay.yourname.workers.dev) and add
  *    it as a GitHub Actions secret named  BAF_NOTIFY_RELAY_URL.  The CI will
  *    bake it into every released binary via option_env!().
  *
