@@ -2186,6 +2186,15 @@ async fn event_handler(
             *state.joined_skyblock.write() = false;
             *state.teleported_to_island.write() = false;
             *state.skyblock_join_time.write() = None;
+
+            // IMPORTANT: reset startup_in_progress so that if the bot disconnected
+            // mid-startup (while the flag was true), the new session's startup
+            // workflow is not silently skipped.  Without this reset,
+            // run_startup_workflow() would see the stale `true` value, bail out
+            // immediately, and leave the flag permanently set — causing every
+            // non-startup command (BazaarBuyOrder, ManageOrders, …) to be dropped
+            // by the main.rs command-processor guard indefinitely.
+            state.startup_in_progress.store(false, Ordering::Relaxed);
             
             // Reset the cancel-failure tracker on login so previously-stuck
             // orders get a fresh set of retry attempts after reconnect.

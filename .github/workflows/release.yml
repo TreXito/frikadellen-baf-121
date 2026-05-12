@@ -86,6 +86,13 @@ jobs:
 
       - name: Build release binaries
         run: cargo build --release --target ${{ matrix.target }}
+        env:
+          # Bake the relay URL and HMAC secret into the binary at compile time
+          # via option_env!().  Users then need zero configuration — the released
+          # binary already knows where to send public-channel notifications.
+          # Set these in: GitHub repo → Settings → Secrets and variables → Actions.
+          BAF_NOTIFY_RELAY_URL: ${{ secrets.BAF_NOTIFY_RELAY_URL }}
+          BAF_NOTIFY_SECRET: ${{ secrets.BAF_NOTIFY_SECRET }}
 
       - name: Strip binaries (Linux and macOS)
         if: matrix.os == 'ubuntu-latest' || matrix.os == 'macos-latest'
