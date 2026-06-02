@@ -439,6 +439,7 @@ pub async fn send_webhook_bazaar_order_placed(
     total_price: f64,
     is_buy_order: bool,
     purse: Option<u64>,
+    active_orders: usize,
     webhook_url: &str,
 ) {
     let order_type = if is_buy_order { "Buy Order" } else { "Sell Offer" };
@@ -454,7 +455,8 @@ pub async fn send_webhook_bazaar_order_placed(
                 {"name": "📦 Amount",       "value": format!("```fix\n{}x\n```", amount),                     "inline": true},
                 {"name": "💵 Price/Unit",   "value": format!("```fix\n{} coins\n```", format_number(price_per_unit)), "inline": true},
                 {"name": "💰 Total Price",  "value": format!("```fix\n{} coins\n```", format_number(total_price)),    "inline": true},
-                {"name": "📊 Order Type",   "value": format!("```\n{}\n```", order_type),                     "inline": false},
+                {"name": "📊 Order Type",   "value": format!("```\n{}\n```", order_type),                     "inline": true},
+                {"name": "📋 Active Orders", "value": format!("```fix\n{}\n```", active_orders),              "inline": true},
             ],
             "thumbnail": {"url": format!("https://sky.coflnet.com/static/icon/{}", safe_item)},
             "footer": {
@@ -475,6 +477,7 @@ pub async fn send_webhook_bazaar_order_collected(
     price_per_unit: Option<f64>,
     profit: Option<i64>,
     purse: Option<u64>,
+    remaining_orders: usize,
     webhook_url: &str,
 ) {
     let order_type = if is_buy_order { "Buy Order" } else { "Sell Offer" };
@@ -523,6 +526,7 @@ pub async fn send_webhook_bazaar_order_collected(
             "inline": true
         }));
     }
+    fields.push(serde_json::json!({"name": "📋 Remaining Orders", "value": format!("```fix\n{}\n```", remaining_orders), "inline": true}));
 
     let payload = serde_json::json!({
         "embeds": [{
@@ -548,6 +552,7 @@ pub async fn send_webhook_bazaar_order_cancelled(
     amount: Option<u64>,
     price_per_unit: Option<f64>,
     purse: Option<u64>,
+    remaining_orders: usize,
     webhook_url: &str,
 ) {
     let order_type = if is_buy_order { "Buy Order" } else { "Sell Offer" };
@@ -568,6 +573,7 @@ pub async fn send_webhook_bazaar_order_cancelled(
             fields.push(serde_json::json!({"name": "💰 Total", "value": format!("```fix\n{} coins\n```", format_number(total)), "inline": true}));
         }
     }
+    fields.push(serde_json::json!({"name": "📋 Remaining Orders", "value": format!("```fix\n{}\n```", remaining_orders), "inline": true}));
 
     let payload = serde_json::json!({
         "embeds": [{
@@ -621,6 +627,7 @@ pub async fn send_webhook_auction_listed(
     starting_bid: u64,
     duration_hours: u64,
     purse: Option<u64>,
+    active_listings: usize,
     webhook_url: &str,
 ) {
     let safe_item = sanitize_item_name(item_name);
@@ -634,6 +641,7 @@ pub async fn send_webhook_auction_listed(
                 {"name": "💵 BIN Price",  "value": format!("```fix\n{} coins\n```", format_number(starting_bid as f64)), "inline": true},
                 {"name": "⏳ Duration",   "value": format!("```\n{}h\n```", duration_hours),                             "inline": true},
                 {"name": "📅 Expires",    "value": format!("<t:{}:R>", expires_unix),                                    "inline": true},
+                {"name": "📋 Active Listings", "value": format!("```fix\n{}\n```", active_listings),                     "inline": true},
             ],
             "thumbnail": {"url": format!("https://sky.coflnet.com/static/icon/{}", safe_item)},
             "footer": {
@@ -772,6 +780,7 @@ pub async fn send_webhook_auction_cancelled(
     item_name: &str,
     starting_bid: u64,
     purse: Option<u64>,
+    remaining_listings: usize,
     webhook_url: &str,
 ) {
     let safe_item = sanitize_item_name(item_name);
@@ -782,6 +791,7 @@ pub async fn send_webhook_auction_cancelled(
             "color": 0xe74c3cu32,
             "fields": [
                 {"name": "💵 Starting Bid", "value": format!("```fix\n{} coins\n```", format_number(starting_bid as f64)), "inline": true},
+                {"name": "📋 Remaining Listings", "value": format!("```fix\n{}\n```", remaining_listings), "inline": true},
             ],
             "thumbnail": {"url": format!("https://sky.coflnet.com/static/icon/{}", safe_item)},
             "footer": {

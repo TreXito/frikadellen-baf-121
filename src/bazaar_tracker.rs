@@ -128,6 +128,11 @@ impl BazaarOrderTracker {
         self.orders.read().clone()
     }
 
+    /// Returns the total number of currently tracked bazaar orders.
+    pub fn order_count(&self) -> usize {
+        self.orders.read().len()
+    }
+
     /// Remove all tracked orders and persist.  Used on startup to get a clean
     /// view since the in-game ManageOrders cycle will cancel everything.
     pub fn clear_all_orders(&self) -> usize {

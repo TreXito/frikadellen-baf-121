@@ -15,6 +15,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use azalea_inventory::operations::ClickType;
 use azalea_client::chat::ChatPacket;
 use azalea_client::inventory::{MenuOpenedEvent, SetContainerContentEvent};
+use azalea_client::tick_broadcast::TickBroadcast;
 use bevy_app::AppExit;
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
@@ -808,6 +809,11 @@ impl BotClient {
     /// My Auctions window yet.
     pub fn get_cached_my_auctions_json(&self) -> Option<String> {
         self.cached_my_auctions_json.read().clone()
+    }
+
+    /// Returns the number of items currently tracked as active auction listings.
+    pub fn active_auction_count(&self) -> usize {
+        self.active_auction_listings.read().len()
     }
 
     /// Returns true if the bazaar order limit has been hit and not yet cleared.
@@ -3250,6 +3256,27 @@ async fn execute_command(
             // comparison in the OpenScreen handler is accurate for THIS purchase.
             *state.window_open_info.write() = None;
 
+            // ---- Tick-aligned send ----
+            // Wait for the next game tick boundary before sending /viewauction.
+            // Minecraft servers process packets received during a tick at its
+            // end.  By sending right after a tick fires, the packet arrives at
+            // the very start of the server's next 50ms processing window,
+            // giving the full tick for the round-trip to complete.  This
+            // shaves off up to 50ms of random tick-phase jitter from buy speed.
+            //
+            // The TickBroadcast resource fires once per GameTick inside the ECS
+            // schedule.  We subscribe, wait for at most one tick (50ms) to avoid
+            // stalling, then send immediately on the raw TCP connection.
+            if let Some(mut tick_rx) = subscribe_to_ticks(bot) {
+                let pre_tick = std::time::Instant::now();
+                let _ = tokio::time::timeout(
+                    tokio::time::Duration::from_millis(55),
+                    tick_rx.recv(),
+                ).await;
+                let waited_ms = pre_tick.elapsed().as_secs_f64() * 1000.0;
+                debug!("[Timing] Tick-aligned /viewauction: waited {:.1}ms for tick boundary", waited_ms);
+            }
+
             // Record buy-speed start time right before sending /viewauction
             // so the measurement covers command-send → coins-in-escrow (the
             // relevant metric), NOT flip-receive → escrow which includes
@@ -3731,6 +3758,18 @@ async fn handle_window_interaction(
                         info!("[AH] gold_nugget confirmed — sending buy + skip-click");
                     } else {
                         info!("[AH] gold_nugget confirmed — sending buy click");
+                    }
+                    // Tick-align the buy click: wait for the next tick boundary
+                    // so the click packet arrives at the start of the server's
+                    // processing window.  Combined with skip-click, this puts
+                    // both the buy-click and confirm-click in the same tick.
+                    if let Some(mut tick_rx) = subscribe_to_ticks(bot) {
+                        let pre_tick = std::time::Instant::now();
+                        let _ = tokio::time::timeout(
+                            tokio::time::Duration::from_millis(55),
+                            tick_rx.recv(),
+                        ).await;
+                        debug!("[Timing] Tick-aligned buy click: waited {:.1}ms", pre_tick.elapsed().as_secs_f64() * 1000.0);
                     }
                     // Use raw connection to bypass ECS queue for the buy click.
                     send_raw_click(bot, window_id, 31);
@@ -6364,6 +6403,17 @@ fn send_chat_command(bot: &Client, content: &str) {
     bot.write_packet(ServerboundChatCommand {
         command: command.to_string(),
     });
+}
+
+/// Subscribe to the ECS `TickBroadcast` to receive notifications on every
+/// game tick (50ms).  Returns `None` if the ECS lock cannot be acquired or
+/// the resource is missing (e.g. before the bot is fully connected).
+///
+/// Used to align time-critical packets (like `/viewauction`) with tick
+/// boundaries so they arrive at the start of a new server processing window.
+fn subscribe_to_ticks(bot: &Client) -> Option<tokio::sync::broadcast::Receiver<()>> {
+    let ecs = bot.ecs.lock();
+    ecs.get_resource::<TickBroadcast>().map(|tb| tb.subscribe())
 }
 
 /// Send a chat command directly to the TCP socket via `with_raw_connection_mut`,

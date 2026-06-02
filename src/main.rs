@@ -1357,9 +1357,10 @@ async fn main() -> Result<()> {
                         let item = item_name.clone();
                         let total = price_per_unit * amount as f64;
                         let purse = bot_client_clone.get_purse();
+                        let active_orders = bazaar_tracker_events.order_count();
                         tokio::spawn(async move {
                             frikadellen_baf::webhook::send_webhook_bazaar_order_placed(
-                                &name, &item, amount, price_per_unit, total, is_buy_order, purse, &url,
+                                &name, &item, amount, price_per_unit, total, is_buy_order, purse, active_orders, &url,
                             ).await;
                         });
                     }
@@ -1379,9 +1380,10 @@ async fn main() -> Result<()> {
                         let name = ingame_name_for_events.clone();
                         let item = item_name.clone();
                         let purse = bot_client_clone.get_purse();
+                        let active_listings = bot_client_clone.active_auction_count();
                         tokio::spawn(async move {
                             frikadellen_baf::webhook::send_webhook_auction_listed(
-                                &name, &item, starting_bid, duration_hours, purse, &url,
+                                &name, &item, starting_bid, duration_hours, purse, active_listings, &url,
                             ).await;
                         });
                     }
@@ -1398,9 +1400,10 @@ async fn main() -> Result<()> {
                         let name = ingame_name_for_events.clone();
                         let item = item_name.clone();
                         let purse = bot_client_clone.get_purse();
+                        let remaining_listings = bot_client_clone.active_auction_count();
                         tokio::spawn(async move {
                             frikadellen_baf::webhook::send_webhook_auction_cancelled(
-                                &name, &item, starting_bid, purse, &url,
+                                &name, &item, starting_bid, purse, remaining_listings, &url,
                             ).await;
                         });
                     }
@@ -1530,11 +1533,12 @@ async fn main() -> Result<()> {
                         // shows *something* rather than "0x".
                         let webhook_amount = if actual_amount > 0 { Some(actual_amount) } else { order_data.as_ref().map(|o| o.amount) };
                         let opt_ppu = order_data.as_ref().map(|o| o.price_per_unit);
+                        let remaining_orders = bazaar_tracker_events.order_count();
                         tokio::spawn(async move {
                             frikadellen_baf::webhook::send_webhook_bazaar_order_collected(
                                 &name, &item, is_buy_order,
                                 webhook_amount, opt_ppu,
-                                opt_profit, purse, &url,
+                                opt_profit, purse, remaining_orders, &url,
                             ).await;
                         });
                     }
@@ -1602,9 +1606,10 @@ async fn main() -> Result<()> {
                         let purse = bot_client_clone.get_purse();
                         let opt_amount = order_data.as_ref().map(|o| o.amount);
                         let opt_ppu = order_data.as_ref().map(|o| o.price_per_unit);
+                        let remaining_orders = bazaar_tracker_events.order_count();
                         tokio::spawn(async move {
                             frikadellen_baf::webhook::send_webhook_bazaar_order_cancelled(
-                                &name, &item, is_buy_order, opt_amount, opt_ppu, purse, &url,
+                                &name, &item, is_buy_order, opt_amount, opt_ppu, purse, remaining_orders, &url,
                             ).await;
                         });
                     }
