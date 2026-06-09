@@ -330,11 +330,19 @@ impl FlipHandler {
         // Store current flip
         *self.current_flip.write() = Some(flip.clone());
 
-        // Check if bot is busy
+        // Check if bot is busy — wait up to 30 seconds for it to become idle
+        let wait_start = Instant::now();
+        const MAX_WAIT_SECS: u64 = 30;
         loop {
             let state = *bot_state.read();
             if state == BotState::Idle {
                 break;
+            }
+            
+            if wait_start.elapsed() > Duration::from_secs(MAX_WAIT_SECS) {
+                warn!("Timeout waiting {}s for Idle state (stuck in {:?}), aborting flip: {}", MAX_WAIT_SECS, state, flip.item_name);
+                *self.current_flip.write() = None;
+                return Err(anyhow!("Timeout waiting for bot to become idle (stuck in {:?})", state));
             }
             
             // TODO: Check if we can interrupt the current operation

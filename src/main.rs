@@ -1761,9 +1761,16 @@ async fn main() -> Result<()> {
                         continue;
                     }
 
-                    // Skip if in startup/claiming state - use bot_client state (authoritative source)
-                    if !bot_client_for_ws.state().allows_commands() {
-                        debug!("Skipping flip — bot busy ({:?}): {}", bot_client_for_ws.state(), flip.item_name);
+                    // Allow flips even when bot is busy — the command queue
+                    // uses Critical priority for PurchaseAuction which will
+                    // preempt lower-priority commands.  Previously this gate
+                    // silently dropped cofl flips whenever the bot was in
+                    // ANY non-idle state (Purchasing, ManagingOrders, Bazaar,
+                    // etc.), causing flips to be missed entirely.
+                    // Only hard-block during Startup which indicates the bot
+                    // is not yet ready to interact with Hypixel at all.
+                    if bot_client_for_ws.state() == frikadellen_baf::types::BotState::Startup {
+                        debug!("Skipping flip — bot in Startup state: {}", flip.item_name);
                         continue;
                     }
 
@@ -2613,6 +2620,11 @@ async fn main() -> Result<()> {
         use frikadellen_baf::types::BotState;
         // Debounce: avoid requesting sellinventory too frequently when inventory is full
         let mut last_sellinventory_request = Instant::now() - Duration::from_secs(300);
+        // Track how long the bot has been continuously in selling mode so we can
+        // periodically force-clear the inventory_full flag (it may be stale if no
+        // ContainerSetContent packets arrive while the bot is idle).
+        let mut selling_mode_since: Option<Instant> = None;
+        const SELLING_MODE_RECHECK_SECS: u64 = 30;
         loop {
             // When macro is paused via web panel, skip command processing entirely.
             if macro_paused_proc.load(Ordering::Relaxed) {
@@ -2687,6 +2699,28 @@ async fn main() -> Result<()> {
                 // order management, claims of SOLD items).  Everything else —
                 // including ClaimPurchasedItem (which adds items) — is dropped so
                 // the bot focuses exclusively on selling until there's space again.
+                if bot_client_clone.is_inventory_full() {
+                    // Track how long we've been in selling mode.  If the
+                    // inventory_full flag has been set for > SELLING_MODE_RECHECK_SECS
+                    // without any sell command executing, force-clear it so the
+                    // bot rechecks actual inventory state instead of staying
+                    // stuck dropping commands indefinitely.
+                    let since = selling_mode_since.get_or_insert_with(Instant::now);
+                    if since.elapsed() > Duration::from_secs(SELLING_MODE_RECHECK_SECS) {
+                        info!("[SellingMode] Inventory full for >{}s — force-clearing flag to recheck", SELLING_MODE_RECHECK_SECS);
+                        bot_client_clone.clear_inventory_full();
+                        selling_mode_since = None;
+                        // Re-check immediately — if inventory is truly full the
+                        // cached slot count in is_inventory_full() will re-confirm.
+                        if bot_client_clone.is_inventory_full() {
+                            // Still full after recheck — restart the timer
+                            selling_mode_since = Some(Instant::now());
+                        }
+                    }
+                } else {
+                    // Not in selling mode — reset the timer
+                    selling_mode_since = None;
+                }
                 if bot_client_clone.is_inventory_full() {
                     let is_selling_cmd = matches!(
                         cmd.command_type,

@@ -2165,6 +2165,8 @@ fn is_terminal_purchase_failure_message(message: &str) -> bool {
         || message.contains("The auction wasn't found!")
         || message.contains("You cannot view this auction!")
         || message.contains("You cannot afford this auction!")
+        || message.contains("don't have the space required to claim")
+        || message.contains("Your inventory is full!")
 }
 
 /// Handle events from the Azalea client
@@ -2604,9 +2606,16 @@ async fn event_handler(
 
             // Detect "You don't have the space required to claim that!" and set the
             // inventory_full flag so ManageOrders can stop and log remaining orders.
+            // Verify actual slot count to avoid a stale flag if inventory was freed
+            // between the server sending the message and us processing it.
             if clean_message.contains("don't have the space required to claim") {
-                warn!("[ManageOrders] Inventory full — logging unclaimed orders");
-                state.inventory_full.store(true, Ordering::Relaxed);
+                let empty = count_empty_player_slots(&bot);
+                if empty < MIN_FREE_SLOTS_FOR_BUY as usize {
+                    warn!("[ManageOrders] Inventory full — {} empty slots, logging unclaimed orders", empty);
+                    state.inventory_full.store(true, Ordering::Relaxed);
+                } else {
+                    info!("[ManageOrders] Claim-space warning but {} empty slots — ignoring stale message", empty);
+                }
             }
 
             // Detect "You have X item(s) stashed away!" — Hypixel sends this both
@@ -7101,6 +7110,8 @@ mod tests {
     fn test_is_terminal_purchase_failure_message() {
         assert!(is_terminal_purchase_failure_message("You didn't participate in this auction!"));
         assert!(is_terminal_purchase_failure_message("This auction wasn't found!"));
+        assert!(is_terminal_purchase_failure_message("You don't have the space required to claim that!"));
+        assert!(is_terminal_purchase_failure_message("Your inventory is full!"));
         assert!(!is_terminal_purchase_failure_message("Putting coins in escrow..."));
     }
 
