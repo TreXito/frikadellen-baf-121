@@ -241,8 +241,9 @@ The `config.toml` file is created automatically on first run. You can edit it wi
 | `command_delay_ms` | integer | `500` | Delay in ms between bot commands |
 | `bed_spam_click_delay` | integer | `100` | Delay in ms for bed spam clicks |
 | `bed_multiple_clicks_delay` | integer | `0` | Delay in ms between multiple clicks |
-| `bed_pre_click_ms` | integer | `30` | Pre-click timing in ms (used with freemoney) |
+| `bed_pre_click_ms` | integer | `30` | Pre-click timing in ms (used with bedtiming) |
 | `bed_spam` | boolean | `false` | Enable bed spam clicking |
+| `bedtiming` | boolean | `true` | Use COFL `purchaseAt` timing to pre-click grace-period (bed) auctions. Enabled by default. (Formerly `freemoney`.) |
 
 ### Auction House
 

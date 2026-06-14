@@ -312,8 +312,8 @@ pub struct BotClient {
     cached_inventory_json: Arc<RwLock<Option<String>>>,
     /// AUTO_COOKIE config value passed through to BotClientState.
     auto_cookie_hours: Arc<RwLock<u64>>,
-    /// Hidden config gate for purchaseAt bed timing mode.
-    pub freemoney: bool,
+    /// Config gate for purchaseAt-based bed (grace-period) timing mode.
+    pub bedtiming: bool,
     /// Enable skip-click: pre-click confirm on predicted Confirm Purchase window.
     pub skip: bool,
     /// Interval in milliseconds for grace-period bed/gold_nugget click loops.
@@ -478,7 +478,7 @@ impl BotClient {
             bazaar_order_rejected: Arc::new(AtomicBool::new(false)),
             cached_inventory_json: Arc::new(RwLock::new(None)),
             auto_cookie_hours: Arc::new(RwLock::new(0)),
-            freemoney: false,
+            bedtiming: false,
             skip: false,
             bed_spam_click_delay: 100,
             insta_sell_item: Arc::new(RwLock::new(None)),
@@ -591,7 +591,7 @@ impl BotClient {
             window_open_info: Arc::new(RwLock::new(None)),
             cached_inventory_json: self.cached_inventory_json.clone(),
             auto_cookie_hours: self.auto_cookie_hours.clone(),
-            freemoney: self.freemoney,
+            bedtiming: self.bedtiming,
             skip: self.skip,
             bed_spam_click_delay: self.bed_spam_click_delay,
             cookie_time_secs: Arc::new(RwLock::new(0)),
@@ -1189,7 +1189,7 @@ pub struct BotClientState {
     pub grace_period_spam_active: Arc<AtomicBool>,
     /// Raw COFL `purchaseAt` epoch-ms timestamp from the flip.  Converted to a
     /// local `Instant` only when a bed (grace-period) is detected in the BIN
-    /// Auction View **and** freemoney mode is enabled.
+    /// Auction View **and** bedtiming mode is enabled.
     pub pending_purchase_at_ms: Arc<RwLock<Option<i64>>>,
     /// Set to true while the bot is waiting for a bed (grace-period) to expire so
     /// the 5-second GUI watchdog does not incorrectly auto-close the BIN Auction View.
@@ -1215,8 +1215,8 @@ pub struct BotClientState {
     pub cached_inventory_json: Arc<RwLock<Option<String>>>,
     /// AUTO_COOKIE config value (hours threshold to trigger a cookie buy). 0 = disabled.
     pub auto_cookie_hours: Arc<RwLock<u64>>,
-    /// Hidden config gate for purchaseAt bed timing mode.
-    pub freemoney: bool,
+    /// Config gate for purchaseAt-based bed (grace-period) timing mode.
+    pub bedtiming: bool,
     /// Enable skip-click: pre-click confirm on predicted Confirm Purchase window.
     pub skip: bool,
     /// Interval in milliseconds for grace-period bed/gold_nugget click loops.
@@ -1370,7 +1370,7 @@ impl Default for BotClientState {
             window_open_info: Arc::new(RwLock::new(None)),
             cached_inventory_json: Arc::new(RwLock::new(None)),
             auto_cookie_hours: Arc::new(RwLock::new(0)),
-            freemoney: false,
+            bedtiming: false,
             skip: false,
             bed_spam_click_delay: 100,
             cookie_time_secs: Arc::new(RwLock::new(0)),
@@ -3288,7 +3288,7 @@ async fn execute_command(
 
             // Store raw COFL purchaseAt timestamp.  It is only converted to a
             // local Instant later — and only when the auction turns out to be a
-            // bed (grace-period) and freemoney mode is enabled.
+            // bed (grace-period) and bedtiming mode is enabled.
             *state.pending_purchase_at_ms.write() = flip.purchase_at_ms;
             
             // Reset fast-buy flag before setting state to Purchasing.
@@ -3382,10 +3382,11 @@ async fn execute_command(
                         return;
                     }
 
-                    // gold_nugget confirmed — send buy-click immediately.
-                    // No tick-alignment wait: with low ping (2ms) both the
-                    // buy-click and skip-click are written to the same TCP
-                    // write buffer and arrive at the server in one segment.
+                    // gold_nugget confirmed — slot 31 is the real, server-sent
+                    // buy button, so clicking it now is clicking something that
+                    // is actually there.  Click immediately (event-driven: we
+                    // react the moment the confirmed state arrives, so the action
+                    // resolves within one tick).
                     if let Some(t0) = *fast_state.purchase_start_time.read() {
                         info!(
                             "[Timing] /viewauction → fast-path buy click: {:.1}ms",
@@ -3393,26 +3394,32 @@ async fn execute_command(
                         );
                     }
 
-                    if fast_state.skip {
-                        info!("[AH] Fast-path: gold_nugget confirmed — sending buy + skip-click");
-                    } else {
-                        info!("[AH] Fast-path: gold_nugget confirmed — sending buy click");
-                    }
-
+                    // Buy click on the confirmed window/slot 31.
                     send_raw_click(&fast_bot, window_id, 31);
 
                     if fast_state.skip {
-                        // Redundant second buy click to guard against packet loss.
-                        send_raw_click(&fast_bot, window_id, 31);
-
+                        // Skip pre-click: click slot 11 of the Confirm Purchase
+                        // window in the SAME TCP burst as the buy click.  The
+                        // confirm window does not exist yet, but the buy click
+                        // (processed first, same tick) opens it as id
+                        // window_id+1 — so this is a click on a window we KNOW
+                        // will be there.  This is the one sanctioned click-ahead.
+                        //
+                        // NOTE: we deliberately do NOT re-click slot 31 here.
+                        // The buy click already replaced the BIN Auction View
+                        // with the Confirm Purchase window, so a second slot-31
+                        // click would land on a window that no longer exists —
+                        // an impossible action that Watchdog flags.
                         let next_wid = if window_id == 255 { 1u8 } else { window_id + 1 };
-                        info!("[AH] Fast-path skip: pre-clicking slot 11 on predicted window {} (same burst)", next_wid);
+                        info!("[AH] Fast-path skip: pre-clicking confirm slot 11 on window {} (same burst)", next_wid);
                         fast_state.skip_click_sent.store(true, Ordering::Relaxed);
                         send_raw_click(&fast_bot, next_wid, 11);
+                    } else {
+                        info!("[AH] Fast-path: gold_nugget confirmed — buy click sent");
                     }
 
                     // Signal that the fast path handled the buy click so the
-                    // Event::Packet handler doesn't send duplicate clicks.
+                    // Event::Packet handler doesn't send a duplicate click.
                     fast_state.fast_buy_clicked.store(true, Ordering::Relaxed);
                 });
             }
@@ -3733,17 +3740,17 @@ async fn handle_window_interaction(
                     // Signal the 5-second GUI watchdog to leave this window open.
                     state.bed_timing_active.store(true, Ordering::Relaxed);
 
-                    const BED_FREEMONEY_CLICK_INTERVAL_MS: u64 = 20;
+                    const BED_TIMING_CLICK_INTERVAL_MS: u64 = 20;
                     const BED_WAIT_POLL_MS: u64 = 20;
                     const MAX_FAILED_CLICKS: usize = 5;
-                    let click_interval_ms = if state.freemoney {
-                        BED_FREEMONEY_CLICK_INTERVAL_MS
+                    let click_interval_ms = if state.bedtiming {
+                        BED_TIMING_CLICK_INTERVAL_MS
                     } else {
                         state.bed_spam_click_delay.max(1)
                     };
 
-                    if state.freemoney {
-                        // Freemoney mode: use COFL purchaseAt timing for bed auctions.
+                    if state.bedtiming {
+                        // Bedtiming mode: use COFL purchaseAt timing for bed auctions.
                         // Start clicking bed_pre_click_ms (default 30ms) before the deadline.
                         // If purchaseAt is not available, fall through to immediate bed spam.
                         let pre_click_lead_ms = state.bed_pre_click_ms;
@@ -3761,7 +3768,7 @@ async fn handle_window_interaction(
                         if let Some(remaining_ms) = remaining_ms_from_purchase_at {
                             let wait_ms = remaining_ms.saturating_sub(pre_click_lead_ms);
                             if wait_ms > 0 {
-                                info!("[AH] Bed timing (freemoney): purchaseAt in {}ms — waiting {}ms, then clicking at {}ms intervals (lead: {}ms)",
+                                info!("[AH] Bed timing: purchaseAt in {}ms — waiting {}ms, then clicking at {}ms intervals (lead: {}ms)",
                                     remaining_ms, wait_ms, click_interval_ms, pre_click_lead_ms);
                                 let wait_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(wait_ms);
                                 loop {
@@ -3781,12 +3788,12 @@ async fn handle_window_interaction(
                                     }
                                     tokio::time::sleep(tokio::time::Duration::from_millis(BED_WAIT_POLL_MS)).await;
                                 }
-                                info!("[AH] Bed timing (freemoney): entering rapid-click phase ({}ms interval)", click_interval_ms);
+                                info!("[AH] Bed timing: entering rapid-click phase ({}ms interval)", click_interval_ms);
                             } else {
-                                info!("[AH] Bed timing (freemoney): purchaseAt imminent — starting clicks at {}ms interval", click_interval_ms);
+                                info!("[AH] Bed timing: purchaseAt imminent — starting clicks at {}ms interval", click_interval_ms);
                             }
                         } else {
-                            info!("[AH] Bed timing (freemoney): no purchaseAt — starting immediate bed spam at {}ms interval", click_interval_ms);
+                            info!("[AH] Bed timing: no purchaseAt — starting immediate bed spam at {}ms interval", click_interval_ms);
                         }
                     } else {
                         // Default mode: simple immediate bed spam at bed_spam_click_delay.
@@ -3836,7 +3843,7 @@ async fn handle_window_interaction(
                             *state.bot_state.write() = BotState::Idle;
                             return;
                         } else if current_kind.contains("bed") {
-                            if state.freemoney {
+                            if state.bedtiming {
                                 debug!("[AH] Bed timing: grace period active, pre-clicking slot 31");
                                 if *state.last_window_id.read() == window_id {
                                     send_raw_click(bot, window_id, 31);
@@ -3867,36 +3874,31 @@ async fn handle_window_interaction(
                         info!("[AH] Fast-path already sent buy click — skipping Event::Packet click");
                     } else {
                         // Fallback: fast path did not fire (e.g. window was not
-                        // BIN Auction View, or observer didn't trigger).  Send
-                        // buy-click from the Event::Packet path as before.
+                        // BIN Auction View, or the observer didn't trigger).
+                        // slot 31 is confirmed gold_nugget — the real buy button
+                        // is there — so click it immediately.
                         if let Some(t0) = *state.purchase_start_time.read() {
                             info!(
                                 "[Timing] /viewauction → buy click sent (fallback): {:.1}ms",
                                 t0.elapsed().as_secs_f64() * 1000.0
                             );
                         }
-                        if state.skip {
-                            info!("[AH] gold_nugget confirmed — sending buy + skip-click (fallback)");
-                        } else {
-                            info!("[AH] gold_nugget confirmed — sending buy click (fallback)");
-                        }
-                        // Send buy-click immediately via raw connection — no tick-
-                        // alignment wait.  With low ping the buy-click and skip-click
-                        // are written to the same TCP buffer and arrive at the server
-                        // in one segment, landing in the same tick regardless.
+                        // Buy click on the confirmed window/slot 31.
                         send_raw_click(bot, window_id, 31);
 
                         if state.skip {
-                            // Redundant second buy click to guard against packet
-                            // loss — only needed when we also send the skip-click,
-                            // because a lost buy-click + queued confirm-click on a
-                            // window that never opens is an impossible action.
-                            send_raw_click(bot, window_id, 31);
-
+                            // Skip pre-click on the Confirm Purchase window in the
+                            // same TCP burst — the buy click opens it as id
+                            // window_id+1, so it is a window we KNOW will be there.
+                            // No second slot-31 click: after the buy click that
+                            // window is gone, so re-clicking it would be an
+                            // impossible action.
                             let next_wid = if window_id == 255 { 1u8 } else { window_id + 1 };
-                            info!("[AH] Skip: pre-clicking slot 11 on predicted window {} (same burst)", next_wid);
+                            info!("[AH] Skip: pre-clicking confirm slot 11 on window {} (same burst, fallback)", next_wid);
                             state.skip_click_sent.store(true, Ordering::Relaxed);
                             send_raw_click(bot, next_wid, 11);
+                        } else {
+                            info!("[AH] gold_nugget confirmed — buy click sent (fallback)");
                         }
                     }
                 } else if !slot_31_kind.contains("air") {
@@ -3948,23 +3950,21 @@ async fn handle_window_interaction(
                         t0.elapsed().as_secs_f64() * 1000.0
                     );
                 }
-                // If a skip-click was already sent for this window, don't fire a
-                // redundant reactive click — the pre-click packet should already be
-                // queued on the server for the same tick.
+                // If a skip pre-click was already sent for this window, the
+                // confirm click is already queued on the server for this same
+                // window — don't fire a redundant reactive click.
                 let skip_was_sent = state.skip_click_sent.swap(false, Ordering::Relaxed);
                 if skip_was_sent {
-                    info!("[AH] Skip-click was sent — skipping reactive confirm click");
+                    info!("[AH] Skip pre-click already sent for this confirm window — not re-clicking");
                 } else {
-                    // No skip-click — click confirm (slot 11) immediately via raw connection.
+                    // No skip pre-click — this Confirm Purchase window is open
+                    // right now (the server just sent it), so clicking slot 11 is
+                    // clicking something that is actually there.  Click it
+                    // immediately via the raw connection.
                     send_raw_click(bot, window_id, 11);
                 }
 
-                // When skip-click was sent, the server already has the confirm
-                // click queued from the same TCP burst as the buy-click.  Use
-                // the same retry interval — the safety loop below handles any
-                // cases where the server needs more time.
-                let initial_wait_ms = CONFIRM_PURCHASE_RETRY_MS;
-                tokio::time::sleep(tokio::time::Duration::from_millis(initial_wait_ms)).await;
+                tokio::time::sleep(tokio::time::Duration::from_millis(CONFIRM_PURCHASE_RETRY_MS)).await;
 
                 // Safety retry loop: if the window is still open (pre-click failed,
                 // click was lost, or the server needs more time), keep retrying.

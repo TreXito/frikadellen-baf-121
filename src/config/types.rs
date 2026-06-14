@@ -79,7 +79,7 @@ pub struct Config {
     pub bed_multiple_clicks_delay: u64,
     
     /// How many ms before the COFL `purchaseAt` deadline to start clicking (default: 30).
-    /// Only used when `freemoney = true`. Without freemoney, bed spam starts immediately
+    /// Only used when `bedtiming = true`. Without bedtiming, bed spam starts immediately
     /// using `bed_spam_click_delay` and this value is ignored.
     #[serde(default = "default_bed_pre_click_ms")]
     pub bed_pre_click_ms: u64,
@@ -122,8 +122,13 @@ pub struct Config {
     #[serde(default, alias = "fastbuy")]
     pub skip: bool,
 
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub freemoney: Option<bool>,
+    /// Bed-timing mode for grace-period (bed) auctions.  When enabled the bot uses
+    /// the COFL `purchaseAt` timestamp to start pre-clicking the bed slot
+    /// `bed_pre_click_ms` before the grace period ends, instead of waiting for the
+    /// item to become buyable.  Defaults to `true`.  (Formerly `freemoney`; the old
+    /// name is still accepted via the serde alias for backward compatibility.)
+    #[serde(default = "default_true", alias = "freemoney")]
+    pub bedtiming: bool,
     
     #[serde(default = "default_true")]
     pub use_cofl_chat: bool,
@@ -315,7 +320,7 @@ impl Default for Config {
             enable_ah_flips: true,
             bed_spam: false,
             skip: false,
-            freemoney: None,
+            bedtiming: true,
             use_cofl_chat: true,
             auto_cookie: 0,
             enable_console_input: true,
@@ -342,8 +347,8 @@ impl Default for Config {
 }
 
 impl Config {
-    pub fn freemoney_enabled(&self) -> bool {
-        self.freemoney.unwrap_or(false)
+    pub fn bedtiming_enabled(&self) -> bool {
+        self.bedtiming
     }
 
     pub fn skip_enabled(&self) -> bool {
@@ -402,15 +407,36 @@ mod tests {
     use super::Config;
 
     #[test]
-    fn default_config_omits_freemoney() {
-        let toml = toml::to_string_pretty(&Config::default()).expect("default config should serialize");
-        assert!(!toml.contains("freemoney"));
+    fn default_config_enables_bedtiming() {
+        let config = Config::default();
+        assert!(config.bedtiming_enabled());
     }
 
     #[test]
-    fn manual_freemoney_true_enables_flag() {
+    fn default_config_includes_bedtiming() {
+        let toml = toml::to_string_pretty(&Config::default()).expect("default config should serialize");
+        assert!(toml.contains("bedtiming = true"), "bedtiming should appear in default config");
+    }
+
+    #[test]
+    fn manual_bedtiming_false_disables_flag() {
+        let config: Config = toml::from_str("bedtiming = false").expect("config should parse");
+        assert!(!config.bedtiming_enabled());
+    }
+
+    #[test]
+    fn legacy_freemoney_alias_still_works() {
+        // Old configs using `freemoney = true` must keep enabling bed timing.
         let config: Config = toml::from_str("freemoney = true").expect("config should parse");
-        assert!(config.freemoney_enabled());
+        assert!(config.bedtiming_enabled());
+        let config: Config = toml::from_str("freemoney = false").expect("config should parse");
+        assert!(!config.bedtiming_enabled());
+    }
+
+    #[test]
+    fn bedtiming_defaults_true_when_absent() {
+        let config: Config = toml::from_str("").expect("config should parse");
+        assert!(config.bedtiming_enabled());
     }
 
     #[test]

@@ -101,8 +101,8 @@ mod tests {
         // confirm_skip is an unknown field — parsing must succeed (not panic/error).
         let config = ConfigLoader::parse_config("confirm_skip = true")
             .expect("config with unknown field should still parse");
-        // Known defaults still apply
-        assert!(!config.freemoney_enabled());
+        // Known defaults still apply (bed timing defaults to on)
+        assert!(config.bedtiming_enabled());
     }
 }
 
