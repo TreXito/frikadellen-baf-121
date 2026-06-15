@@ -593,11 +593,13 @@ async fn main() -> Result<()> {
     // Master macro pause — web panel can set this to pause all command processing.
     let macro_paused = Arc::new(AtomicBool::new(false));
 
-    // COFL now handles AH/Bazaar flip selection automatically based on user
-    // settings — these flags are always true for backward compatibility with
-    // internal code paths that check them.
-    let enable_ah_flips = Arc::new(AtomicBool::new(true));
-    let enable_bazaar_flips = Arc::new(AtomicBool::new(true));
+    // Runtime enable flags for AH / Bazaar flipping.  Initialized from config
+    // (both default to true) so an explicit `enable_*_flips = false` is honored:
+    // when bazaar flipping is disabled the bot must not run the destructive
+    // startup order management or auto-manage orders on fills — it only checks
+    // existing orders.  The web panel can still toggle these at runtime.
+    let enable_ah_flips = Arc::new(AtomicBool::new(config.enable_ah_flips));
+    let enable_bazaar_flips = Arc::new(AtomicBool::new(config.enable_bazaar_flips));
     // Transient pause flag flipped by the web panel's Disconnect button.
     // When true the COFL WS event loop below drops incoming flips instead
     // of queueing them.  Cleared by the Connect button (or process restart).
