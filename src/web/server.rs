@@ -833,6 +833,12 @@ async fn cancel_bz_order(
     // Remove the order from the tracker immediately so the web GUI reflects
     // the intent.  The in-game cancellation happens asynchronously via
     // ManageOrders targeting this specific order.
+    //
+    // Also mark it pending-cancel: the ManageOrders cycle reads the Bazaar
+    // Orders window (emitting a snapshot that still contains this order) BEFORE
+    // it cancels it, so without this the reconcile pass would re-add the order
+    // and it would flicker back into the panel.
+    s.bazaar_tracker.mark_cancelling(&payload.item_name, payload.is_buy_order);
     s.bazaar_tracker.remove_order(&payload.item_name, payload.is_buy_order);
 
     s.command_queue.enqueue(
