@@ -444,9 +444,8 @@ a{color:var(--accent2);text-decoration:none}
         <h2>⏱️ Timing &amp; Delays</h2>
         <div class="cfg-row"><label class="cfg-label" for="cfg-command_delay_ms">Command Delay (ms)</label><input class="cfg-input" id="cfg-command_delay_ms" type="number" min="100"></div>
         <div class="cfg-row"><label class="cfg-label" for="cfg-bed_spam_click_delay">Bed Spam Click Delay (ms)</label><input class="cfg-input" id="cfg-bed_spam_click_delay" type="number" min="10"></div>
-        <div class="cfg-row"><label class="cfg-label" for="cfg-bed_multiple_clicks_delay">Bed Multiple Clicks Delay (ms)</label><input class="cfg-input" id="cfg-bed_multiple_clicks_delay" type="number" min="0"></div>
         <div class="cfg-row"><label class="cfg-label" for="cfg-bed_pre_click_ms">Bed Pre-Click (ms)</label><input class="cfg-input" id="cfg-bed_pre_click_ms" type="number" min="0"></div>
-        <div class="cfg-row"><label class="cfg-label">Bed Spam</label><label class="toggle"><input type="checkbox" id="cfg-bed_spam"><span class="slider"></span></label></div>
+        <div class="cfg-row"><label class="cfg-label" title="Use COFL purchaseAt timing to pre-click grace-period (bed) auctions">Bed Timing</label><label class="toggle"><input type="checkbox" id="cfg-bedtiming"><span class="slider"></span></label></div>
     </div>
 
     <!-- Category: Auction House -->
@@ -1501,7 +1500,6 @@ const CONFIG_FIELDS = {
     web_gui_port: {type:'int', default:8080},
     command_delay_ms: {type:'int', default:500},
     bed_spam_click_delay: {type:'int', default:100},
-    bed_multiple_clicks_delay: {type:'int', default:0},
     bed_pre_click_ms: {type:'int', default:30},
     bazaar_order_check_interval_seconds: {type:'int', default:60},
     bazaar_order_cancel_minutes_per_million: {type:'int', default:1},
@@ -1515,7 +1513,7 @@ const CONFIG_FIELDS = {
     humanization_min_break_minutes: {type:'int', default:2},
     humanization_max_break_minutes: {type:'int', default:10},
     // booleans
-    bed_spam: {type:'bool', default:false},
+    bedtiming: {type:'bool', default:true},
     use_cofl_chat: {type:'bool', default:true},
     enable_console_input: {type:'bool', default:true},
     proxy_enabled: {type:'bool', default:false},
