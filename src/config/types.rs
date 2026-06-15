@@ -174,7 +174,28 @@ pub struct Config {
     /// Leave empty to disable pings.
     #[serde(default, with = "opt_string_as_empty")]
     pub discord_id: Option<String>,
-    
+
+    // ── Discord OAuth (bring-your-own application) ──────────────
+    // Users register their own Discord application at
+    // https://discord.com/developers/applications and paste its credentials
+    // here.  The web panel uses these to build a standard OAuth2 authorize link
+    // ("Connect Discord").  NOTE: there is no hosted backend yet — the callback /
+    // token-exchange step is not implemented, so this currently only stores the
+    // application and generates the authorize URL.
+    /// OAuth2 Client ID of the user's own Discord application. Empty = disabled.
+    #[serde(default, with = "opt_string_as_empty")]
+    pub discord_client_id: Option<String>,
+
+    /// OAuth2 Client Secret of the user's own Discord application. Empty = none.
+    /// Stored for the future token-exchange backend; not used client-side.
+    #[serde(default, with = "opt_string_as_empty")]
+    pub discord_client_secret: Option<String>,
+
+    /// OAuth2 redirect URI registered on the user's Discord application
+    /// (e.g. `http://localhost:8080/api/discord/callback`). Empty = disabled.
+    #[serde(default, with = "opt_string_as_empty")]
+    pub discord_redirect_uri: Option<String>,
+
     /// Password to protect the web control panel. Leave empty to disable authentication.
     #[serde(default, with = "opt_string_as_empty")]
     pub web_gui_password: Option<String>,
@@ -316,6 +337,9 @@ impl Default for Config {
             webhook_url: None,
             bazaar_webhook_url: None,
             discord_id: None,
+            discord_client_id: None,
+            discord_client_secret: None,
+            discord_redirect_uri: None,
             web_gui_password: None,
             hypixel_api_key: None,
             share_legendary_flips: true,

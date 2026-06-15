@@ -1,0 +1,55 @@
+name: Deploy Relay Worker
+
+# Deploys the BAF notification relay (Cloudflare Worker, added in #195) whenever
+# the relay/ sources change on main, or manually via the Actions tab.
+#
+# The Discord webhook URL and signing secret are NOT stored here — they live as
+# encrypted Cloudflare Worker secrets (DISCORD_WEBHOOK_URL, BAF_NOTIFY_SECRET),
+# set once with `wrangler secret put ...`.  This workflow only needs a Cloudflare
+# API token to publish the worker code.
+#
+# Required repository secret:
+#   CLOUDFLARE_API_TOKEN  — a Cloudflare API token with "Edit Workers" permission.
+# Optional:
+#   CLOUDFLARE_ACCOUNT_ID — only needed if the token is scoped to multiple accounts.
+#
+# If CLOUDFLARE_API_TOKEN is not configured the job no-ops (stays green) so forks
+# and unconfigured repos don't see red CI.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'relay/**'
+      - '.github/workflows/deploy-relay.yml'
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Deploy Cloudflare Worker
+    runs-on: ubuntu-latest
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - name: Check for Cloudflare API token
+        id: guard
+        run: |
+          if [ -z "${CLOUDFLARE_API_TOKEN}" ]; then
+            echo "CLOUDFLARE_API_TOKEN secret not set — skipping relay deploy."
+            echo "deploy=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "deploy=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Checkout code
+        if: steps.guard.outputs.deploy == 'true'
+        uses: actions/checkout@v4
+
+      - name: Deploy with Wrangler
+        if: steps.guard.outputs.deploy == 'true'
+        uses: cloudflare/wrangler-action@v3
+        with:
+          apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+          workingDirectory: relay
