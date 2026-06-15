@@ -74,10 +74,7 @@ pub struct Config {
     
     #[serde(default = "default_bed_spam_click_delay")]
     pub bed_spam_click_delay: u64,
-    
-    #[serde(default)]
-    pub bed_multiple_clicks_delay: u64,
-    
+
     /// How many ms before the COFL `purchaseAt` deadline to start clicking (default: 30).
     /// Only used when `bedtiming = true`. Without bedtiming, bed spam starts immediately
     /// using `bed_spam_click_delay` and this value is ignored.
@@ -112,9 +109,6 @@ pub struct Config {
     /// This field is kept for backward compatibility but is always treated as true.
     #[serde(default = "default_true", skip_serializing)]
     pub enable_ah_flips: bool,
-    
-    #[serde(default)]
-    pub bed_spam: bool,
 
     /// Enable fast-buy skip-click on predicted Confirm Purchase window.
     /// When true, the bot pre-clicks slot 11 (confirm) in the same TCP burst as
@@ -195,14 +189,6 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub share_legendary_flips: bool,
 
-    /// Whether to anonymize the username in the web GUI panel and profit summary webhooks.
-    /// When true, account names and avatars in the web panel are hidden, and the IGN is
-    /// replaced with random characters in webhooks.  Defaults to false.
-    /// **Deprecated**: This config value is ignored. Anonymization is now a session-only
-    /// toggle in the web panel that always defaults to OFF on page load.
-    #[serde(default)]
-    pub anonymize_webhook_name: bool,
-    
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub sessions: HashMap<String, CoflSession>,
 
@@ -310,7 +296,6 @@ impl Default for Config {
             web_gui_port: default_web_gui_port(),
             command_delay_ms: default_command_delay_ms(),
             bed_spam_click_delay: default_bed_spam_click_delay(),
-            bed_multiple_clicks_delay: 0,
             bed_pre_click_ms: default_bed_pre_click_ms(),
             bazaar_order_check_interval_seconds: default_bazaar_order_check_interval_seconds(),
             bazaar_order_cancel_minutes_per_million: default_bazaar_order_cancel_minutes_per_million(),
@@ -318,7 +303,6 @@ impl Default for Config {
             auction_listing_delay_ms: default_auction_listing_delay_ms(),
             enable_bazaar_flips: true,
             enable_ah_flips: true,
-            bed_spam: false,
             skip: false,
             bedtiming: true,
             use_cofl_chat: true,
@@ -335,7 +319,6 @@ impl Default for Config {
             web_gui_password: None,
             hypixel_api_key: None,
             share_legendary_flips: true,
-            anonymize_webhook_name: false,
             sessions: HashMap::new(),
             humanization_enabled: false,
             humanization_min_interval_minutes: default_humanization_min_interval_minutes(),

@@ -1177,9 +1177,9 @@ async fn main() -> Result<()> {
                     let opt_finder_for_flip = opt_finder.clone();
                     if is_legendary_flip {
                         if let Some(profit) = opt_profit {
+                            // Send the legendary/divine styled webhook to the user's
+                            // personal webhook (if configured).
                             if let Some(webhook_url) = config_for_events.active_webhook_url() {
-                                // Send legendary/divine styled webhook to user; the function also
-                                // always notifies the public channel.
                                 let url = webhook_url.to_string();
                                 let name = ingame_name_for_events.clone();
                                 let item = item_name.clone();
@@ -1204,8 +1204,11 @@ async fn main() -> Result<()> {
                                         ).await;
                                     });
                                 }
-                            } else {
-                                // No personal webhook configured — notify only the public channel.
+                            }
+                            // Notify the shared public channel only if the user opted
+                            // in via `share_legendary_flips` (honoured here rather than
+                            // always-on inside the webhook helper).
+                            if config_for_events.share_legendary_flips {
                                 let item_for_channel = item_name.clone();
                                 let finder_for_channel = opt_finder_for_flip.clone();
                                 tokio::spawn(async move {
@@ -1506,8 +1509,9 @@ async fn main() -> Result<()> {
                     );
                     print_mc_chat(&baf_msg);
                     let _ = chat_tx_events.send(baf_msg);
-                    // Send bazaar legendary flip to public channel (100M+ profit on SELL)
-                    if !is_buy_order {
+                    // Send bazaar legendary flip to public channel (100M+ profit on SELL),
+                    // only if the user opted in via `share_legendary_flips`.
+                    if !is_buy_order && config_for_events.share_legendary_flips {
                         if let Some(profit) = opt_profit {
                             if profit >= frikadellen_baf::webhook::LEGENDARY_PROFIT_THRESHOLD as i64 {
                                 let item_for_channel = item_name.clone();
@@ -2916,11 +2920,17 @@ async fn main() -> Result<()> {
     info!("  /<command> - Send command to Minecraft");
     info!("  <text> - Send chat message to COFL websocket");
     
-    // Spawn console input handler
+    // Spawn console input handler (only when enabled in config).  When disabled,
+    // stdin is left untouched — useful when running headless / as a service.
     let ws_client_for_console = ws_client.clone();
     let command_queue_for_console = command_queue.clone();
-    
+    let console_input_enabled = config.enable_console_input;
+
     tokio::spawn(async move {
+        if !console_input_enabled {
+            info!("[Console] Console input disabled (enable_console_input = false)");
+            return;
+        }
         // Rustyline provides readline with history (up/down arrow key navigation) and
         // proper terminal handling. Since it's a blocking API we drive it in a
         // dedicated blocking task and send each line over an mpsc channel.
