@@ -26,7 +26,6 @@ A high-performance, Rust-powered macro that automates auction house sniping, baz
 - [Quick Start — Your First Run](#quick-start--your-first-run)
 - [Web Control Panel](#web-control-panel)
 - [Discord Webhooks](#discord-webhooks)
-- [Discord Integration (OAuth)](#discord-integration-oauth)
 - [Multi-Account Support](#multi-account-support)
 - [Humanization / Rest Breaks](#humanization--rest-breaks)
 - [Proxy Support](#proxy-support)
@@ -40,7 +39,7 @@ A high-performance, Rust-powered macro that automates auction house sniping, baz
 ## Features
 
 ### ⚡ Fast Auction House Buying
-Snipes BIN (Buy It Now) auctions in sub-second time. The bot runs on a patched engine at 300 FPS for ~1.65 ms packet detection latency, making purchases before most other players can react. It reacts to confirmed window state (never clicking a slot or window that isn't there) so each action stays within a server tick. Optional **skip** mode (`skip = true`, alias `fastbuy`) pre-clicks the Confirm Purchase button in the same packet burst as the buy click for even faster execution.
+Snipes BIN (Buy It Now) auctions in sub-second time. The bot runs on a patched engine at 300 FPS for ~1.65 ms packet detection latency, making purchases before most other players can react. Optional **fastbuy** mode skips the confirmation window entirely for even faster execution.
 
 ### 💰 Automatic Selling & Relisting
 When your inventory is full the bot enters selling mode — it lists items to the auction house, claims sold auctions, and relist items automatically. An idle failsafe triggers every 30 minutes if no auctions have been listed, forcing a sell cycle so nothing sits idle.
@@ -156,8 +155,7 @@ If running on a VPS, replace `localhost` with your server's IP address. You can 
 ### Panel Features
 
 - **5 Themes**: Midnight (default), Obsidian, Emerald, Sakura, Ocean — switch from the dropdown in the header
-- **Anonymize Mode**: One-click toggle to hide your in-game name in the panel (useful for streaming/screenshots). This is a session-only toggle that always defaults to OFF on page load.
-- **Manual Auction Listing**: Click any item in the Inventory grid to open a dialog and list it on the Auction House at a price and duration you choose.
+- **Anonymize Mode**: One-click toggle to hide your in-game name in the panel (useful for streaming/screenshots)
 - **Real-Time Updates**: All data updates live via WebSocket — no need to refresh
 - **Mobile Friendly**: Works on phones and tablets
 
@@ -171,28 +169,6 @@ Send flip notifications and profit summaries to a Discord channel.
 2. Set `webhook_url` in `config.toml` (or in the web panel Config tab) to the copied URL.
 3. *(Optional)* Set `bazaar_webhook_url` to a different webhook URL if you want Bazaar events in a separate channel.
 4. *(Optional)* Set `discord_id` to your Discord user ID (right-click your name → Copy User ID) to get **@pinged** when legendary or divine flips occur.
-
----
-
-## Discord Integration (OAuth)
-
-You can connect the panel to your **own** Discord application via OAuth. This is a
-bring-your-own-app setup — no shared/hosted backend is involved.
-
-1. Create an application at [discord.com/developers/applications](https://discord.com/developers/applications).
-2. Under **OAuth2**, add a redirect URI (e.g. `http://localhost:8080/api/discord/callback`).
-3. In the web panel **Config → Discord Integration**, paste your **Client ID**, **Client Secret**, and the same **Redirect URI**, then save.
-4. Click **Connect Discord** to open the authorize page.
-
-> **Note:** The OAuth callback / token-exchange step is not implemented yet, so this
-> currently registers your application and opens the authorize flow. The stored
-> credentials are the foundation for full login support in a future release.
-
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `discord_client_id` | string | — | OAuth2 Client ID of your own Discord application |
-| `discord_client_secret` | string | — | OAuth2 Client Secret (stored for the future token-exchange backend) |
-| `discord_redirect_uri` | string | — | Redirect URI registered on your Discord application |
 
 ---
 
@@ -263,10 +239,11 @@ The `config.toml` file is created automatically on first run. You can edit it wi
 | Field | Type | Default | Description |
 |---|---|---|---|
 | `command_delay_ms` | integer | `500` | Delay in ms between bot commands |
-| `bed_spam_click_delay` | integer | `100` | Delay in ms between grace-period (bed) clicks when bedtiming is off |
-| `bed_pre_click_ms` | integer | `30` | How many ms before the COFL `purchaseAt` deadline to start clicking (used with bedtiming) |
+| `bed_spam_click_delay` | integer | `100` | Delay in ms for bed spam clicks |
+| `bed_multiple_clicks_delay` | integer | `0` | Delay in ms between multiple clicks |
+| `bed_pre_click_ms` | integer | `30` | Pre-click timing in ms (used with bedtiming) |
+| `bed_spam` | boolean | `false` | Enable bed spam clicking |
 | `bedtiming` | boolean | `true` | Use COFL `purchaseAt` timing to pre-click grace-period (bed) auctions. Enabled by default. (Formerly `freemoney`.) |
-| `skip` | boolean | `false` | Fast-buy: pre-click the Confirm Purchase button in the same packet burst as the buy click (alias: `fastbuy`) |
 
 ### Auction House
 
@@ -327,7 +304,7 @@ The `config.toml` file is created automatically on first run. You can edit it wi
 | **Authentication fails** | Re-run the bot and complete the Microsoft login flow again. Make sure you're using the Microsoft account linked to your Minecraft: Java Edition license. |
 | **Bot won't connect to Hypixel** | Check your internet connection. If using a proxy, verify the address and credentials. Hypixel may be down — check [status.hypixel.net](https://status.hypixel.net). |
 | **Web panel not loading** | Make sure the port (default 8080) is not blocked by a firewall. On a VPS, you may need to open the port: `sudo ufw allow 8080`. |
-| **Bot keeps disconnecting** | The bot automatically reconnects a few seconds after an unexpected disconnect. If it keeps failing, check if your account is banned or the server is under maintenance. (Intentional disconnects, like humanization rest breaks, disable auto-reconnect for the duration of the break.) |
+| **Bot keeps disconnecting** | The bot has automatic reconnection with exponential backoff (up to 5 attempts). If it keeps failing, check if your account is banned or the server is under maintenance. |
 | **Inventory stuck / not selling** | The idle failsafe triggers every 30 minutes. If items are still stuck, restart the bot. |
 | **Logs** | Check `logs/latest.log` in the same directory as the binary for detailed error information. |
 

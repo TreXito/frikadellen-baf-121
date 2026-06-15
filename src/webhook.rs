@@ -844,8 +844,7 @@ pub async fn send_webhook_legendary_flip(
     });
     let ping = discord_id.map(|id| format!("<@{}>", id));
     post_embed_with_content(webhook_url, ping.as_deref(), payload).await;
-    // NOTE: the public-channel relay is sent by the caller (gated on the
-    // `share_legendary_flips` config) — see main.rs.
+    send_webhook_flip_channel(item_name, price, target, profit, buy_speed_ms, finder).await;
 }
 
 /// Send a divine flip (1B+ profit) notification to the user's webhook.
@@ -882,8 +881,7 @@ pub async fn send_webhook_divine_flip(
     });
     let ping = discord_id.map(|id| format!("<@{}>", id));
     post_embed_with_content(webhook_url, ping.as_deref(), payload).await;
-    // NOTE: the public-channel relay is sent by the caller (gated on the
-    // `share_legendary_flips` config) — see main.rs.
+    send_webhook_flip_channel(item_name, price, target, profit, buy_speed_ms, finder).await;
 }
 
 /// Send an anonymized legendary/divine flip notification to the shared channel
