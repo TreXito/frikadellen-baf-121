@@ -1040,9 +1040,13 @@ async fn main() -> Result<()> {
                 }
                 frikadellen_baf::bot::BotEvent::StartupComplete { orders_cancelled } => {
                     info!("[Startup] Startup complete - bot is ready to flip! ({} order(s) cancelled)", orders_cancelled);
-                    // Clear the bazaar order tracker for a clean slate — the startup
-                    // ManageOrders cycle cancelled all in-game orders already.
-                    {
+                    // Clear the bazaar order tracker for a clean slate ONLY when the
+                    // startup ManageOrders cycle actually cancelled all in-game orders
+                    // (i.e. bazaar flips are enabled).  When bazaar flips are disabled
+                    // the startup pass is collect-only and the user's open orders are
+                    // still in-game — clearing the tracker would wrongly empty the web
+                    // panel, so we keep the discovered orders instead.
+                    if enable_bazaar_flips_events.load(Ordering::Relaxed) {
                         let removed = bazaar_tracker_events.clear_all_orders();
                         if removed > 0 {
                             info!("[Startup] Cleared {} stale order(s) from bazaar tracker", removed);
