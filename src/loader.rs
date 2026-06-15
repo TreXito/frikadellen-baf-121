@@ -132,7 +132,17 @@ fn check_and_update() -> anyhow::Result<()> {
         asset.name, asset.browser_download_url
     );
 
-    let bytes = client.get(&asset.browser_download_url).send()?.bytes()?;
+    let dl_resp = client.get(&asset.browser_download_url).send()?;
+    if !dl_resp.status().is_success() {
+        // Never write a non-success body (error page / rate-limit notice) over
+        // the binary we are about to execute — keep the existing one instead.
+        eprintln!(
+            "[Loader] Download returned {} — keeping existing binary.",
+            dl_resp.status()
+        );
+        return Ok(());
+    }
+    let bytes = dl_resp.bytes()?;
     let main_bin = exe_dir.join(main_binary_name());
 
     download_and_replace(&bytes, &main_bin, &exe_dir, &latest_tag)?;
