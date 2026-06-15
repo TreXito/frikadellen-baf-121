@@ -10,13 +10,20 @@ use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tracing::{debug, warn};
 
 /// File name for persisted orders (stored next to the executable / in the logs dir).
 const ORDERS_FILE: &str = "bazaar_orders.json";
 /// File name for persisted buy costs.
 const BUY_COSTS_FILE: &str = "bazaar_buy_costs.json";
+/// How long (seconds) a user-requested cancellation suppresses an order from
+/// being re-added by `reconcile_with_ingame`.  The targeted cancel runs as a
+/// `ManageOrders` cycle that first *reads* the Bazaar Orders window (emitting a
+/// snapshot that still contains the order, since it hasn't been cancelled yet),
+/// then cancels it.  Without suppression that snapshot would re-add the order
+/// to the tracker and it would briefly reappear in the web panel.
+const CANCEL_SUPPRESS_SECS: u64 = 30;
 
 /// A single tracked bazaar order visible on the web panel.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,6 +51,11 @@ pub struct BazaarOrderTracker {
     /// Maps normalized item name → (total_profit, flip_count).
     /// Used as a fallback when local buy-cost tracking has no data for a sell.
     bz_list_profits: Arc<RwLock<HashMap<String, (i64, u32)>>>,
+    /// Orders the user just asked to cancel, keyed by (normalized_name, is_buy)
+    /// → the instant the cancel was requested.  `reconcile_with_ingame` will not
+    /// re-add an order present in this map (within [`CANCEL_SUPPRESS_SECS`]) so a
+    /// just-cancelled order does not flicker back into the web panel.
+    pending_cancels: Arc<RwLock<HashMap<(String, bool), Instant>>>,
 }
 
 impl BazaarOrderTracker {
@@ -52,6 +64,7 @@ impl BazaarOrderTracker {
             orders: Arc::new(RwLock::new(Vec::new())),
             last_buy_costs: Arc::new(RwLock::new(HashMap::new())),
             bz_list_profits: Arc::new(RwLock::new(HashMap::new())),
+            pending_cancels: Arc::new(RwLock::new(HashMap::new())),
         };
         tracker.load_from_disk();
         tracker
@@ -65,7 +78,17 @@ impl BazaarOrderTracker {
             orders: Arc::new(RwLock::new(Vec::new())),
             last_buy_costs: Arc::new(RwLock::new(HashMap::new())),
             bz_list_profits: Arc::new(RwLock::new(HashMap::new())),
+            pending_cancels: Arc::new(RwLock::new(HashMap::new())),
         }
+    }
+
+    /// Mark an order as pending cancellation so `reconcile_with_ingame` does not
+    /// re-add it from an in-game snapshot taken before the cancel completes.
+    /// Call this right before queueing a ManageOrders cancel for the order.
+    pub fn mark_cancelling(&self, item_name: &str, is_buy_order: bool) {
+        self.pending_cancels
+            .write()
+            .insert((normalize_for_match(item_name), is_buy_order), Instant::now());
     }
 
     /// Record a newly placed bazaar order.
@@ -138,6 +161,16 @@ impl BazaarOrderTracker {
     pub fn clear_all_orders(&self) -> usize {
         let mut orders = self.orders.write();
         let removed = orders.len();
+        // A full clear is also used by the "cancel all" web action, so suppress
+        // every cleared order from being re-added by the next reconcile. Capture
+        // the keys BEFORE clearing.
+        {
+            let now = Instant::now();
+            let mut pending = self.pending_cancels.write();
+            for o in orders.iter() {
+                pending.insert((normalize_for_match(&o.item_name), o.is_buy_order), now);
+            }
+        }
         orders.clear();
         drop(orders);
         self.save_orders_to_disk();
@@ -221,6 +254,15 @@ impl BazaarOrderTracker {
             .as_secs();
         let mut added = 0usize;
 
+        // Prune expired cancel suppressions, then snapshot the still-active set
+        // so we don't re-add orders the user just cancelled (the in-game snapshot
+        // is taken before the targeted cancel completes).
+        let suppressed: std::collections::HashSet<(String, bool)> = {
+            let mut pending = self.pending_cancels.write();
+            pending.retain(|_, t| t.elapsed().as_secs() < CANCEL_SUPPRESS_SECS);
+            pending.keys().cloned().collect()
+        };
+
         // Build a map from (normalized_name, is_buy) → Vec<(amount, price)>
         // so we can pick the correct data for each missing order.
         let mut ingame_data: std::collections::HashMap<(String, bool), Vec<(u64, f64)>> =
@@ -233,6 +275,11 @@ impl BazaarOrderTracker {
         }
 
         for (key, data_entries) in &ingame_data {
+            // Skip orders the user just requested to cancel — re-adding them
+            // here is what made cancelled orders flicker back in the web panel.
+            if suppressed.contains(key) {
+                continue;
+            }
             let tracked = kept_counts.get(key).copied().unwrap_or(0);
             let needed = data_entries.len();
             for idx in tracked..needed {
@@ -602,6 +649,18 @@ mod tests {
         assert_eq!(remaining.len(), 2);
         assert!(remaining.iter().any(|o| o.item_name == "Coal" && o.is_buy_order));
         assert!(remaining.iter().any(|o| o.item_name == "Diamond" && !o.is_buy_order));
+    }
+
+    #[test]
+    fn reconcile_skips_pending_cancel_orders() {
+        let tracker = BazaarOrderTracker::new_in_memory();
+        // User just cancelled a Coal BUY order via the web panel.
+        tracker.mark_cancelling("Coal", true);
+        // The ManageOrders snapshot still shows it (cancel not yet processed).
+        let ingame = vec![("Coal".to_string(), true, 10, 500.0)];
+        tracker.reconcile_with_ingame(&ingame);
+        // It must NOT be re-added while the cancel is pending.
+        assert_eq!(tracker.get_orders().len(), 0);
     }
 
     #[test]

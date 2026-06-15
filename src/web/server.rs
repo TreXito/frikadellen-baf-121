@@ -430,6 +430,10 @@ async fn login(
             != 0
     {
         info!("[WebGUI] Failed login attempt from web panel");
+        // Small fixed delay to slow down brute-force attempts against the panel
+        // password. Combined with the constant-time comparison above this keeps
+        // the login endpoint from being a fast password oracle.
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         return (
             StatusCode::UNAUTHORIZED,
             Json(LoginResponse { success: false }),
@@ -833,6 +837,12 @@ async fn cancel_bz_order(
     // Remove the order from the tracker immediately so the web GUI reflects
     // the intent.  The in-game cancellation happens asynchronously via
     // ManageOrders targeting this specific order.
+    //
+    // Also mark it pending-cancel: the ManageOrders cycle reads the Bazaar
+    // Orders window (emitting a snapshot that still contains this order) BEFORE
+    // it cancels it, so without this the reconcile pass would re-add the order
+    // and it would flicker back into the panel.
+    s.bazaar_tracker.mark_cancelling(&payload.item_name, payload.is_buy_order);
     s.bazaar_tracker.remove_order(&payload.item_name, payload.is_buy_order);
 
     s.command_queue.enqueue(
@@ -1210,7 +1220,12 @@ async fn get_config(State(s): State<WebSharedState>) -> impl IntoResponse {
     match tokio::task::spawn_blocking(move || {
         loader.load()
     }).await {
-        Ok(Ok(config)) => {
+        Ok(Ok(mut config)) => {
+            // Never expose COFL account session tokens to the web client. They
+            // are server-managed credentials, not user-editable settings, and
+            // leaking them would hand out account access to anyone with panel
+            // access. They are preserved on save (see save_config).
+            config.sessions.clear();
             match toml::to_string_pretty(&config) {
                 Ok(toml_str) => (StatusCode::OK, toml_str).into_response(),
                 Err(e) => {
@@ -1245,8 +1260,15 @@ async fn save_config(
     let toml_str = payload.config_toml;
     match tokio::task::spawn_blocking(move || -> Result<(), String> {
         // Parse the TOML to validate it first
-        let config: crate::config::Config = toml::from_str(&toml_str)
+        let mut config: crate::config::Config = toml::from_str(&toml_str)
             .map_err(|e| format!("Invalid config TOML: {}", e))?;
+        // Preserve server-managed COFL session tokens: get_config strips them
+        // before sending to the client, so the incoming TOML never contains
+        // them. Restore them from the current on-disk config so saving from the
+        // web panel does not wipe the user's authenticated sessions.
+        if let Ok(existing) = loader.load() {
+            config.sessions = existing.sessions;
+        }
         // Update in-memory toggle flags to match the saved config
         enable_ah.store(config.enable_ah_flips, Ordering::Relaxed);
         enable_bz.store(config.enable_bazaar_flips, Ordering::Relaxed);
