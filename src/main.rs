@@ -3559,6 +3559,12 @@ async fn main() -> Result<()> {
         let prev_secs_human = previous_session_secs;
         let started_human = std::time::Instant::now();
         let macro_paused_human = macro_paused.clone();
+        // For a real break we must also stop *flips* coming in, not just drop the
+        // Minecraft connection: pause flip intake, clear the queue, and close the
+        // COFL socket so the bot truly goes idle/offline for the break.
+        let flip_intake_paused_human = flip_intake_paused.clone();
+        let command_queue_human = command_queue.clone();
+        let ws_client_human = ws_client.clone();
         let profit_tracker_human = profit_tracker.clone();
         let profit_path_human = profit_path.clone();
         let min_interval = config.humanization_min_interval_minutes.max(5); // floor at 5 min
@@ -3625,9 +3631,27 @@ async fn main() -> Result<()> {
             print_mc_chat(&baf_msg);
             let _ = chat_tx_human.send(baf_msg);
 
+            // Stop new flips from arriving and drop anything already queued so the
+            // bot doesn't keep flipping during the break if the connection lingers
+            // or briefly re-establishes.
+            flip_intake_paused_human.store(true, std::sync::atomic::Ordering::Relaxed);
+            command_queue_human.clear();
+            // Close the COFL websocket so no further flip recommendations are
+            // received (this is also why Discord flip notifications go quiet).
+            {
+                let ws = ws_client_human.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = ws.close().await {
+                        warn!("[Humanization] Failed to close COFL websocket: {}", e);
+                    }
+                });
+            }
+
             // Trigger a proper TCP-level disconnect via Azalea's disconnect mechanism.
             // This avoids trying to send a "/quit" chat command that Hypixel does not
             // recognise, ensuring the bot actually disconnects from the server.
+            // The disconnect handler also disables Azalea's auto-reconnect so the bot
+            // stays offline for the whole break instead of rejoining ~5s later.
             bot_client_human.request_disconnect();
             // Give Azalea time to process the disconnect before sleeping.
             sleep(Duration::from_secs(3)).await;
