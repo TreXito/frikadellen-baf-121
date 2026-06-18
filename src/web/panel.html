@@ -201,10 +201,9 @@ a{color:var(--accent2);text-decoration:none}
 </head>
 <body>
 
-<!-- Login overlay (shown when auth required) -->
-<div class="login-overlay hidden" id="login-overlay">
-
-<!-- List-item modal (opened when user clicks an inventory slot) -->
+<!-- List-item modal (opened when user clicks an inventory slot).
+     MUST be a top-level element — not inside #login-overlay — otherwise it
+     inherits the overlay's display:none while logged in and never appears. -->
 <div class="modal-overlay hidden" id="list-item-modal" onclick="closeListItemModal(event)">
     <div class="modal-box" onclick="event.stopPropagation()">
         <h3>📦 List Item on Auction House</h3>
@@ -226,6 +225,9 @@ a{color:var(--accent2);text-decoration:none}
         </div>
     </div>
 </div>
+
+<!-- Login overlay (shown when auth required) -->
+<div class="login-overlay hidden" id="login-overlay">
     <div class="login-container">
         <div class="login-box">
             <h2>🔒 Authentication Required</h2>
@@ -1614,9 +1616,14 @@ function buildTomlFromGUI(originalToml) {
         if (def.type === 'bool') {
             parsed[key] = el.checked;
         } else if (def.type === 'int') {
-            parsed[key] = parseInt(el.value, 10) || def.default;
+            // NB: use an explicit NaN check, not `|| def.default`, so a legitimate
+            // 0 (e.g. auto_cookie = 0, multi_switch_time = 0) is preserved instead
+            // of silently reverting to the default.
+            const n = parseInt(el.value, 10);
+            parsed[key] = Number.isNaN(n) ? def.default : n;
         } else if (def.type === 'float') {
-            parsed[key] = parseFloat(el.value) || def.default;
+            const f = parseFloat(el.value);
+            parsed[key] = Number.isNaN(f) ? def.default : f;
         } else {
             parsed[key] = el.value;
         }
