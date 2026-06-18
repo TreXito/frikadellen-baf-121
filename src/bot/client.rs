@@ -2188,6 +2188,16 @@ async fn event_handler(
         });
     }
 
+    // While an intentional disconnect (humanization rest break) is in effect,
+    // stay offline: re-disable auto-reconnect and drop the connection on every
+    // event — including the Login fired by any reconnect attempt — so the bot
+    // cannot silently rejoin and resume flipping mid-break. Reset by the
+    // post-break process restart.
+    if state.disconnect_requested.load(Ordering::Acquire) {
+        enforce_offline(&bot);
+        return Ok(());
+    }
+
     match event {
         Event::Login => {
             info!("Bot logged in successfully");
@@ -3169,25 +3179,36 @@ async fn event_handler(
 
 /// If `disconnect_requested` is set, clears it, calls `bot.disconnect()`, and returns `true`.
 /// The caller should return immediately when this returns `true`.
+/// Force the client offline and keep it offline.
+///
+/// Azalea's AutoReconnectPlugin rejoins the server ~5s after ANY disconnect, so
+/// a single `bot.disconnect()` is silently undone mid-break. This:
+/// 1. Sets `AutoReconnectDelay` to `Duration::MAX` (treated as "disabled") so no
+///    rejoin is scheduled for this disconnect, and
+/// 2. Issues the disconnect.
+///
+/// It is idempotent and cheap, so `event_handler` calls it on *every* event
+/// while `disconnect_requested` is set — that way if a reconnect slips through,
+/// the `Login` event it produces immediately drops the connection again. The
+/// post-break process restart spawns a fresh ECS with auto-reconnect re-enabled.
+fn enforce_offline(bot: &Client) {
+    {
+        let mut ecs = bot.ecs.lock();
+        if let Some(mut delay) = ecs.get_resource_mut::<AutoReconnectDelay>() {
+            delay.delay = std::time::Duration::MAX;
+        }
+    }
+    bot.disconnect();
+}
+
 fn handle_disconnect_if_requested(bot: &Client, state: &BotClientState) -> bool {
     if state.disconnect_requested.load(Ordering::Acquire) {
-        info!("[CommandProcessor] Disconnect requested — disabling auto-reconnect and calling bot.disconnect()");
-        state.disconnect_requested.store(false, Ordering::Release);
-        // Azalea's AutoReconnectPlugin rejoins the server ~5s after ANY
-        // disconnect. For an *intentional* disconnect (e.g. a humanization rest
-        // break) that silently brings the bot back online mid-break — which is
-        // exactly the "break doesn't disconnect / macro keeps going" bug. Set
-        // the reconnect delay to Duration::MAX (treated as "disabled") BEFORE
-        // issuing the disconnect so the DisconnectEvent handler schedules no
-        // rejoin. The rest-break flow restarts the whole process afterwards,
-        // which spawns a fresh ECS with auto-reconnect re-enabled.
-        {
-            let mut ecs = bot.ecs.lock();
-            if let Some(mut delay) = ecs.get_resource_mut::<AutoReconnectDelay>() {
-                delay.delay = std::time::Duration::MAX;
-            }
-        }
-        bot.disconnect();
+        info!("[CommandProcessor] Disconnect requested — going offline (auto-reconnect disabled)");
+        // NOTE: deliberately do NOT clear `disconnect_requested`. event_handler
+        // keeps enforcing offline on every event so any auto-reconnect is
+        // immediately dropped again. The flag is reset only by the post-break
+        // process restart.
+        enforce_offline(bot);
         true
     } else {
         false

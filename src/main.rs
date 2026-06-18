@@ -3635,6 +3635,11 @@ async fn main() -> Result<()> {
             // bot doesn't keep flipping during the break if the connection lingers
             // or briefly re-establishes.
             flip_intake_paused_human.store(true, std::sync::atomic::Ordering::Relaxed);
+            // Pause the macro outright: the command-queue processor skips ALL work
+            // while macro_paused is set, so even if the Minecraft connection briefly
+            // re-establishes during the break, no flip/sell command is dispatched.
+            // (Reset by the post-break process restart.)
+            macro_paused_human.store(true, std::sync::atomic::Ordering::Relaxed);
             command_queue_human.clear();
             // Close the COFL websocket so no further flip recommendations are
             // received (this is also why Discord flip notifications go quiet).
