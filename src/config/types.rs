@@ -101,13 +101,16 @@ pub struct Config {
     pub auction_listing_delay_ms: u64,
     
     /// **Deprecated**: COFL now handles flip type selection automatically.
-    /// This field is kept for backward compatibility but is always treated as true.
-    #[serde(default = "default_true", skip_serializing)]
+    /// Master switch for bazaar flipping. Defaults to true. Persisted so the web
+    /// panel's Bazaar-flips toggle survives restarts (it was previously
+    /// `skip_serializing`, which silently reset it to true on every load/save —
+    /// the "config keeps going back to default" bug).
+    #[serde(default = "default_true")]
     pub enable_bazaar_flips: bool,
-    
-    /// **Deprecated**: COFL now handles flip type selection automatically.
-    /// This field is kept for backward compatibility but is always treated as true.
-    #[serde(default = "default_true", skip_serializing)]
+
+    /// Master switch for auction-house flipping. Defaults to true. Persisted for
+    /// the same reason as `enable_bazaar_flips` above.
+    #[serde(default = "default_true")]
     pub enable_ah_flips: bool,
 
     /// Enable fast-buy skip-click on predicted Confirm Purchase window.
