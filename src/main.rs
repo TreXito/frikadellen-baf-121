@@ -1337,6 +1337,8 @@ async fn main() -> Result<()> {
                                     "data": inv_json
                                 }).to_string();
                                 let _ = ws_si.send_message(&upload_msg).await;
+                                // Let COFL ingest the uploaded inventory before selling.
+                                tokio::time::sleep(tokio::time::Duration::from_millis(600)).await;
                             }
                             let msg = serde_json::json!({
                                 "type": "sellinventory",
@@ -2274,6 +2276,13 @@ async fn main() -> Result<()> {
                                         }).to_string();
                                         if let Err(e) = ws.send_message(&upload_msg).await {
                                             error!("[Inventory] sellinventory: failed to pre-upload inventory: {}", e);
+                                        } else {
+                                            // Give COFL a moment to ingest the uploaded inventory
+                                            // before it processes the sellinventory request.
+                                            // Without this the sell command frequently arrives
+                                            // before the new inventory is stored, so COFL sells
+                                            // against stale/empty data and "does nothing".
+                                            sleep(Duration::from_millis(600)).await;
                                         }
                                     } else {
                                         warn!("[Inventory] sellinventory: no cached inventory to upload");
@@ -2758,6 +2767,8 @@ async fn main() -> Result<()> {
                                         "data": inv_json
                                     }).to_string();
                                     let _ = ws.send_message(&upload_msg).await;
+                                    // Let COFL ingest the uploaded inventory before selling.
+                                    tokio::time::sleep(tokio::time::Duration::from_millis(600)).await;
                                 }
                                 let msg = serde_json::json!({
                                     "type": "sellinventory",
@@ -3310,6 +3321,8 @@ async fn main() -> Result<()> {
                             "data": inv_json
                         }).to_string();
                         let _ = ws.send_message(&upload_msg).await;
+                        // Let COFL ingest the uploaded inventory before selling.
+                        tokio::time::sleep(tokio::time::Duration::from_millis(600)).await;
                     }
                     let msg = serde_json::json!({
                         "type": "sellinventory",
