@@ -10,6 +10,11 @@ use tracing::{debug, error, info, warn};
 pub enum CoflEvent {
     AuctionFlip(Flip),
     BazaarFlip(BazaarFlipRecommendation),
+    /// COFL confirmed the mod session is authenticated (`loggedIn` with
+    /// `verified: true`). Used as a reliable signal to enable flip/order buying,
+    /// independent of the textual "Hello <ign> (<email>)" chat greeting (which
+    /// COFL does not always send).
+    Authenticated,
     ChatMessage(String),
     Command(String),
     GetInventory,
@@ -148,6 +153,22 @@ impl CoflWebSocket {
         info!("[COFL <-] type={} data={}", msg.msg_type, msg.data);
 
         match msg.msg_type.as_str() {
+            "loggedIn" => {
+                // COFL confirms the mod session is authenticated. Treat this as
+                // the auth signal that enables flip/order buying — the previous
+                // logic relied solely on a "Hello <ign> (<email>)" chat greeting
+                // which COFL does not reliably send, leaving the bot unable to
+                // ever buy flips or place orders.
+                let verified = parse_message_data::<serde_json::Value>(&msg.data)
+                    .ok()
+                    .and_then(|v| v.get("verified").and_then(|b| b.as_bool()))
+                    // If the field is missing, receiving `loggedIn` at all still
+                    // means the session is established, so default to true.
+                    .unwrap_or(true);
+                if verified {
+                    let _ = tx.send(CoflEvent::Authenticated);
+                }
+            }
             "flip" => {
                 if let Ok(value) = parse_message_data::<serde_json::Value>(&msg.data) {
                     // Normalize: COFL sends itemName/startingBid nested inside "auction"
