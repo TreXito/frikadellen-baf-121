@@ -1745,6 +1745,16 @@ async fn main() -> Result<()> {
 
         while let Some(event) = ws_rx.recv().await {
             match event {
+                CoflEvent::Authenticated => {
+                    // COFL confirmed the session is authenticated (loggedIn).
+                    // This is the reliable signal that enables flip/order buying.
+                    if !cofl_authenticated_ws.swap(true, Ordering::Relaxed) {
+                        info!("[Coflnet] Authentication confirmed (loggedIn) — flips enabled");
+                        let baf_msg = "§f[§4BAF§f]: §aCoflnet authenticated — flip buying enabled".to_string();
+                        print_mc_chat(&baf_msg);
+                        let _ = chat_tx_ws.send(baf_msg);
+                    }
+                }
                 CoflEvent::AuctionFlip(flip) => {
                     // Skip if AH flips are disabled
                     if !enable_ah_flips_ws.load(Ordering::Relaxed) {
