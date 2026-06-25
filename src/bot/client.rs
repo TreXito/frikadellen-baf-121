@@ -15,7 +15,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use azalea_inventory::operations::ClickType;
 use azalea_client::chat::ChatPacket;
 use azalea_client::inventory::{MenuOpenedEvent, SetContainerContentEvent};
-use azalea_client::auto_reconnect::AutoReconnectDelay;
 use bevy_app::AppExit;
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
@@ -626,34 +625,53 @@ impl BotClient {
             disconnect_requested: self.disconnect_requested.clone(),
         };
         
-        // Build and start the client (this blocks until disconnection)
+        // Build and start the client (this blocks until disconnection).
+        // The PacketAcceleratorPlugin (ECS-level observers that fire during the
+        // frame, bypassing the Event::Packet pipeline) is rebuilt per connection
+        // attempt inside the loop below from the shared Notify/info Arcs.
         let handler_state_clone = handler_state.clone();
-        // Create the PacketAcceleratorPlugin sharing the same Notify/info as BotClientState.
-        // The plugin registers ECS-level observers that fire DURING the frame
-        // (in apply_deferred), bypassing the multi-hop Event::Packet channel pipeline.
-        let accelerator_plugin = PacketAcceleratorPlugin::new(
-            handler_state.window_open_notify.clone(),
-            handler_state.window_open_info.clone(),
-            handler_state.slot_data_notify.clone(),
-        );
+        // azalea 0.16 removed the built-in auto-reconnect plugin, so we drive
+        // reconnection ourselves here. `ClientBuilder::start()` returns when the
+        // client disconnects; we then reconnect after a short delay UNLESS the
+        // disconnect was intentional (a humanization rest break, signalled by
+        // `disconnect_requested`). Bans are handled elsewhere: the
+        // `BotEvent::Disconnected` handler in main.rs detects them and calls
+        // `process::exit`, which tears down this loop before it can rejoin.
         std::thread::spawn(move || {
             let rt = tokio::runtime::Runtime::new()
                 .expect("Failed to create tokio runtime for bot - this should never happen unless system resources are exhausted");
             rt.block_on(async move {
-                let exit_result = ClientBuilder::new()
-                    .add_plugins(accelerator_plugin)
-                    .set_handler(event_handler)
-                    .set_state(handler_state_clone)
-                    .start(account, "mc.hypixel.net")
-                    .await;
-                    
-                match exit_result {
-                    AppExit::Success => {
-                        info!("Bot disconnected successfully");
+                const RECONNECT_DELAY_SECS: u64 = 5;
+                loop {
+                    // Rebuild the accelerator plugin each attempt — it only wraps
+                    // the shared Notify/info Arcs held by BotClientState.
+                    let plugin = PacketAcceleratorPlugin::new(
+                        handler_state_clone.window_open_notify.clone(),
+                        handler_state_clone.window_open_info.clone(),
+                        handler_state_clone.slot_data_notify.clone(),
+                    );
+                    let exit_result = ClientBuilder::new()
+                        .add_plugins(plugin)
+                        .set_handler(event_handler)
+                        .set_state(handler_state_clone.clone())
+                        .start(account.clone(), "mc.hypixel.net")
+                        .await;
+
+                    match exit_result {
+                        AppExit::Success => info!("Bot client exited (disconnected)"),
+                        AppExit::Error(code) => error!("Bot client exited with error code: {:?}", code),
                     }
-                    AppExit::Error(code) => {
-                        error!("Bot exited with error code: {:?}", code);
+
+                    // Intentional disconnect (rest break): do not reconnect — the
+                    // humanization flow restarts the whole process afterwards.
+                    if handler_state_clone.disconnect_requested.load(Ordering::Acquire) {
+                        info!("[Reconnect] Intentional disconnect — staying offline");
+                        break;
                     }
+
+                    // Bad disconnect (timeout/kick/network): reconnect after a delay.
+                    warn!("[Reconnect] Bot disconnected unexpectedly — reconnecting in {}s", RECONNECT_DELAY_SECS);
+                    tokio::time::sleep(tokio::time::Duration::from_secs(RECONNECT_DELAY_SECS)).await;
                 }
             });
         });
@@ -3227,23 +3245,13 @@ async fn event_handler(
 /// The caller should return immediately when this returns `true`.
 /// Force the client offline and keep it offline.
 ///
-/// Azalea's AutoReconnectPlugin rejoins the server ~5s after ANY disconnect, so
-/// a single `bot.disconnect()` is silently undone mid-break. This:
-/// 1. Sets `AutoReconnectDelay` to `Duration::MAX` (treated as "disabled") so no
-///    rejoin is scheduled for this disconnect, and
-/// 2. Issues the disconnect.
-///
-/// It is idempotent and cheap, so `event_handler` calls it on *every* event
-/// while `disconnect_requested` is set — that way if a reconnect slips through,
-/// the `Login` event it produces immediately drops the connection again. The
-/// post-break process restart spawns a fresh ECS with auto-reconnect re-enabled.
+/// azalea 0.16 removed the built-in auto-reconnect plugin — a single client no
+/// longer rejoins on its own — so `bot.disconnect()` is sufficient to stay
+/// offline. We still call this from `event_handler` on every event while
+/// `disconnect_requested` is set, so that if anything (e.g. a swarm-level
+/// reconnect) re-establishes the connection during a break, the resulting
+/// `Login` event drops it again. The post-break process restart clears the flag.
 fn enforce_offline(bot: &Client) {
-    {
-        let mut ecs = bot.ecs.lock();
-        if let Some(mut delay) = ecs.get_resource_mut::<AutoReconnectDelay>() {
-            delay.delay = std::time::Duration::MAX;
-        }
-    }
     bot.disconnect();
 }
 
