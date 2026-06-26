@@ -268,13 +268,21 @@ fn should_enqueue_periodic_auction_claim(
 fn should_drop_bazaar_command_during_ah_pause(
     command_type: &frikadellen_baf::types::CommandType,
     bazaar_flips_paused: bool,
+    inventory_full: bool,
 ) -> bool {
-    bazaar_flips_paused
-        && matches!(
-            command_type,
-            frikadellen_baf::types::CommandType::BazaarBuyOrder { .. }
-            | frikadellen_baf::types::CommandType::ManageOrders { .. }
-        )
+    if !bazaar_flips_paused {
+        return false;
+    }
+    match command_type {
+        // Never place new bazaar BUY orders while AH flips are incoming.
+        frikadellen_baf::types::CommandType::BazaarBuyOrder { .. } => true,
+        // Normally defer ManageOrders during the AH flip window. BUT when the
+        // inventory is full the bot won't buy AH flips anyway, and it MUST keep
+        // managing orders (collecting fills, freeing order/inventory space) to
+        // escape the full-inventory deadlock — so don't defer it then.
+        frikadellen_baf::types::CommandType::ManageOrders { .. } => !inventory_full,
+        _ => false,
+    }
 }
 
 /// Flip tracker entry: (flip, actual_buy_price, purchase_instant, flip_receive_instant)
@@ -1901,8 +1909,13 @@ async fn main() -> Result<()> {
                     // collected from the bazaar without free inventory space.
                     // SELL orders are still accepted because they remove items
                     // from inventory, freeing space.
-                    if effective_is_buy && bot_client_for_ws.is_inventory_full() {
-                        debug!("Skipping BUY bazaar flip — inventory full: {}", bazaar_flip.item_name);
+                    //
+                    // Prevention: stop placing new BUY orders once the inventory is
+                    // NEAR full (not just at 0), so the bot keeps headroom to claim
+                    // already-filled buy orders and place sell orders instead of
+                    // filling completely and deadlocking. SELL orders still flow.
+                    if effective_is_buy && bot_client_for_ws.is_inventory_near_full() {
+                        debug!("Skipping BUY bazaar flip — inventory near full: {}", bazaar_flip.item_name);
                         continue;
                     }
 
@@ -2165,8 +2178,8 @@ async fn main() -> Result<()> {
                                     debug!("Skipping BUY bazaar flip from chat — at order limit: {}", rec.item_name);
                                 } else if bot_client_for_ws.is_bazaar_daily_limit() {
                                     debug!("Skipping bazaar flip from chat — daily sell value limit reached: {}", rec.item_name);
-                                } else if effective_is_buy && bot_client_for_ws.is_inventory_full() {
-                                    debug!("Skipping BUY bazaar flip from chat — inventory full: {}", rec.item_name);
+                                } else if effective_is_buy && bot_client_for_ws.is_inventory_near_full() {
+                                    debug!("Skipping BUY bazaar flip from chat — inventory near full: {}", rec.item_name);
                                 } else if effective_is_buy && bazaar_tracker_ws.has_filled_orders() {
                                     debug!("Skipping BUY bazaar flip from chat — filled orders pending: {}", rec.item_name);
                                 } else {
@@ -2649,6 +2662,12 @@ async fn main() -> Result<()> {
         use frikadellen_baf::types::BotState;
         // Debounce: avoid requesting sellinventory too frequently when inventory is full
         let mut last_sellinventory_request = Instant::now() - Duration::from_secs(300);
+        // Debounce: as a last resort when the inventory stays full (typically with
+        // bazaar-bought items the bot can't re-list), force a bazaar
+        // "Sell Inventory Now" to instantly sell everything sellable and free
+        // space, breaking the full-inventory deadlock.
+        let mut last_instasell_clear = Instant::now() - Duration::from_secs(300);
+        const FORCE_INSTASELL_SECS: u64 = 90;
         // Track how long the bot has been continuously in selling mode so we can
         // periodically force-clear the inventory_full flag (it may be stale if no
         // ContainerSetContent packets arrive while the bot is idle).
@@ -2697,6 +2716,7 @@ async fn main() -> Result<()> {
                 if should_drop_bazaar_command_during_ah_pause(
                     &cmd.command_type,
                     bazaar_flips_paused_proc.load(Ordering::Relaxed),
+                    bot_client_clone.is_inventory_full(),
                 ) {
                     if matches!(cmd.command_type, frikadellen_baf::types::CommandType::ManageOrders { .. }) {
                         info!("[Queue] Deferring ManageOrders — AH flip window active, will re-queue on resume");
@@ -2798,6 +2818,23 @@ async fn main() -> Result<()> {
                         if !command_queue_processor.has_manage_orders() {
                             command_queue_processor.enqueue(
                                 frikadellen_baf::types::CommandType::ManageOrders { cancel_open: false, target_item: None },
+                                frikadellen_baf::types::CommandPriority::High,
+                                false,
+                            );
+                        }
+                        // Last-resort space recovery: if the inventory has stayed
+                        // full (the COFL sellinventory / sell-order route isn't
+                        // clearing it — common with bazaar-bought items the bot
+                        // can't re-list), force a bazaar "Sell Inventory Now" to
+                        // instantly sell everything sellable and free space.
+                        if last_instasell_clear.elapsed() > Duration::from_secs(FORCE_INSTASELL_SECS) {
+                            last_instasell_clear = Instant::now();
+                            warn!("[SellingMode] Inventory still full — forcing bazaar Sell-Inventory-Now to free space");
+                            let baf_msg = "§f[§4BAF§f]: §e📦 Inventory full — instantly selling inventory on bazaar to free space".to_string();
+                            print_mc_chat(&baf_msg);
+                            let _ = chat_tx_proc.send(baf_msg);
+                            command_queue_processor.enqueue(
+                                frikadellen_baf::types::CommandType::SellInventoryBz,
                                 frikadellen_baf::types::CommandPriority::High,
                                 false,
                             );
@@ -3768,15 +3805,15 @@ mod tests {
     #[test]
     fn ah_pause_drops_bazaar_and_manage_orders_commands() {
         let paused = true;
-        assert!(should_drop_bazaar_command_during_ah_pause(
-            &CommandType::BazaarBuyOrder {
-                item_name: "Booster Cookie".into(),
-                item_tag: None,
-                amount: 1,
-                price_per_unit: 1.0,
-            },
-            paused,
-        ));
+        let buy = CommandType::BazaarBuyOrder {
+            item_name: "Booster Cookie".into(),
+            item_tag: None,
+            amount: 1,
+            price_per_unit: 1.0,
+        };
+        // BUY orders are always dropped during the AH pause, full or not.
+        assert!(should_drop_bazaar_command_during_ah_pause(&buy, paused, false));
+        assert!(should_drop_bazaar_command_during_ah_pause(&buy, paused, true));
         // BazaarSellOrder should NOT be dropped during AH pause (only buy orders are dropped)
         assert!(!should_drop_bazaar_command_during_ah_pause(
             &CommandType::BazaarSellOrder {
@@ -3786,21 +3823,22 @@ mod tests {
                 price_per_unit: 1.0,
             },
             paused,
+            false,
         ));
         assert!(!should_drop_bazaar_command_during_ah_pause(
             &CommandType::ClaimSoldItem,
             paused,
+            false,
         ));
-        // ManageOrders IS deferred during AH pause — it would block the AH
-        // flip purchase.  A new ManageOrders is re-queued when flips resume.
-        assert!(should_drop_bazaar_command_during_ah_pause(
-            &CommandType::ManageOrders { cancel_open: false, target_item: None },
-            paused,
-        ));
-        assert!(should_drop_bazaar_command_during_ah_pause(
-            &CommandType::ManageOrders { cancel_open: true, target_item: None },
-            paused,
-        ));
+        // ManageOrders IS deferred during AH pause when inventory is NOT full —
+        // it would block the AH flip purchase.
+        let manage = CommandType::ManageOrders { cancel_open: false, target_item: None };
+        assert!(should_drop_bazaar_command_during_ah_pause(&manage, paused, false));
+        // ...but when the inventory IS full it must NOT be deferred, so the bot
+        // can keep managing orders to free space and escape the deadlock.
+        assert!(!should_drop_bazaar_command_during_ah_pause(&manage, paused, true));
+        // Nothing is dropped when not paused.
+        assert!(!should_drop_bazaar_command_during_ah_pause(&manage, false, true));
     }
 
     #[test]
