@@ -3063,6 +3063,14 @@ async fn main() -> Result<()> {
                             info!("Command queue cleared");
                             continue;
                         }
+                        "ping" => {
+                            // Measure round-trip latency to Coflnet via a WebSocket ping.
+                            // The RTT is printed to chat when the pong arrives.
+                            if let Err(e) = ws_client_for_console.send_ping().await {
+                                error!("Failed to send ping to websocket: {}", e);
+                            }
+                            continue;
+                        }
                         // TODO: Add other local commands like forceClaim, connect, sellbz when implemented
                         _ => {
                             // Fall through to send to websocket

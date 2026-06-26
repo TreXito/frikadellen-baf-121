@@ -88,6 +88,24 @@ impl CoflWebSocket {
                             debug!("Received ping, sending pong");
                             // Pong is handled automatically by tungstenite
                         }
+                        Some(Ok(Message::Pong(data))) => {
+                            // Reply to our `/cofl ping` ping: the 8-byte payload is the
+                            // unix-millis send time we embedded; compute and display RTT.
+                            if data.len() == 8 {
+                                let sent_ms = u64::from_be_bytes(
+                                    data[..8].try_into().expect("checked len == 8"),
+                                );
+                                let now_ms = std::time::SystemTime::now()
+                                    .duration_since(std::time::UNIX_EPOCH)
+                                    .map(|d| d.as_millis() as u64)
+                                    .unwrap_or(sent_ms);
+                                let rtt = now_ms.saturating_sub(sent_ms);
+                                let _ = tx_clone.send(CoflEvent::ChatMessage(format!(
+                                    "§f[§4BAF§f]: §aCoflnet ping: §e{}ms",
+                                    rtt
+                                )));
+                            }
+                        }
                         Some(Err(e)) => {
                             error!("WebSocket error: {}", e);
                             break;
@@ -301,6 +319,26 @@ impl CoflWebSocket {
             }
         }
 
+        Ok(())
+    }
+
+    /// Send a WebSocket ping to measure round-trip latency to Coflnet
+    /// (the `/cofl ping` command). The current unix-millis timestamp is embedded
+    /// in the ping payload; the server echoes it back in the matching pong, where
+    /// the read loop computes the RTT and prints it to chat. Stateless: no shared
+    /// send-time is needed, and unsolicited keepalive pongs (no 8-byte payload)
+    /// are ignored.
+    pub async fn send_ping(&self) -> Result<()> {
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        let mut write = self.write.lock().await;
+        write
+            .send(Message::Ping(now_ms.to_be_bytes().to_vec().into()))
+            .await
+            .context("Failed to send ping to WebSocket")?;
+        debug!("[COFL ->] ping ({}ms ts)", now_ms);
         Ok(())
     }
 

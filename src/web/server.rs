@@ -601,6 +601,17 @@ async fn process_chat_input(input: &str, state: &WebSharedState) {
         if parts.len() > 1 {
             let command = parts[1];
             let args = parts[2..].join(" ");
+            if command.eq_ignore_ascii_case("ping") {
+                // Measure round-trip latency to Coflnet via a WebSocket ping.
+                // The RTT is printed to chat when the pong arrives.
+                if let Err(e) = state.ws_client.send_ping().await {
+                    error!("[WebGUI] Failed to send ping to websocket: {}", e);
+                }
+                let echo = format!("> {}", input);
+                print_mc_chat(&echo);
+                let _ = state.chat_tx.send(echo);
+                return;
+            }
             let data_json = serde_json::to_string(&args).unwrap_or_else(|_| "\"\"".to_string());
             let message = serde_json::json!({
                 "type": command,
