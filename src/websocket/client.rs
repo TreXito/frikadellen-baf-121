@@ -13,8 +13,9 @@ pub enum CoflEvent {
     /// COFL confirmed the mod session is authenticated (`loggedIn` with
     /// `verified: true`). Used as a reliable signal to enable flip/order buying,
     /// independent of the textual "Hello <ign> (<email>)" chat greeting (which
-    /// COFL does not always send).
-    Authenticated,
+    /// COFL does not always send). Carries our own account UUID (as COFL reports
+    /// it) so the flip handler can avoid sniping our own listings.
+    Authenticated { uuid: Option<String> },
     ChatMessage(String),
     Command(String),
     GetInventory,
@@ -159,14 +160,19 @@ impl CoflWebSocket {
                 // logic relied solely on a "Hello <ign> (<email>)" chat greeting
                 // which COFL does not reliably send, leaving the bot unable to
                 // ever buy flips or place orders.
-                let verified = parse_message_data::<serde_json::Value>(&msg.data)
-                    .ok()
+                let value = parse_message_data::<serde_json::Value>(&msg.data).ok();
+                let verified = value
+                    .as_ref()
                     .and_then(|v| v.get("verified").and_then(|b| b.as_bool()))
                     // If the field is missing, receiving `loggedIn` at all still
                     // means the session is established, so default to true.
                     .unwrap_or(true);
                 if verified {
-                    let _ = tx.send(CoflEvent::Authenticated);
+                    let uuid = value
+                        .as_ref()
+                        .and_then(|v| v.get("uuid").and_then(|u| u.as_str()))
+                        .map(|s| s.to_string());
+                    let _ = tx.send(CoflEvent::Authenticated { uuid });
                 }
             }
             "flip" => {
@@ -516,6 +522,13 @@ pub fn normalize_flip_value(mut value: serde_json::Value) -> serde_json::Value {
             if obj.get("startingBid").map(|v| v.is_null()).unwrap_or(true) {
                 if let Some(bid) = auction.get("startingBid") {
                     obj.insert("startingBid".to_string(), bid.clone());
+                }
+            }
+            // Promote the seller UUID so the self-buy guard works regardless of
+            // whether COFL puts it at the top level or nested in `auction`.
+            if obj.get("seller").map(|v| v.is_null()).unwrap_or(true) {
+                if let Some(seller) = auction.get("seller").or_else(|| auction.get("auctioneerId")) {
+                    obj.insert("seller".to_string(), seller.clone());
                 }
             }
         }

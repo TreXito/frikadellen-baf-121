@@ -29,6 +29,13 @@ pub struct Flip {
     
     #[serde(default, alias = "auctionUuid", alias = "auction_uuid", alias = "auctionId", alias = "id")]
     pub uuid: Option<String>,
+
+    /// UUID of the auction's seller (COFL `seller`, usually 32 hex chars without
+    /// dashes). Used to avoid sniping our OWN listing: buying + collecting an
+    /// auction we created ourselves is an impossible action that can get the
+    /// account banned, so such flips are skipped.
+    #[serde(default)]
+    pub seller: Option<String>,
 }
 
 fn deserialize_optional_timestamp_millis<'de, D>(

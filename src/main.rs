@@ -111,6 +111,12 @@ fn format_coins_f64(amount: f64) -> String {
     }
 }
 
+/// Normalize a Minecraft UUID for comparison: lowercase, dashes removed.
+/// COFL reports UUIDs without dashes; Mojang/other sources include them.
+fn normalize_uuid(s: &str) -> String {
+    s.trim().to_lowercase().replace('-', "")
+}
+
 fn is_ban_disconnect(reason: &str) -> bool {
     let lower = reason.to_ascii_lowercase();
     lower.contains("temporarily banned")
@@ -1743,11 +1749,17 @@ async fn main() -> Result<()> {
         use frikadellen_baf::websocket::CoflEvent;
         use frikadellen_baf::types::{CommandType, CommandPriority};
 
+        // Our own account UUID (normalized: lowercase, no dashes), learned from
+        // COFL's `loggedIn` message. Used to avoid sniping our own listings.
+        let mut own_uuid_normalized: Option<String> = None;
         while let Some(event) = ws_rx.recv().await {
             match event {
-                CoflEvent::Authenticated => {
+                CoflEvent::Authenticated { uuid } => {
                     // COFL confirmed the session is authenticated (loggedIn).
                     // This is the reliable signal that enables flip/order buying.
+                    if let Some(u) = uuid {
+                        own_uuid_normalized = Some(normalize_uuid(&u));
+                    }
                     if !cofl_authenticated_ws.swap(true, Ordering::Relaxed) {
                         info!("[Coflnet] Authentication confirmed (loggedIn) — flips enabled");
                         let baf_msg = "§f[§4BAF§f]: §aCoflnet authenticated — flip buying enabled".to_string();
@@ -1759,6 +1771,23 @@ async fn main() -> Result<()> {
                     // Skip if AH flips are disabled
                     if !enable_ah_flips_ws.load(Ordering::Relaxed) {
                         continue;
+                    }
+
+                    // NEVER snipe our own listing. If COFL recommends a flip whose
+                    // seller is this account, buying it would mean purchasing AND
+                    // collecting an auction we created ourselves — an impossible
+                    // action Hypixel Watchdog bans for. Drop it.
+                    if let (Some(seller), Some(own)) = (flip.seller.as_deref(), own_uuid_normalized.as_deref()) {
+                        if normalize_uuid(seller) == own {
+                            warn!("[AntiSelfBuy] Skipping flip for our own listing: {} (seller={})", flip.item_name, seller);
+                            let baf_msg = format!(
+                                "§f[§4BAF§f]: §eSkipped flip — it's our own listing: §r{}",
+                                flip.item_name
+                            );
+                            print_mc_chat(&baf_msg);
+                            let _ = chat_tx_ws.send(baf_msg);
+                            continue;
+                        }
                     }
 
                     // Skip if the web panel's Disconnect button paused intake.
