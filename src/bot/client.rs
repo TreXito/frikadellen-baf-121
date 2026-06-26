@@ -337,10 +337,14 @@ pub struct BotClient {
     pub bazaar_order_cancel_minutes_per_million: u64,
     /// Updated whenever the bot opens the Manage/My Auctions GUI.
     cached_my_auctions_json: Arc<RwLock<Option<String>>>,
-    /// Time when /viewauction was sent — start of buy-speed measurement.
+    /// Time when /viewauction was sent. Used for internal timing diagnostics.
     /// Shared with `BotClientState` so the event handler can compute elapsed time
     /// when "Putting coins in escrow" arrives.
     purchase_start_time: Arc<RwLock<Option<std::time::Instant>>>,
+    /// Time when the BIN Auction View window opened for the current purchase.
+    /// Buy speed is measured from here (view-open → coins-in-escrow) so it
+    /// reflects the bot's act-on-open speed rather than the /viewauction RTT.
+    bin_view_open_time: Arc<RwLock<Option<std::time::Instant>>>,
     /// Shared AH-pause flag so ManageOrders can self-abort when AH flips are incoming.
     pub bazaar_flips_paused: Arc<AtomicBool>,
     /// Buffer of Hypixel chat messages to send as a chatBatch to Coflnet WebSocket.
@@ -491,6 +495,7 @@ impl BotClient {
             bazaar_order_cancel_minutes_per_million: 5,
             cached_my_auctions_json: Arc::new(RwLock::new(None)),
             purchase_start_time: Arc::new(RwLock::new(None)),
+            bin_view_open_time: Arc::new(RwLock::new(None)),
             bazaar_flips_paused: Arc::new(AtomicBool::new(false)),
             chat_batch_buffer: Arc::new(RwLock::new(Vec::new())),
             cached_window_json: Arc::new(RwLock::new(None)),
@@ -581,6 +586,7 @@ impl BotClient {
             auction_slot_blocked: self.auction_slot_blocked.clone(),
             bazaar_order_rejected: self.bazaar_order_rejected.clone(),
             purchase_start_time: self.purchase_start_time.clone(),
+            bin_view_open_time: self.bin_view_open_time.clone(),
             last_buy_speed_ms: Arc::new(RwLock::new(None)),
             grace_period_spam_active: Arc::new(AtomicBool::new(false)),
             pending_purchase_at_ms: Arc::new(RwLock::new(None)),
@@ -1180,9 +1186,12 @@ pub struct BotClientState {
     /// competitive enough").  Cleared before each confirm-click so only the
     /// response to the *current* placement attempt is captured.
     pub bazaar_order_rejected: Arc<AtomicBool>,
-    /// Time when /viewauction was sent — start of buy-speed measurement.
+    /// Time when /viewauction was sent. Used for internal timing diagnostics.
     /// Shared with `BotClient` so main.rs can set it when the flip arrives.
     pub purchase_start_time: Arc<RwLock<Option<std::time::Instant>>>,
+    /// Time when the BIN Auction View window opened for the current purchase —
+    /// the start of the (new) buy-speed measurement.
+    pub bin_view_open_time: Arc<RwLock<Option<std::time::Instant>>>,
     /// Buy speed in ms: from /viewauction sent to "Putting coins in escrow..."
     pub last_buy_speed_ms: Arc<RwLock<Option<u64>>>,
     /// Set to true while a grace-period spam-click loop is running so a second
@@ -1360,6 +1369,7 @@ impl Default for BotClientState {
             auction_slot_blocked: Arc::new(AtomicBool::new(false)),
             bazaar_order_rejected: Arc::new(AtomicBool::new(false)),
             purchase_start_time: Arc::new(RwLock::new(None)),
+            bin_view_open_time: Arc::new(RwLock::new(None)),
             last_buy_speed_ms: Arc::new(RwLock::new(None)),
             grace_period_spam_active: Arc::new(AtomicBool::new(false)),
             pending_purchase_at_ms: Arc::new(RwLock::new(None)),
@@ -2324,14 +2334,20 @@ async fn event_handler(
                 }
             } else if clean_message.contains("Putting coins in escrow") {
                 // "Putting coins in escrow..." — purchase accepted by server.
-                // Calculate buy speed from when /viewauction was sent.
-                if let Some(start) = state.purchase_start_time.write().take() {
+                // Buy speed is measured from when the BIN Auction View opened
+                // (act-on-open speed), falling back to the /viewauction send time
+                // if the view-open marker is somehow missing.
+                let start = state.bin_view_open_time.write().take()
+                    .or_else(|| *state.purchase_start_time.read());
+                // Always clear the /viewauction marker too so it doesn't leak.
+                *state.purchase_start_time.write() = None;
+                if let Some(start) = start {
                     let speed_ms = start.elapsed().as_millis() as u64;
                     *state.last_buy_speed_ms.write() = Some(speed_ms);
                     let _ = state.event_tx.send(BotEvent::ChatMessage(
                         format!("§f[§4BAF§f]: §aAuction bought in {}ms", speed_ms)
                     ));
-                    info!("[AH] Buy speed: {}ms", speed_ms);
+                    info!("[AH] Buy speed (view-open → escrow): {}ms", speed_ms);
                 }
             } else if *state.bot_state.read() == BotState::Purchasing
                 && is_terminal_purchase_failure_message(&clean_message)
@@ -3319,6 +3335,9 @@ async fn execute_command(
             // unrelated queue wait time.
             // Safe: commands execute sequentially from the queue processor.
             *state.purchase_start_time.write() = Some(std::time::Instant::now());
+            // Clear the BIN-view-open marker; it's set when the auction view
+            // actually opens, and buy speed is measured from there.
+            *state.bin_view_open_time.write() = None;
 
             send_raw_chat_command(bot, &chat_command);
 
@@ -3374,6 +3393,16 @@ async fn execute_command(
 
                     if !title.contains("BIN Auction View") && !title.contains("Auction View") {
                         return;
+                    }
+
+                    // Mark when the BIN Auction View opened — buy speed is measured
+                    // from here. Only set once per purchase (the fast path is the
+                    // earliest detector).
+                    {
+                        let mut w = fast_state.bin_view_open_time.write();
+                        if w.is_none() {
+                            *w = Some(std::time::Instant::now());
+                        }
                     }
 
                     if let Some(t0) = *fast_state.purchase_start_time.read() {
@@ -3691,9 +3720,14 @@ async fn handle_window_interaction(
     match bot_state {
         BotState::Purchasing => {
             if window_title.contains("BIN Auction View") || window_title.contains("Auction View") {
-                // purchase_start_time is set in execute_command when
-                // /viewauction is sent, so buy speed measures
-                // command-send → coins-in-escrow.
+                // Mark when the BIN Auction View opened (buy-speed start). Only
+                // set if the fast-path observer didn't already record it.
+                {
+                    let mut w = state.bin_view_open_time.write();
+                    if w.is_none() {
+                        *w = Some(std::time::Instant::now());
+                    }
+                }
 
                 // Log the time from /viewauction to the spawned task
                 // actually starting.  The delta between this and the
