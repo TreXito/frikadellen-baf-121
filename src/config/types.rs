@@ -216,6 +216,22 @@ pub struct Config {
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub sessions: HashMap<String, CoflSession>,
 
+    // ── Central backend (baf-backend) ───────────────────────────
+    /// Stable, per-installation identifier used by the central backend to
+    /// recognise this bot across reconnects. Auto-generated on first run and
+    /// persisted; do not change it or the backend will treat it as a new bot.
+    #[serde(default, with = "opt_string_as_empty")]
+    pub instance_id: Option<String>,
+
+    /// Connect to the central backend gateway for remote control + profit
+    /// tracking. Defaults to true so every client joins the central server.
+    #[serde(default = "default_true")]
+    pub backend_enabled: bool,
+
+    /// Central backend gateway WebSocket URL. Defaults to the shared server.
+    #[serde(default = "default_backend_url")]
+    pub backend_url: String,
+
     // ── Humanization / Rest Breaks ──────────────────────────────
     /// Enable periodic "human-like" rest breaks where the macro disconnects
     /// for a randomized period before reconnecting. Does NOT reset the
@@ -249,6 +265,10 @@ pub struct CoflSession {
 // Default values
 fn default_websocket_url() -> String {
     "wss://sky.coflnet.com/modsocket".to_string()
+}
+
+fn default_backend_url() -> String {
+    "wss://baf.trexito.com/ws".to_string()
 }
 
 fn default_web_gui_port() -> u16 {
@@ -347,6 +367,9 @@ impl Default for Config {
             hypixel_api_key: None,
             share_legendary_flips: true,
             sessions: HashMap::new(),
+            instance_id: None,
+            backend_enabled: true,
+            backend_url: default_backend_url(),
             humanization_enabled: false,
             humanization_min_interval_minutes: default_humanization_min_interval_minutes(),
             humanization_max_interval_minutes: default_humanization_max_interval_minutes(),

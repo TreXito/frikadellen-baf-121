@@ -465,6 +465,13 @@ async fn main() -> Result<()> {
         config_loader.save(&config)?;
     }
 
+    // Ensure a stable instance id so the central backend recognises this bot
+    // across reconnects.
+    if config.instance_id.is_none() {
+        config.instance_id = Some(uuid::Uuid::new_v4().to_string());
+        config_loader.save(&config)?;
+    }
+
     // AH/Bazaar flip enable/disable is now handled automatically by COFL
     // based on user settings — no need for local toggles or prompts.
     // We still accept the config values for backward compatibility, but they
@@ -756,6 +763,38 @@ async fn main() -> Result<()> {
     // Shared tracker for active bazaar orders (web panel + profit calculation).
     let bazaar_tracker = Arc::new(frikadellen_baf::bazaar_tracker::BazaarOrderTracker::new());
 
+    // ── Central backend (baf-backend) gateway ───────────────────────────────
+    // Dial out to the shared backend for remote control + profit tracking and
+    // show the one-time Discord link code. A no-op when disabled/unconfigured.
+    let backend_handle = if config.backend_enabled {
+        let link_code = {
+            let raw = uuid::Uuid::new_v4().simple().to_string();
+            raw[..6].to_uppercase()
+        };
+        let handle = frikadellen_baf::backend::spawn(frikadellen_baf::backend::BackendDeps {
+            url: config.backend_url.clone(),
+            instance_id: config.instance_id.clone().unwrap_or_default(),
+            cofl_owner_id: None,
+            ingame_names: ingame_names.clone(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            link_code: link_code.clone(),
+            macro_paused: macro_paused.clone(),
+            command_queue: command_queue.clone(),
+            bot_client: bot_client.clone(),
+            profit_tracker: profit_tracker.clone(),
+        });
+        let msg = format!(
+            "§f[§4BAF§f]: §bDiscord link code: §e{} §7— run §f/link {}§7 in Discord to control this bot",
+            link_code, link_code
+        );
+        print_mc_chat(&msg);
+        let _ = chat_tx.send(msg);
+        info!("[Backend] Discord link code: {}", link_code);
+        handle
+    } else {
+        frikadellen_baf::backend::BackendHandle::disabled()
+    };
+
     // Start web control panel server BEFORE bot connect so the chat GUI
     // is available to show login links during Microsoft/Coflnet auth.
     {
@@ -888,6 +927,7 @@ async fn main() -> Result<()> {
     let enable_ah_flips_events = enable_ah_flips.clone();
     let profit_tracker_events = profit_tracker.clone();
     let bazaar_tracker_events = bazaar_tracker.clone();
+    let backend_handle_events = backend_handle.clone();
     // Tracks when the last AH auction was listed; the idle-inventory timer uses
     // this to detect 30-minute stalls and force `/cofl sellinventory`.
     let last_auction_listed_at: Arc<Mutex<Instant>> = Arc::new(Mutex::new(Instant::now()));
@@ -1108,6 +1148,15 @@ async fn main() -> Result<()> {
                     }
                 }
                 frikadellen_baf::bot::BotEvent::ItemPurchased { item_name, price, buy_speed_ms: event_buy_speed_ms } => {
+                    backend_handle_events.report_event(
+                        "buy",
+                        &ingame_name_for_events,
+                        Some(&item_name),
+                        None,
+                        Some(price as i64),
+                        None,
+                        false,
+                    );
                     // Send uploadScoreboard (with real data) and uploadTab to COFL
                     let ws = ws_client_for_events.clone();
                     let scoreboard_lines = bot_client_clone.get_scoreboard_lines();
@@ -1273,6 +1322,15 @@ async fn main() -> Result<()> {
                     if let Some(profit) = opt_profit {
                         profit_tracker_events.record_ah_profit(profit);
                     }
+                    backend_handle_events.report_event(
+                        "sell",
+                        &ingame_name_for_events,
+                        Some(&item_name),
+                        None,
+                        Some(price as i64),
+                        opt_profit,
+                        false,
+                    );
                     // Print colorful sold announcement
                     let profit_str = opt_profit.map(|p| {
                         let color = if p >= 0 { "§a" } else { "§c" };
@@ -1353,6 +1411,15 @@ async fn main() -> Result<()> {
                     }
                 }
                 frikadellen_baf::bot::BotEvent::BazaarOrderPlaced { item_name, amount, price_per_unit, is_buy_order } => {
+                    backend_handle_events.report_event(
+                        "order_placed",
+                        &ingame_name_for_events,
+                        Some(&item_name),
+                        Some(amount),
+                        Some(price_per_unit as i64),
+                        None,
+                        true,
+                    );
                     // Track the order for the web panel and profit calculation on collect.
                     bazaar_tracker_events.add_order(item_name.clone(), amount, price_per_unit, is_buy_order);
                     let (order_color, order_type) = if is_buy_order { ("§a", "BUY") } else { ("§c", "SELL") };
@@ -1377,6 +1444,15 @@ async fn main() -> Result<()> {
                     }
                 }
                 frikadellen_baf::bot::BotEvent::AuctionListed { item_name, starting_bid, duration_hours } => {
+                    backend_handle_events.report_event(
+                        "list",
+                        &ingame_name_for_events,
+                        Some(&item_name),
+                        None,
+                        Some(starting_bid as i64),
+                        None,
+                        false,
+                    );
                     // Reset the idle-inventory timer so the 30-minute failsafe doesn't fire
                     // while items are being actively listed.
                     *last_auction_listed_at_events.lock().unwrap() = Instant::now();
@@ -1420,6 +1496,15 @@ async fn main() -> Result<()> {
                     }
                 }
                 frikadellen_baf::bot::BotEvent::BazaarOrderCollected { item_name, is_buy_order, claimed_amount } => {
+                    backend_handle_events.report_event(
+                        "order_collected",
+                        &ingame_name_for_events,
+                        Some(&item_name),
+                        claimed_amount,
+                        None,
+                        None,
+                        true,
+                    );
                     // Remove from tracker.
                     let order_data = bazaar_tracker_events.remove_order(&item_name, is_buy_order);
                     // Determine the actual quantity collected.  `claimed_amount` is

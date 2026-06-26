@@ -3,6 +3,7 @@
 //! A high-performance Minecraft bot for automated bazaar and auction house flipping.
 //! Rust port of the original TypeScript implementation using the Azalea framework.
 
+pub mod backend;
 pub mod bazaar_tracker;
 pub mod bot;
 pub mod config;
