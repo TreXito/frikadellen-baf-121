@@ -1,10 +1,10 @@
-use super::messages::{parse_message_data, inject_referral_id, ChatMessage, WebSocketMessage};
+use super::messages::{inject_referral_id, parse_message_data, ChatMessage, WebSocketMessage};
 use crate::types::{BazaarFlipRecommendation, Flip};
 use anyhow::{Context, Result};
-use futures::{stream::SplitSink, StreamExt, SinkExt};
+use futures::{stream::SplitSink, SinkExt, StreamExt};
+use std::sync::Arc;
 use tokio::sync::{mpsc, Mutex};
 use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
-use std::sync::Arc;
 use tracing::{debug, error, info, warn};
 
 pub enum CoflEvent {
@@ -138,7 +138,10 @@ impl CoflWebSocket {
                             break;
                         }
                         Err(e) => {
-                            error!("[WS] Reconnection failed (retry in {}s): {}", backoff_secs, e);
+                            error!(
+                                "[WS] Reconnection failed (retry in {}s): {}",
+                                backoff_secs, e
+                            );
                             backoff_secs = (backoff_secs * 2).min(60);
                         }
                     }
@@ -165,8 +168,8 @@ impl CoflWebSocket {
 
     fn handle_message(text: &str, tx: &mpsc::UnboundedSender<CoflEvent>) -> Result<()> {
         info!("[COFL <-] {}", text);
-        let msg: WebSocketMessage = serde_json::from_str(text)
-            .context("Failed to parse WebSocket message")?;
+        let msg: WebSocketMessage =
+            serde_json::from_str(text).context("Failed to parse WebSocket message")?;
 
         info!("[COFL <-] type={} data={}", msg.msg_type, msg.data);
 
@@ -204,7 +207,11 @@ impl CoflWebSocket {
                     debug!("Parsed bazaar flip: {:?}", bazaar_flip.item_name);
                     let _ = tx.send(CoflEvent::BazaarFlip(bazaar_flip));
                 } else {
-                    warn!("Failed to parse bazaar flip from '{}' message (data length: {} bytes)", msg.msg_type, msg.data.len());
+                    warn!(
+                        "Failed to parse bazaar flip from '{}' message (data length: {} bytes)",
+                        msg.msg_type,
+                        msg.data.len()
+                    );
                 }
             }
             "getbazaarflips" => {
@@ -225,12 +232,15 @@ impl CoflWebSocket {
                     let license_entries = parse_license_entries(&messages);
                     if !license_entries.is_empty() {
                         let page = parse_license_page_number(&messages);
-                        let _ = tx.send(CoflEvent::LicenseList { entries: license_entries, page });
+                        let _ = tx.send(CoflEvent::LicenseList {
+                            entries: license_entries,
+                            page,
+                        });
                     }
 
                     for msg in messages {
                         let msg_with_ref = msg.with_referral_id();
-                        
+
                         // If there's an onClick URL with authmod, this is an authentication prompt
                         if let Some(ref on_click) = msg_with_ref.on_click {
                             if on_click.contains("sky.coflnet.com/authmod") {
@@ -238,7 +248,7 @@ impl CoflWebSocket {
                                 continue;
                             }
                         }
-                        
+
                         let _ = tx.send(CoflEvent::ChatMessage(msg_with_ref.text));
                     }
                 } else if let Ok(chat) = parse_message_data::<ChatMessage>(&msg.data) {
@@ -248,11 +258,14 @@ impl CoflWebSocket {
                     let license_entries = parse_license_entries(&single);
                     if !license_entries.is_empty() {
                         let page = parse_license_page_number(&single);
-                        let _ = tx.send(CoflEvent::LicenseList { entries: license_entries, page });
+                        let _ = tx.send(CoflEvent::LicenseList {
+                            entries: license_entries,
+                            page,
+                        });
                     }
 
                     let msg_with_ref = chat.with_referral_id();
-                    
+
                     // Check for authentication URL
                     if let Some(ref on_click) = msg_with_ref.on_click {
                         if on_click.contains("sky.coflnet.com/authmod") {
@@ -260,7 +273,7 @@ impl CoflWebSocket {
                             return Ok(());
                         }
                     }
-                    
+
                     let _ = tx.send(CoflEvent::ChatMessage(msg_with_ref.text));
                 } else if let Ok(text) = parse_message_data::<String>(&msg.data) {
                     // Fallback: plain text string
@@ -269,7 +282,7 @@ impl CoflWebSocket {
                 }
             }
             "execute" => {
-                if let Ok(command) = parse_message_data::<String>(&msg.data) {
+                if let Ok(command) = serde_json::from_str::<String>(&msg.data) {
                     let _ = tx.send(CoflEvent::Command(command));
                 }
             }
@@ -349,7 +362,9 @@ impl CoflWebSocket {
             info!("[Inventory] uploadInventory ws message: {}", message);
         }
         let mut write = self.write.lock().await;
-        write.send(Message::Text(message.to_string())).await
+        write
+            .send(Message::Text(message.to_string()))
+            .await
             .context("Failed to send message to WebSocket")?;
         info!("[COFL ->] {}", message);
         debug!("Sent WS message ({} bytes)", message.len());
@@ -366,9 +381,13 @@ impl CoflWebSocket {
         let message = serde_json::json!({
             "type": "license",
             "data": data_json
-        }).to_string();
+        })
+        .to_string();
         self.send_message(&message).await?;
-        info!("[LicenseTransfer] Sent /cofl license use {} {}", license_index, target_ign);
+        info!(
+            "[LicenseTransfer] Sent /cofl license use {} {}",
+            license_index, target_ign
+        );
         Ok(())
     }
 
@@ -382,7 +401,8 @@ impl CoflWebSocket {
         let message = serde_json::json!({
             "type": "license",
             "data": data_json
-        }).to_string();
+        })
+        .to_string();
         self.send_message(&message).await?;
         info!("[LicenseDefault] Sent /cofl license default {}", ign);
         Ok(())
@@ -391,7 +411,9 @@ impl CoflWebSocket {
     /// Close the COFL WebSocket connection gracefully.
     pub async fn close(&self) -> Result<()> {
         let mut write = self.write.lock().await;
-        write.close().await
+        write
+            .close()
+            .await
             .context("Failed to close COFL WebSocket")?;
         info!("[COFL] WebSocket closed");
         Ok(())
@@ -421,7 +443,10 @@ pub fn parse_license_page_number(messages: &[ChatMessage]) -> u32 {
             match num_str.parse::<u32>() {
                 Ok(n) => return n,
                 Err(_) => {
-                    tracing::debug!("[LicenseDetect] Found page indicator but failed to parse number from '{}'", num_str);
+                    tracing::debug!(
+                        "[LicenseDetect] Found page indicator but failed to parse number from '{}'",
+                        num_str
+                    );
                 }
             }
         }
@@ -585,7 +610,10 @@ mod tests {
         assert_eq!(flip.item_name, "§dTreacherous Rod of the Sea");
         assert_eq!(flip.starting_bid, 15000000);
         assert_eq!(flip.target, 29314940);
-        assert_eq!(flip.uuid.as_deref(), Some("4f1d2446974e43dbaf644fb13cd8af62"));
+        assert_eq!(
+            flip.uuid.as_deref(),
+            Some("4f1d2446974e43dbaf644fb13cd8af62")
+        );
     }
 
     #[test]
@@ -673,22 +701,69 @@ mod tests {
         use crate::websocket::messages::ChatMessage;
         // Simulate a COFL licenses list response (simplified from real output)
         let messages = vec![
-            ChatMessage { text: "[§1C§6oflnet§f]§7: ".to_string(), on_click: None, hover: None },
-            ChatMessage { text: "Content (page 1):§3(1)".to_string(), on_click: Some("/cofl licenses ls 2".to_string()), hover: None },
-            ChatMessage { text: "\n".to_string(), on_click: None, hover: None },
-            ChatMessage { text: "§7> §azShadowReaper_ §2§mNONE§c expired".to_string(), on_click: None, hover: None },
-            ChatMessage { text: " §a[RENEW]§7§3(2)".to_string(), on_click: Some("/cofl licenses add 651c NONE".to_string()), hover: None },
-            ChatMessage { text: "\n".to_string(), on_click: None, hover: None },
-            ChatMessage { text: "§7> §ausaiddd §2§mNONE§c expired".to_string(), on_click: None, hover: None },
-            ChatMessage { text: " §a[RENEW]§7§3(3)".to_string(), on_click: Some("/cofl licenses add 58f1 NONE".to_string()), hover: None },
-            ChatMessage { text: "\n".to_string(), on_click: None, hover: None },
-            ChatMessage { text: "§7> §aoBlanky_ §2§mNONE§c expired".to_string(), on_click: None, hover: None },
-            ChatMessage { text: " §a[RENEW]§7§3(4)".to_string(), on_click: None, hover: None },
+            ChatMessage {
+                text: "[§1C§6oflnet§f]§7: ".to_string(),
+                on_click: None,
+                hover: None,
+            },
+            ChatMessage {
+                text: "Content (page 1):§3(1)".to_string(),
+                on_click: Some("/cofl licenses ls 2".to_string()),
+                hover: None,
+            },
+            ChatMessage {
+                text: "\n".to_string(),
+                on_click: None,
+                hover: None,
+            },
+            ChatMessage {
+                text: "§7> §azShadowReaper_ §2§mNONE§c expired".to_string(),
+                on_click: None,
+                hover: None,
+            },
+            ChatMessage {
+                text: " §a[RENEW]§7§3(2)".to_string(),
+                on_click: Some("/cofl licenses add 651c NONE".to_string()),
+                hover: None,
+            },
+            ChatMessage {
+                text: "\n".to_string(),
+                on_click: None,
+                hover: None,
+            },
+            ChatMessage {
+                text: "§7> §ausaiddd §2§mNONE§c expired".to_string(),
+                on_click: None,
+                hover: None,
+            },
+            ChatMessage {
+                text: " §a[RENEW]§7§3(3)".to_string(),
+                on_click: Some("/cofl licenses add 58f1 NONE".to_string()),
+                hover: None,
+            },
+            ChatMessage {
+                text: "\n".to_string(),
+                on_click: None,
+                hover: None,
+            },
+            ChatMessage {
+                text: "§7> §aoBlanky_ §2§mNONE§c expired".to_string(),
+                on_click: None,
+                hover: None,
+            },
+            ChatMessage {
+                text: " §a[RENEW]§7§3(4)".to_string(),
+                on_click: None,
+                hover: None,
+            },
         ];
 
         let entries = parse_license_entries(&messages);
         assert_eq!(entries.len(), 3);
-        assert_eq!(entries[0], ("zShadowReaper_".to_string(), 1, "NONE".to_string()));
+        assert_eq!(
+            entries[0],
+            ("zShadowReaper_".to_string(), 1, "NONE".to_string())
+        );
         assert_eq!(entries[1], ("usaiddd".to_string(), 2, "NONE".to_string()));
         assert_eq!(entries[2], ("oBlanky_".to_string(), 3, "NONE".to_string()));
     }
@@ -704,8 +779,16 @@ mod tests {
         use crate::websocket::messages::ChatMessage;
         // A non-license chatMessage should return empty
         let messages = vec![
-            ChatMessage { text: "[§1C§6oflnet§f]§7: ".to_string(), on_click: None, hover: None },
-            ChatMessage { text: "Some other message".to_string(), on_click: None, hover: None },
+            ChatMessage {
+                text: "[§1C§6oflnet§f]§7: ".to_string(),
+                on_click: None,
+                hover: None,
+            },
+            ChatMessage {
+                text: "Some other message".to_string(),
+                on_click: None,
+                hover: None,
+            },
         ];
         let entries = parse_license_entries(&messages);
         assert!(entries.is_empty());
@@ -715,8 +798,16 @@ mod tests {
     fn test_parse_license_entries_case_insensitive_lookup() {
         use crate::websocket::messages::ChatMessage;
         let messages = vec![
-            ChatMessage { text: "§7> §aPlayerOne §2NONE".to_string(), on_click: None, hover: None },
-            ChatMessage { text: "§7> §aPlayerTwo §2NONE".to_string(), on_click: None, hover: None },
+            ChatMessage {
+                text: "§7> §aPlayerOne §2NONE".to_string(),
+                on_click: None,
+                hover: None,
+            },
+            ChatMessage {
+                text: "§7> §aPlayerTwo §2NONE".to_string(),
+                on_click: None,
+                hover: None,
+            },
         ];
         let entries = parse_license_entries(&messages);
         assert_eq!(entries.len(), 2);
@@ -729,9 +820,21 @@ mod tests {
     fn test_parse_license_page_number_from_response() {
         use crate::websocket::messages::ChatMessage;
         let messages = vec![
-            ChatMessage { text: "[§1C§6oflnet§f]§7: ".to_string(), on_click: None, hover: None },
-            ChatMessage { text: "Content (page 1):§3(1)".to_string(), on_click: None, hover: None },
-            ChatMessage { text: "§7> §aPlayer1 §2NONE".to_string(), on_click: None, hover: None },
+            ChatMessage {
+                text: "[§1C§6oflnet§f]§7: ".to_string(),
+                on_click: None,
+                hover: None,
+            },
+            ChatMessage {
+                text: "Content (page 1):§3(1)".to_string(),
+                on_click: None,
+                hover: None,
+            },
+            ChatMessage {
+                text: "§7> §aPlayer1 §2NONE".to_string(),
+                on_click: None,
+                hover: None,
+            },
         ];
         assert_eq!(parse_license_page_number(&messages), 1);
     }
@@ -740,9 +843,21 @@ mod tests {
     fn test_parse_license_page_number_page_2() {
         use crate::websocket::messages::ChatMessage;
         let messages = vec![
-            ChatMessage { text: "[§1C§6oflnet§f]§7: ".to_string(), on_click: None, hover: None },
-            ChatMessage { text: "Content (page 2):§3(5)".to_string(), on_click: None, hover: None },
-            ChatMessage { text: "§7> §aPlayer4 §2NONE".to_string(), on_click: None, hover: None },
+            ChatMessage {
+                text: "[§1C§6oflnet§f]§7: ".to_string(),
+                on_click: None,
+                hover: None,
+            },
+            ChatMessage {
+                text: "Content (page 2):§3(5)".to_string(),
+                on_click: None,
+                hover: None,
+            },
+            ChatMessage {
+                text: "§7> §aPlayer4 §2NONE".to_string(),
+                on_click: None,
+                hover: None,
+            },
         ];
         assert_eq!(parse_license_page_number(&messages), 2);
     }
@@ -750,9 +865,11 @@ mod tests {
     #[test]
     fn test_parse_license_page_number_defaults_to_1() {
         use crate::websocket::messages::ChatMessage;
-        let messages = vec![
-            ChatMessage { text: "some other message".to_string(), on_click: None, hover: None },
-        ];
+        let messages = vec![ChatMessage {
+            text: "some other message".to_string(),
+            on_click: None,
+            hover: None,
+        }];
         assert_eq!(parse_license_page_number(&messages), 1);
     }
 
@@ -762,9 +879,21 @@ mod tests {
         // Entries on any page always start from 1 (page-local indexing).
         // The caller adds the cumulative offset from previous pages.
         let page2_messages = vec![
-            ChatMessage { text: "Content (page 2):§3(5)".to_string(), on_click: None, hover: None },
-            ChatMessage { text: "§7> §aPlayer4 §2NONE".to_string(), on_click: None, hover: None },
-            ChatMessage { text: "§7> §aPlayer5 §2NONE".to_string(), on_click: None, hover: None },
+            ChatMessage {
+                text: "Content (page 2):§3(5)".to_string(),
+                on_click: None,
+                hover: None,
+            },
+            ChatMessage {
+                text: "§7> §aPlayer4 §2NONE".to_string(),
+                on_click: None,
+                hover: None,
+            },
+            ChatMessage {
+                text: "§7> §aPlayer5 §2NONE".to_string(),
+                on_click: None,
+                hover: None,
+            },
         ];
         let entries = parse_license_entries(&page2_messages);
         // Page-local indices: 1, 2 (caller must add offset from page 1's entry count)
@@ -778,15 +907,37 @@ mod tests {
         use crate::websocket::messages::ChatMessage;
         // Simulate a response with mixed tiers (NONE and PREMIUM for the same IGN)
         let messages = vec![
-            ChatMessage { text: "[§1C§6oflnet§f]§7: ".to_string(), on_click: None, hover: None },
-            ChatMessage { text: "Content (page 1):§3(1)".to_string(), on_click: None, hover: None },
-            ChatMessage { text: "§7> §aargamer1014 §2§mNONE§c expired".to_string(), on_click: None, hover: None },
-            ChatMessage { text: "§7> §aargamer1014 §2PREMIUM 9.9d".to_string(), on_click: None, hover: None },
+            ChatMessage {
+                text: "[§1C§6oflnet§f]§7: ".to_string(),
+                on_click: None,
+                hover: None,
+            },
+            ChatMessage {
+                text: "Content (page 1):§3(1)".to_string(),
+                on_click: None,
+                hover: None,
+            },
+            ChatMessage {
+                text: "§7> §aargamer1014 §2§mNONE§c expired".to_string(),
+                on_click: None,
+                hover: None,
+            },
+            ChatMessage {
+                text: "§7> §aargamer1014 §2PREMIUM 9.9d".to_string(),
+                on_click: None,
+                hover: None,
+            },
         ];
         let entries = parse_license_entries(&messages);
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0], ("argamer1014".to_string(), 1, "NONE".to_string()));
-        assert_eq!(entries[1], ("argamer1014".to_string(), 2, "PREMIUM".to_string()));
+        assert_eq!(
+            entries[0],
+            ("argamer1014".to_string(), 1, "NONE".to_string())
+        );
+        assert_eq!(
+            entries[1],
+            ("argamer1014".to_string(), 2, "PREMIUM".to_string())
+        );
     }
 
     #[test]
@@ -795,7 +946,10 @@ mod tests {
         assert_eq!(extract_license_tier(" §2§mNONE§c expired"), "NONE");
         assert_eq!(extract_license_tier(" §2PREMIUM 9.9d"), "PREMIUM");
         assert_eq!(extract_license_tier(" §2NONE"), "NONE");
-        assert_eq!(extract_license_tier(" §2STARTER_PREMIUM 2.1d"), "STARTER_PREMIUM");
+        assert_eq!(
+            extract_license_tier(" §2STARTER_PREMIUM 2.1d"),
+            "STARTER_PREMIUM"
+        );
         // Fallback when no §2 found
         assert_eq!(extract_license_tier(""), "NONE");
     }
@@ -806,15 +960,38 @@ mod tests {
         // Simulate a COFL `/cofl licenses list trexitooo` search response
         // which returns entries with global index prefixes like `§716> §a`
         let messages = vec![
-            ChatMessage { text: "[§1C§6oflnet§f]§7: ".to_string(), on_click: None, hover: None },
-            ChatMessage { text: "Search for trexitooo resulted in:".to_string(), on_click: None, hover: None },
-            ChatMessage { text: "\n".to_string(), on_click: None, hover: None },
-            ChatMessage { text: "§716> §aTreXitooo §2PREMIUM 29.9d".to_string(), on_click: None, hover: None },
-            ChatMessage { text: " §a[EXTEND]§7".to_string(), on_click: None, hover: None },
+            ChatMessage {
+                text: "[§1C§6oflnet§f]§7: ".to_string(),
+                on_click: None,
+                hover: None,
+            },
+            ChatMessage {
+                text: "Search for trexitooo resulted in:".to_string(),
+                on_click: None,
+                hover: None,
+            },
+            ChatMessage {
+                text: "\n".to_string(),
+                on_click: None,
+                hover: None,
+            },
+            ChatMessage {
+                text: "§716> §aTreXitooo §2PREMIUM 29.9d".to_string(),
+                on_click: None,
+                hover: None,
+            },
+            ChatMessage {
+                text: " §a[EXTEND]§7".to_string(),
+                on_click: None,
+                hover: None,
+            },
         ];
         let entries = parse_license_entries(&messages);
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0], ("TreXitooo".to_string(), 16, "PREMIUM".to_string()));
+        assert_eq!(
+            entries[0],
+            ("TreXitooo".to_string(), 16, "PREMIUM".to_string())
+        );
     }
 
     #[test]
@@ -822,13 +999,27 @@ mod tests {
         use crate::websocket::messages::ChatMessage;
         // Search result with multiple entries at different global indices
         let messages = vec![
-            ChatMessage { text: "§716> §aTreXitooo §2PREMIUM 29.9d".to_string(), on_click: None, hover: None },
-            ChatMessage { text: "§742> §aTreXitooo §2§mNONE§c expired".to_string(), on_click: None, hover: None },
+            ChatMessage {
+                text: "§716> §aTreXitooo §2PREMIUM 29.9d".to_string(),
+                on_click: None,
+                hover: None,
+            },
+            ChatMessage {
+                text: "§742> §aTreXitooo §2§mNONE§c expired".to_string(),
+                on_click: None,
+                hover: None,
+            },
         ];
         let entries = parse_license_entries(&messages);
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0], ("TreXitooo".to_string(), 16, "PREMIUM".to_string()));
-        assert_eq!(entries[1], ("TreXitooo".to_string(), 42, "NONE".to_string()));
+        assert_eq!(
+            entries[0],
+            ("TreXitooo".to_string(), 16, "PREMIUM".to_string())
+        );
+        assert_eq!(
+            entries[1],
+            ("TreXitooo".to_string(), 42, "NONE".to_string())
+        );
     }
 
     #[test]
@@ -846,23 +1037,28 @@ mod tests {
         ];
         let entries = parse_license_entries(&messages);
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0], ("XtyTextorial".to_string(), 19, "PREMIUM".to_string()));
+        assert_eq!(
+            entries[0],
+            ("XtyTextorial".to_string(), 19, "PREMIUM".to_string())
+        );
     }
 
     #[test]
     fn test_parse_license_entries_multiline_page_format() {
         use crate::websocket::messages::ChatMessage;
         // Page listing entries embedded in a single multi-line ChatMessage
-        let messages = vec![
-            ChatMessage {
-                text: "Content (page 1):§3(1)\n§7> §aPlayer1 §2NONE\n§7> §aPlayer2 §2PREMIUM 9.9d".to_string(),
-                on_click: None,
-                hover: None,
-            },
-        ];
+        let messages = vec![ChatMessage {
+            text: "Content (page 1):§3(1)\n§7> §aPlayer1 §2NONE\n§7> §aPlayer2 §2PREMIUM 9.9d"
+                .to_string(),
+            on_click: None,
+            hover: None,
+        }];
         let entries = parse_license_entries(&messages);
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0], ("Player1".to_string(), 1, "NONE".to_string()));
-        assert_eq!(entries[1], ("Player2".to_string(), 2, "PREMIUM".to_string()));
+        assert_eq!(
+            entries[1],
+            ("Player2".to_string(), 2, "PREMIUM".to_string())
+        );
     }
 }
