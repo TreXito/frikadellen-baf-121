@@ -44,6 +44,22 @@ pub struct CoflWebSocket {
 }
 
 impl CoflWebSocket {
+    pub async fn send_ping(&self) -> Result<()> {
+        let mut write = self.write.lock().await;
+        write
+            .send(Message::Ping(vec![]))
+            .await
+            .context("Failed to send WebSocket ping")
+    }
+
+    pub async fn send_message(&self, message: &str) -> Result<()> {
+        let mut write = self.write.lock().await;
+        write
+            .send(Message::Text(message.to_string()))
+            .await
+            .context("Failed to send WebSocket message")
+    }
+
     pub async fn connect(
         url: String,
         username: String,
@@ -341,35 +357,6 @@ impl CoflWebSocket {
     /// the read loop computes the RTT and prints it to chat. Stateless: no shared
     /// send-time is needed, and unsolicited keepalive pongs (no 8-byte payload)
     /// are ignored.
-    pub async fn send_ping(&self) -> Result<()> {
-        let now_ms = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0);
-        let mut write = self.write.lock().await;
-        write
-            .send(Message::Ping(now_ms.to_be_bytes().to_vec().into()))
-            .await
-            .context("Failed to send ping to WebSocket")?;
-        debug!("[COFL ->] ping ({}ms ts)", now_ms);
-        Ok(())
-    }
-
-    /// Send a message to the COFL WebSocket
-    pub async fn send_message(&self, message: &str) -> Result<()> {
-        if let Some(payload) = extract_upload_inventory_payload(message) {
-            info!("[Inventory] uploadInventory payload: {}", payload);
-            info!("[Inventory] uploadInventory ws message: {}", message);
-        }
-        let mut write = self.write.lock().await;
-        write
-            .send(Message::Text(message.to_string()))
-            .await
-            .context("Failed to send message to WebSocket")?;
-        info!("[COFL ->] {}", message);
-        debug!("Sent WS message ({} bytes)", message.len());
-        Ok(())
-    }
 
     /// Transfer a COFL license to a different IGN.
     ///

@@ -685,6 +685,9 @@ async fn main() -> Result<()> {
     // Tuple: (tier, expires_str) e.g. ("Premium Plus", "2026-Feb-10 08:55 UTC").
     let cofl_premium: Arc<Mutex<Option<(String, String)>>> = Arc::new(Mutex::new(None));
 
+    let last_ping_ms: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
+    let keep_alive_sent: Arc<Mutex<Option<Instant>>> = Arc::new(Mutex::new(None));
+
     // Auto-detected COFL license index for the first account's IGN.
     // Populated at startup by requesting `/cofl licenses list <first_ign>` and
     // parsing the `N>` numbered index from the response.
@@ -3530,6 +3533,7 @@ async fn main() -> Result<()> {
     // stdin is left untouched — useful when running headless / as a service.
     let ws_client_for_console = ws_client.clone();
     let command_queue_for_console = command_queue.clone();
+    let last_ping_ms_console = last_ping_ms.clone();
     let console_input_enabled = config.enable_console_input;
 
     tokio::spawn(async move {
@@ -3610,17 +3614,18 @@ async fn main() -> Result<()> {
                             continue;
                         }
                         "ping" => {
-                            // Measure round-trip latency to Coflnet via a WebSocket ping.
-                            // The RTT is printed to chat when the pong arrives.
+                            let ms = *frikadellen_baf::bot::LAST_PING_MS.lock();
+                            match ms {
+                                Some(ping) => info!("Game Ping: {}ms", ping),
+                                None => info!("Game Ping: Calculating... (Waiting for keep-alive)"),
+                            }
+
                             if let Err(e) = ws_client_for_console.send_ping().await {
                                 error!("Failed to send ping to websocket: {}", e);
                             }
                             continue;
                         }
-                        // TODO: Add other local commands like forceClaim, connect, sellbz when implemented
-                        _ => {
-                            // Fall through to send to websocket
-                        }
+                        _ => {}
                     }
 
                     // Send to websocket with command as type

@@ -93,7 +93,7 @@ impl BotEventHandlers {
     }
 
     /// Parse window title from JSON format
-    /// 
+    ///
     /// Window titles come in JSON format like:
     /// {"text":"","extra":[{"text":"Bazaar"}]}
     /// {"translate":"container.chest"}
@@ -146,20 +146,21 @@ impl BotEventHandlers {
 
         if title_lower.contains("bazaar") && !title_lower.contains("order") {
             WindowType::BazaarSearch
-        } else if title_lower.contains("buy order") 
+        } else if title_lower.contains("buy order")
             || title_lower.contains("sell offer")
-            || title_lower.contains("order options") {
+            || title_lower.contains("order options")
+        {
             WindowType::BazaarOrderCreation
         } else if title_lower.contains("manage orders") {
             WindowType::ManageOrders
-        } else if title_lower.contains("bin auction view") 
-            || title_lower.contains("auction view") {
+        } else if title_lower.contains("bin auction view") || title_lower.contains("auction view") {
             WindowType::BinAuctionView
         } else if title_lower.contains("confirm purchase") {
             WindowType::ConfirmPurchase
-        } else if title_lower.contains("storage") 
+        } else if title_lower.contains("storage")
             || title_lower.contains("chest")
-            || title_lower.contains("backpack") {
+            || title_lower.contains("backpack")
+        {
             WindowType::Storage
         } else {
             WindowType::Other(title.to_string())
@@ -170,7 +171,7 @@ impl BotEventHandlers {
     pub fn is_cofl_chat_message(&self, message: &str) -> bool {
         // Remove Minecraft color codes first
         let clean = Self::remove_color_codes(message);
-        
+
         // Check if it starts with [Chat]
         clean.starts_with("[Chat]")
     }
@@ -198,7 +199,7 @@ impl BotEventHandlers {
     }
 
     /// Extract SkyBlock item ID from NBT data
-    /// 
+    ///
     /// SkyBlock items have a custom NBT tag structure:
     /// ExtraAttributes.id = "SKYBLOCK_ITEM_ID"
     pub fn extract_skyblock_id(nbt: &JsonValue) -> Option<String> {
@@ -209,7 +210,7 @@ impl BotEventHandlers {
     }
 
     /// Extract display name from item NBT
-    /// 
+    ///
     /// Priority:
     /// 1. NBT display name (display.Name) - Custom Hypixel name
     /// 2. Item name - Vanilla name
@@ -228,7 +229,7 @@ impl BotEventHandlers {
     }
 
     /// Parse display name from JSON or plain text
-    /// 
+    ///
     /// Display names can be:
     /// - JSON: {"text":"","extra":[{"text":"Dedication I"}]}
     /// - Plain text with color codes: §9Dedication I
@@ -282,7 +283,7 @@ impl BotEventHandlers {
     }
 
     /// Parse price from item lore
-    /// 
+    ///
     /// Looks for patterns like:
     /// "Price: 1,234,567 coins"
     /// "Cost: 1.2M coins"
@@ -291,12 +292,12 @@ impl BotEventHandlers {
 
         for line in lore {
             let clean = Self::remove_color_codes(line);
-            
+
             if let Some(captures) = price_regex.captures(&clean) {
                 if let Some(number_str) = captures.get(1) {
                     // Remove commas
                     let number_clean = number_str.as_str().replace(",", "");
-                    
+
                     if let Ok(mut value) = number_clean.parse::<f64>() {
                         // Apply multiplier if present
                         if let Some(multiplier) = captures.get(2) {
@@ -307,7 +308,7 @@ impl BotEventHandlers {
                                 _ => 1.0,
                             };
                         }
-                        
+
                         return Some(value);
                     }
                 }
@@ -318,7 +319,7 @@ impl BotEventHandlers {
     }
 
     /// Parse bazaar price from sign text
-    /// 
+    ///
     /// Sign shows current instant-buy/sell prices like:
     /// "Instant-Buy: 1,234.5"
     /// "Instant-Sell: 5,678.9"
@@ -327,11 +328,11 @@ impl BotEventHandlers {
 
         for line in sign_lines {
             let clean = Self::remove_color_codes(line);
-            
+
             if let Some(captures) = price_regex.captures(&clean) {
                 if let Some(number_str) = captures.get(1) {
                     let number_clean = number_str.as_str().replace(",", "");
-                    
+
                     if let Ok(value) = number_clean.parse::<f64>() {
                         return Some(value);
                     }
@@ -433,17 +434,17 @@ mod tests {
             BotEventHandlers::classify_window("Bazaar"),
             WindowType::BazaarSearch
         ));
-        
+
         assert!(matches!(
             BotEventHandlers::classify_window("Create Buy Order"),
             WindowType::BazaarOrderCreation
         ));
-        
+
         assert!(matches!(
             BotEventHandlers::classify_window("BIN Auction View"),
             WindowType::BinAuctionView
         ));
-        
+
         assert!(matches!(
             BotEventHandlers::classify_window("Confirm Purchase"),
             WindowType::ConfirmPurchase
@@ -471,17 +472,15 @@ mod tests {
             "§7Price: §61,234,567 coins".to_string(),
             "".to_string(),
         ];
-        
+
         let price = BotEventHandlers::parse_price_from_lore(&lore);
         assert_eq!(price, Some(1_234_567.0));
     }
 
     #[test]
     fn test_parse_price_with_multiplier() {
-        let lore = vec![
-            "§7Cost: §61.2M coins".to_string(),
-        ];
-        
+        let lore = vec!["§7Cost: §61.2M coins".to_string()];
+
         let price = BotEventHandlers::parse_price_from_lore(&lore);
         assert_eq!(price, Some(1_200_000.0));
     }
