@@ -3509,18 +3509,14 @@ async fn execute_command(
                     send_raw_click(&fast_bot, window_id, 31);
 
                     if fast_state.skip {
-                        // Skip pre-click: click slot 11 of the Confirm Purchase
-                        // window in the SAME TCP burst as the buy click.  The
-                        // confirm window does not exist yet, but the buy click
-                        // (processed first, same tick) opens it as id
-                        // window_id+1 — so this is a click on a window we KNOW
-                        // will be there.  This is the one sanctioned click-ahead.
-                        //
-                        // NOTE: we deliberately do NOT re-click slot 31 here.
-                        // The buy click already replaced the BIN Auction View
-                        // with the Confirm Purchase window, so a second slot-31
-                        // click would land on a window that no longer exists —
-                        // an impossible action that Watchdog flags.
+                        // Skip pre-click: confirm slot 11 on the Confirm Purchase
+                        // window (predicted id window_id+1) in the SAME burst as the
+                        // buy click. The gold_nugget is confirmed present, so the buy
+                        // click deterministically opens the confirm window — this is a
+                        // legitimate click-ahead, not an impossible action. If the
+                        // server opens the window in time, the confirm lands a full
+                        // RTT early; if not, the Confirm Purchase handler clicks the
+                        // moment the window actually opens.
                         let next_wid = if window_id == 255 { 1u8 } else { window_id + 1 };
                         info!("[AH] Fast-path skip: pre-clicking confirm slot 11 on window {} (same burst)", next_wid);
                         fast_state.skip_click_sent.store(true, Ordering::Relaxed);
@@ -4003,12 +3999,10 @@ async fn handle_window_interaction(
                         send_raw_click(bot, window_id, 31);
 
                         if state.skip {
-                            // Skip pre-click on the Confirm Purchase window in the
-                            // same TCP burst — the buy click opens it as id
-                            // window_id+1, so it is a window we KNOW will be there.
-                            // No second slot-31 click: after the buy click that
-                            // window is gone, so re-clicking it would be an
-                            // impossible action.
+                            // Legitimate click-ahead (gold_nugget present ⇒ the buy
+                            // click opens the confirm window). Lands an RTT early when
+                            // the server opens the window in time; otherwise the
+                            // Confirm Purchase handler clicks on window-open.
                             let next_wid = if window_id == 255 { 1u8 } else { window_id + 1 };
                             info!("[AH] Skip: pre-clicking confirm slot 11 on window {} (same burst, fallback)", next_wid);
                             state.skip_click_sent.store(true, Ordering::Relaxed);
@@ -4066,19 +4060,15 @@ async fn handle_window_interaction(
                         t0.elapsed().as_secs_f64() * 1000.0
                     );
                 }
-                // If a skip pre-click was already sent for this window, the
-                // confirm click is already queued on the server for this same
-                // window — don't fire a redundant reactive click.
-                let skip_was_sent = state.skip_click_sent.swap(false, Ordering::Relaxed);
-                if skip_was_sent {
-                    info!("[AH] Skip pre-click already sent for this confirm window — not re-clicking");
-                } else {
-                    // No skip pre-click — this Confirm Purchase window is open
-                    // right now (the server just sent it), so clicking slot 11 is
-                    // clicking something that is actually there.  Click it
-                    // immediately via the raw connection.
-                    send_raw_click(bot, window_id, 11);
-                }
+                // The Confirm Purchase window is open right now (the server just
+                // sent it), so clicking slot 11 is a valid action on a window that
+                // actually exists — fire it immediately. We no longer suppress this
+                // when a `skip` pre-click was sent: if that pre-click already
+                // confirmed, this redundant click hits an already-closing window and
+                // is harmlessly ignored; if it did NOT land in time, this fires the
+                // confirm at window-open instead of after a ~50ms retry interval.
+                state.skip_click_sent.store(false, Ordering::Relaxed);
+                send_raw_click(bot, window_id, 11);
 
                 tokio::time::sleep(tokio::time::Duration::from_millis(CONFIRM_PURCHASE_RETRY_MS)).await;
 
