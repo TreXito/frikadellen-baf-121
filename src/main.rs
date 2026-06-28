@@ -8,7 +8,7 @@ use frikadellen_baf::{
     websocket::CoflWebSocket,
     bot::BotClient,
     types::Flip,
-    web::{start_web_server, WebSharedState},
+    web::WebSharedState,
 };
 use tracing::{debug, error, info, warn};
 use tokio::time::{sleep, Duration};
@@ -870,8 +870,16 @@ async fn main() -> Result<()> {
             config_loader: config_loader.clone(),
         };
         let web_port = config.web_gui_port;
+        let web_tls = if config.web_https {
+            Some(frikadellen_baf::web::WebTlsOptions {
+                cert_path: config.web_tls_cert_path.clone(),
+                key_path: config.web_tls_key_path.clone(),
+            })
+        } else {
+            None
+        };
         tokio::spawn(async move {
-            start_web_server(web_state, web_port).await;
+            frikadellen_baf::web::start_web_server_tls(web_state, web_port, web_tls).await;
         });
     }
 

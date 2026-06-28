@@ -271,7 +271,58 @@ async fn check_auth(
 
 // ── Start the web server ─────────────────────────────────────
 
+/// TLS options for the control panel. `None` = plain HTTP.
+pub struct WebTlsOptions {
+    pub cert_path: Option<String>,
+    pub key_path: Option<String>,
+}
+
+/// Build a rustls config from a provided cert/key, or generate a persisted
+/// self-signed certificate when none is configured.
+async fn build_web_tls(opts: &WebTlsOptions) -> anyhow::Result<axum_server::tls_rustls::RustlsConfig> {
+    use anyhow::Context;
+    // Ensure a process-level crypto provider is installed (no-op if another
+    // component already installed one).
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+    let cert = opts.cert_path.as_deref().filter(|p| !p.is_empty());
+    let key = opts.key_path.as_deref().filter(|p| !p.is_empty());
+    if let (Some(cert), Some(key)) = (cert, key) {
+        if std::path::Path::new(cert).exists() && std::path::Path::new(key).exists() {
+            info!("[WebTLS] Using provided certificate: {}", cert);
+            return axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key)
+                .await
+                .context("failed to load web_tls_cert_path/web_tls_key_path");
+        }
+        warn!("[WebTLS] Configured cert/key not found — falling back to self-signed");
+    }
+
+    // Self-signed: generate once and persist next to the executable so the same
+    // certificate is reused across restarts (the browser only warns once).
+    let dir = crate::logging::get_logs_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let cert_file = dir.join("web-selfsigned-cert.pem");
+    let key_file = dir.join("web-selfsigned-key.pem");
+    if !cert_file.exists() || !key_file.exists() {
+        info!("[WebTLS] Generating self-signed certificate (browser will show a one-time warning)");
+        let signed = rcgen::generate_simple_self_signed(vec![
+            "localhost".to_string(),
+            "127.0.0.1".to_string(),
+        ])
+        .context("failed to generate self-signed certificate")?;
+        std::fs::write(&cert_file, signed.cert.pem()).context("write self-signed cert")?;
+        std::fs::write(&key_file, signed.key_pair.serialize_pem()).context("write self-signed key")?;
+    }
+    axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert_file, &key_file)
+        .await
+        .context("failed to load self-signed certificate")
+}
+
 pub async fn start_web_server(state: WebSharedState, port: u16) {
+    start_web_server_tls(state, port, None).await;
+}
+
+pub async fn start_web_server_tls(state: WebSharedState, port: u16, tls: Option<WebTlsOptions>) {
     let has_password = state
         .web_gui_password
         .as_ref()
@@ -318,28 +369,48 @@ pub async fn start_web_server(state: WebSharedState, port: u16) {
         .with_state(state);
 
     let addr = format!("0.0.0.0:{}", port);
+    let scheme = if tls.is_some() { "https" } else { "http" };
     if has_password {
-        info!(
-            "Web control panel starting on http://{} (password protected)",
-            addr
-        );
+        info!("Web control panel starting on {}://{} (password protected)", scheme, addr);
     } else {
         info!(
-            "Web control panel starting on http://{} (no password — set web_gui_password in config.toml to protect)",
-            addr
+            "Web control panel starting on {}://{} (no password — set web_gui_password in config.toml to protect)",
+            scheme, addr
         );
     }
 
-    let listener = match tokio::net::TcpListener::bind(&addr).await {
-        Ok(l) => l,
-        Err(e) => {
-            error!("Failed to bind web server on {}: {}", addr, e);
-            return;
+    if let Some(opts) = tls {
+        let socket: std::net::SocketAddr = match addr.parse() {
+            Ok(s) => s,
+            Err(e) => {
+                error!("Invalid web server address {}: {}", addr, e);
+                return;
+            }
+        };
+        let tls_config = match build_web_tls(&opts).await {
+            Ok(c) => c,
+            Err(e) => {
+                error!("Failed to set up web TLS (panel will not start): {:#}", e);
+                return;
+            }
+        };
+        if let Err(e) = axum_server::bind_rustls(socket, tls_config)
+            .serve(app.into_make_service())
+            .await
+        {
+            error!("Web server (https) error: {}", e);
         }
-    };
-
-    if let Err(e) = axum::serve(listener, app).await {
-        error!("Web server error: {}", e);
+    } else {
+        let listener = match tokio::net::TcpListener::bind(&addr).await {
+            Ok(l) => l,
+            Err(e) => {
+                error!("Failed to bind web server on {}: {}", addr, e);
+                return;
+            }
+        };
+        if let Err(e) = axum::serve(listener, app).await {
+            error!("Web server error: {}", e);
+        }
     }
 }
 

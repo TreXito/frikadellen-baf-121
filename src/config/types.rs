@@ -203,6 +203,24 @@ pub struct Config {
     #[serde(default, with = "opt_string_as_empty")]
     pub web_gui_password: Option<String>,
 
+    /// Serve the web control panel over HTTPS. Strongly recommended when the panel
+    /// is reachable over a public IP (e.g. a VPS) so the password and traffic are
+    /// encrypted. Provide `web_tls_cert_path`/`web_tls_key_path` for a real
+    /// certificate (e.g. a Let's Encrypt IP certificate); if omitted, a self-signed
+    /// certificate is generated automatically (browsers will show a one-time
+    /// "not trusted" warning, but the connection is still encrypted).
+    #[serde(default)]
+    pub web_https: bool,
+
+    /// Path to a PEM TLS certificate (full chain) for the web panel. Empty = use a
+    /// generated self-signed certificate.
+    #[serde(default, with = "opt_string_as_empty")]
+    pub web_tls_cert_path: Option<String>,
+
+    /// Path to the PEM private key matching `web_tls_cert_path`. Empty = self-signed.
+    #[serde(default, with = "opt_string_as_empty")]
+    pub web_tls_key_path: Option<String>,
+
     /// Hypixel API key for fetching active auctions. Obtain one from https://developer.hypixel.net/
     /// Leave empty to use the Coflnet API as a fallback.
     #[serde(default, with = "opt_string_as_empty")]
@@ -364,6 +382,9 @@ impl Default for Config {
             discord_client_secret: None,
             discord_redirect_uri: None,
             web_gui_password: None,
+            web_https: false,
+            web_tls_cert_path: None,
+            web_tls_key_path: None,
             hypixel_api_key: None,
             share_legendary_flips: true,
             sessions: HashMap::new(),
