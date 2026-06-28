@@ -3856,9 +3856,17 @@ async fn handle_window_interaction(
                     // Signal the 5-second GUI watchdog to leave this window open.
                     state.bed_timing_active.store(true, Ordering::Relaxed);
 
+                    // Bed-timing fires a tight 20ms burst (like TPM) starting
+                    // bed_pre_click_ms (~30ms) before COFL's purchaseAt, so a click
+                    // brackets the exact grace-period→buyable transition. Hypixel
+                    // throttles window clicks to ~5 per 500ms, so the burst is capped
+                    // to that budget (CLICK_BUDGET / CLICK_WINDOW) — 5 clicks across
+                    // ~100ms land right on the deadline without tripping the throttle.
                     const BED_TIMING_CLICK_INTERVAL_MS: u64 = 20;
                     const BED_WAIT_POLL_MS: u64 = 20;
                     const MAX_FAILED_CLICKS: usize = 5;
+                    const CLICK_BUDGET: usize = 5;
+                    const CLICK_WINDOW: tokio::time::Duration = tokio::time::Duration::from_millis(500);
                     let click_interval_ms = if state.bedtiming {
                         BED_TIMING_CLICK_INTERVAL_MS
                     } else {
@@ -3918,6 +3926,17 @@ async fn handle_window_interaction(
 
                     let bed_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(70);
                     let mut failed_clicks: usize = 0;
+                    // Poll the slot state frequently (a cheap local ECS read) so the
+                    // bed → gold_nugget transition is caught within DETECT_POLL_MS,
+                    // while bed pre-clicks stay rate-limited to click_interval_ms so we
+                    // never exceed Hypixel's packet limit. Faster detection = the buy
+                    // click lands sooner, without sending any extra packets.
+                    const DETECT_POLL_MS: u64 = 5;
+                    let mut last_bed_click: Option<tokio::time::Instant> = None;
+                    // Timestamps of recent bed pre-clicks, used to enforce the
+                    // ~5-clicks-per-500ms throttle budget.
+                    let mut recent_clicks: std::collections::VecDeque<tokio::time::Instant> =
+                        std::collections::VecDeque::with_capacity(CLICK_BUDGET);
                     loop {
                         if tokio::time::Instant::now() >= bed_deadline {
                             warn!("[AH] Bed timing: grace period did not end — giving up");
@@ -3960,9 +3979,26 @@ async fn handle_window_interaction(
                             return;
                         } else if current_kind.contains("bed") {
                             if state.bedtiming {
-                                debug!("[AH] Bed timing: grace period active, pre-clicking slot 31");
-                                if *state.last_window_id.read() == window_id {
-                                    send_raw_click(bot, window_id, 31);
+                                let now = tokio::time::Instant::now();
+                                // Drop click timestamps older than the throttle window.
+                                while recent_clicks
+                                    .front()
+                                    .is_some_and(|t| now.duration_since(*t) >= CLICK_WINDOW)
+                                {
+                                    recent_clicks.pop_front();
+                                }
+                                // Fire at the 20ms burst cadence, but only while we still
+                                // have throttle budget left in the current 500ms window.
+                                let cadence_ok = last_bed_click
+                                    .map_or(true, |t| now.duration_since(t) >= tokio::time::Duration::from_millis(click_interval_ms));
+                                let budget_ok = recent_clicks.len() < CLICK_BUDGET;
+                                if cadence_ok && budget_ok {
+                                    debug!("[AH] Bed timing: grace period active, pre-clicking slot 31");
+                                    if *state.last_window_id.read() == window_id {
+                                        send_raw_click(bot, window_id, 31);
+                                    }
+                                    last_bed_click = Some(now);
+                                    recent_clicks.push_back(now);
                                 }
                             } else {
                                 debug!("[AH] Bed timing: grace period active, waiting for gold_nugget");
@@ -3978,7 +4014,7 @@ async fn handle_window_interaction(
                                 return;
                             }
                         }
-                        tokio::time::sleep(tokio::time::Duration::from_millis(click_interval_ms)).await;
+                        tokio::time::sleep(tokio::time::Duration::from_millis(DETECT_POLL_MS)).await;
                     }
                 } else if slot_31_kind.contains("gold_nugget") {
                     // ---- Buyable auction (SAFE: gold_nugget confirmed) ----
