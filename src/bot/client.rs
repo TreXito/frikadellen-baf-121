@@ -3487,9 +3487,12 @@ async fn execute_command(
                         kind
                     };
 
-                    if !slot_31_kind.contains("gold") {
+                    if !slot_31_kind.contains("gold_nugget") {
                         // Not a buyable auction (bed, potato, feather, etc.).
-                        // Let the Event::Packet handler deal with non-buyable cases.
+                        // Only gold_nugget is the real, server-sent buy button, so
+                        // we send NEITHER the buy click NOR the skip pre-click unless
+                        // it is confirmed present. Let the Event::Packet handler deal
+                        // with non-buyable cases.
                         return;
                     }
 
