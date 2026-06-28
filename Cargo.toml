@@ -65,6 +65,10 @@ rustyline = "15.0"
 # Web server for control panel
 axum = { version = "0.8", features = ["ws"] }
 tower-http = { version = "0.6", features = ["cors"] }
+# Optional HTTPS for the control panel (user-provided cert, or self-signed fallback)
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+rcgen = "0.13"
+rustls = "0.23"
 
 # OG image generation for link embeds
 image = { version = "0.25", default-features = false, features = ["png"] }
