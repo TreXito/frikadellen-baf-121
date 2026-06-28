@@ -442,10 +442,24 @@ fn clear_session_time(path: &std::path::Path, ign: &str) {
     }
 }
 
+/// Print a colorful ANSI startup banner to the terminal.
+fn print_startup_banner() {
+    const C: &str = "\x1b[96m"; // aqua
+    const G: &str = "\x1b[93m"; // gold
+    const D: &str = "\x1b[90m"; // dim
+    const R: &str = "\x1b[0m";
+    println!("{C}╔════════════════════════════════════════════╗{R}");
+    println!("{C}║   {G}🐟 Frikadellen BAF{C}  —  Auction Flipper       ║{R}");
+    println!("{C}║   {D}Hypixel Skyblock bazaar + AH automation{C}   ║{R}");
+    println!("{C}╚════════════════════════════════════════════╝{R}");
+    println!("{D}   v{VERSION}{R}");
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging
     init_logger()?;
+    print_startup_banner();
     info!("Starting Frikadellen BAF v{}", VERSION);
 
     // Check for outdated version (non-loader users).
@@ -794,6 +808,28 @@ async fn main() -> Result<()> {
     } else {
         frikadellen_baf::backend::BackendHandle::disabled()
     };
+
+    // Occasional friendly "stay hydrated" reminder at a random 1min–2h interval.
+    {
+        let chat_tx_hydrate = chat_tx.clone();
+        tokio::spawn(async move {
+            use rand::Rng;
+            const MESSAGES: [&str; 4] = [
+                "§b💧 Stay hydrated — take a sip of water!",
+                "§b💧 Hydration check: go drink some water 🚰",
+                "§b💧 Quick reminder: water break! 💙",
+                "§b💧 Don't forget to drink water while you flip.",
+            ];
+            loop {
+                let secs = rand::rng().random_range(60..=7200);
+                tokio::time::sleep(tokio::time::Duration::from_secs(secs)).await;
+                let pick = MESSAGES[rand::rng().random_range(0..MESSAGES.len())];
+                let msg = format!("§f[§4BAF§f]: {}", pick);
+                print_mc_chat(&msg);
+                let _ = chat_tx_hydrate.send(msg);
+            }
+        });
+    }
 
     // Start web control panel server BEFORE bot connect so the chat GUI
     // is available to show login links during Microsoft/Coflnet auth.
@@ -1801,6 +1837,7 @@ async fn main() -> Result<()> {
     // Spawn WebSocket message handler
     let command_queue_clone = command_queue.clone();
     let config_clone = config.clone();
+    let config_loader_ws = config_loader.clone();
     let ws_client_clone = ws_client.clone();
     let bot_client_for_ws = bot_client.clone();
     let bazaar_flips_paused_ws = bazaar_flips_paused.clone();
@@ -2356,7 +2393,24 @@ async fn main() -> Result<()> {
                         if parts.len() > 1 {
                             let command = parts[1].to_string(); // Clone to own the data
                             let args = parts[2..].join(" ");
-                            
+
+                            // Region switch: COFL's `/cofl switchregion` asks the bot to
+                            // reconnect to a different modsocket via a `connect <url>`
+                            // command. This must be executed locally — persist the new
+                            // websocket URL and restart — NOT echoed back over the socket
+                            // (which silently failed and left the bot on an unreachable
+                            // regional host, e.g. an unresolvable us.sky.coflnet.com).
+                            if command == "connect" && !args.is_empty() {
+                                info!("[RegionSwitch] Reconnecting to: {}", args);
+                                let mut new_config = config_clone.clone();
+                                new_config.websocket_url = args;
+                                if let Err(e) = config_loader_ws.save(&new_config) {
+                                    error!("[RegionSwitch] Failed to save new websocket URL: {}", e);
+                                }
+                                restart_process();
+                                return;
+                            }
+
                             // Send to websocket with command as type (JSON-stringified data)
                             let ws = ws_client_clone.clone();
                             let inv_client = bot_client_for_ws.clone();
