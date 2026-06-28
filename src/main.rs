@@ -1148,15 +1148,6 @@ async fn main() -> Result<()> {
                     }
                 }
                 frikadellen_baf::bot::BotEvent::ItemPurchased { item_name, price, buy_speed_ms: event_buy_speed_ms } => {
-                    backend_handle_events.report_event(
-                        "buy",
-                        &ingame_name_for_events,
-                        Some(&item_name),
-                        None,
-                        Some(price as i64),
-                        None,
-                        false,
-                    );
                     // Send uploadScoreboard (with real data) and uploadTab to COFL
                     let ws = ws_client_for_events.clone();
                     let scoreboard_lines = bot_client_clone.get_scoreboard_lines();
@@ -1210,6 +1201,17 @@ async fn main() -> Result<()> {
                             }
                         }
                     };
+                    // Report the buy to the backend with the COFL-predicted (theoretical)
+                    // profit — what this flip is worth if it sells at target.
+                    backend_handle_events.report_event(
+                        "buy",
+                        &ingame_name_for_events,
+                        Some(&item_name),
+                        None,
+                        Some(price as i64),
+                        opt_profit,
+                        false,
+                    );
                     // Print colorful purchase announcement (item rarity shown via color code)
                     let profit_str = opt_profit.map(|p| {
                         let color = if p >= 0 { "§a" } else { "§c" };

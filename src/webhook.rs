@@ -30,7 +30,7 @@ fn notify_relay_url() -> Option<String> {
 }
 
 /// Central backend relay endpoint used when no override is configured.
-const DEFAULT_NOTIFY_RELAY_URL: &str = "https://baf.trexito.com/relay";
+const DEFAULT_NOTIFY_RELAY_URL: &str = "https://backend.auctionflipper.bz/relay";
 
 /// Return the HMAC-SHA256 signing secret.
 ///

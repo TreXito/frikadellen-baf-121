@@ -268,7 +268,7 @@ fn default_websocket_url() -> String {
 }
 
 fn default_backend_url() -> String {
-    "wss://baf.trexito.com/ws".to_string()
+    "wss://backend.auctionflipper.bz/ws".to_string()
 }
 
 fn default_web_gui_port() -> u16 {
