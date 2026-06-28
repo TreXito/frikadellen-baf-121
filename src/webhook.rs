@@ -23,7 +23,14 @@ fn notify_relay_url() -> Option<String> {
         .filter(|s| !s.is_empty())
         .map(|s| s.to_owned())
         .or_else(|| std::env::var("BAF_NOTIFY_RELAY_URL").ok().filter(|s| !s.is_empty()))
+        // Default every client to the central backend's relay endpoint. The
+        // request is still HMAC-signed with BAF_NOTIFY_SECRET, which the backend
+        // requires — so an unsigned build simply has its requests rejected.
+        .or_else(|| Some(DEFAULT_NOTIFY_RELAY_URL.to_string()))
 }
+
+/// Central backend relay endpoint used when no override is configured.
+const DEFAULT_NOTIFY_RELAY_URL: &str = "https://backend.auctionflipper.bz/relay";
 
 /// Return the HMAC-SHA256 signing secret.
 ///
