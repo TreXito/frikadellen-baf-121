@@ -1283,16 +1283,18 @@ async fn main() -> Result<()> {
                             }
                         }
                     };
-                    // Report the buy to the backend with the COFL-predicted (theoretical)
-                    // profit — what this flip is worth if it sells at target.
-                    backend_handle_events.report_event(
-                        "buy",
+                    // Report the buy to the backend with full purchase detail (the
+                    // all-flips channel renders it as a normal purchase webhook).
+                    backend_handle_events.report_purchase(
                         &ingame_name_for_events,
-                        Some(&item_name),
-                        None,
-                        Some(price as i64),
+                        &item_name,
+                        price as i64,
+                        opt_target.map(|t| t as i64),
                         opt_profit,
-                        false,
+                        event_buy_speed_ms,
+                        opt_finder.as_deref(),
+                        bot_client_clone.get_purse(),
+                        opt_auction_uuid.as_deref(),
                     );
                     // Print colorful purchase announcement (item rarity shown via color code)
                     let profit_str = opt_profit.map(|p| {
