@@ -4592,8 +4592,14 @@ async fn handle_window_interaction(
                     info!("[ClaimSold] Slot 31 not claimable, falling back to Claim name match at slot {}", i);
                     click_window_slot(bot, &state.last_window_id, window_id, i as i16).await;
                 } else {
-                    info!("[ClaimSold] Claim button not found, clicking slot 31 fallback");
-                    click_window_slot(bot, &state.last_window_id, window_id, 31).await;
+                    // No Claim button present (e.g. the auction was already claimed and
+                    // this view now offers a "Sell Again"/relist button). Do NOT blindly
+                    // click slot 31 — in that state slot 31 can open "Create BIN Auction"
+                    // and relist the item. Close and go idle instead.
+                    warn!("[ClaimSold] No Claim button in auction view — closing (avoiding accidental relist)");
+                    send_raw_close(bot, window_id, &state.handlers);
+                    state.auction_slot_blocked.store(false, Ordering::Relaxed);
+                    *state.bot_state.write() = BotState::Idle;
                 }
                 // Spawn a short watchdog: if Hypixel doesn't re-open Manage Auctions within
                 // 1.5 s, transition to Idle so the command queue can proceed.
