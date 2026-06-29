@@ -131,8 +131,14 @@ pub struct BackendDeps {
     /// Extra Discord ids allowed to control this bot.
     pub allowed_ids: Vec<String>,
     pub macro_paused: Arc<AtomicBool>,
+    /// Toggles for AH / Bazaar flipping (shared with the bot loops + web panel),
+    /// so the backend can offer the same enable/disable controls the web GUI does.
+    pub enable_ah_flips: Arc<AtomicBool>,
+    pub enable_bazaar_flips: Arc<AtomicBool>,
     pub command_queue: CommandQueue,
     pub bot_client: BotClient,
+    /// Tracks live bazaar orders for the get_bazaar_orders / cancel controls.
+    pub bazaar_tracker: Arc<crate::bazaar_tracker::BazaarOrderTracker>,
     pub profit_tracker: Arc<ProfitTracker>,
     /// Persists config changes (e.g. discord_id written on /link).
     pub config_loader: Arc<crate::config::ConfigLoader>,
@@ -299,6 +305,33 @@ fn execute_query(action: &str, deps: &BackendDeps) -> Option<Value> {
                 .unwrap_or(Value::Null);
             Some(json!({ "auctions": auctions }))
         }
+        // Live bazaar orders (same data the web panel's Bazaar Orders tab shows).
+        "get_bazaar_orders" => {
+            let orders = serde_json::to_value(deps.bazaar_tracker.get_orders())
+                .unwrap_or(Value::Array(vec![]));
+            Some(json!({ "orders": orders }))
+        }
+        // Command-queue snapshot (web panel "Queue" tab).
+        "get_queue" => {
+            let queue = serde_json::to_value(deps.command_queue.queue_snapshot())
+                .unwrap_or(Value::Array(vec![]));
+            Some(json!({ "queue": queue }))
+        }
+        // Structured status for the GUI (richer than the text `status` command).
+        "get_status" => {
+            let (ah, bz) = deps.profit_tracker.totals();
+            Some(json!({
+                "paused": deps.macro_paused.load(Ordering::Relaxed),
+                "ahFlips": deps.enable_ah_flips.load(Ordering::Relaxed),
+                "bazaarFlips": deps.enable_bazaar_flips.load(Ordering::Relaxed),
+                "purse": deps.bot_client.get_purse(),
+                "freeSlots": deps.bot_client.empty_slot_count(),
+                "listings": deps.bot_client.active_auction_count(),
+                "bazaarOrders": deps.bazaar_tracker.order_count(),
+                "profitAh": ah,
+                "profitBz": bz,
+            }))
+        }
         // Operator log download: returns the tail of this instance's live log so
         // the central backend GUI can offer a per-bot log download.
         "get_logs" => Some(json!({ "logs": read_log_tail() })),
@@ -425,6 +458,72 @@ fn execute_command(action: &str, args: Option<&Value>, deps: &BackendDeps) -> (b
                 false,
             );
             (true, "queued bazaar order collection".to_string())
+        }
+        // Same as claim_bz_orders on the web panel: read + claim filled orders.
+        "claim_bz_orders" => {
+            deps.command_queue.enqueue(
+                CommandType::ManageOrders { cancel_open: false, target_item: None },
+                CommandPriority::High,
+                false,
+            );
+            (true, "queued bazaar order claim".to_string())
+        }
+        // Instasell the inventory on bazaar (web "Sell inventory on bazaar").
+        "sell_inventory_bz" => {
+            deps.command_queue
+                .enqueue(CommandType::SellInventoryBz, CommandPriority::High, false);
+            (true, "queued bazaar inventory sell".to_string())
+        }
+        "cancel_bz_order" => {
+            let Some(item_name) = args.and_then(|a| a.get("item_name")).and_then(|v| v.as_str()) else {
+                return (false, "missing item_name".to_string());
+            };
+            let is_buy_order = args
+                .and_then(|a| a.get("is_buy_order"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            // Mirror the web handler: reflect intent in the tracker immediately,
+            // then queue a targeted ManageOrders cancel.
+            deps.bazaar_tracker.mark_cancelling(item_name, is_buy_order);
+            deps.bazaar_tracker.remove_order(item_name, is_buy_order);
+            deps.command_queue.enqueue(
+                CommandType::ManageOrders {
+                    cancel_open: true,
+                    target_item: Some((item_name.to_string(), is_buy_order)),
+                },
+                CommandPriority::High,
+                false,
+            );
+            (true, format!("queued bazaar cancel for {}", item_name))
+        }
+        "cancel_all_bz_orders" => {
+            let removed = deps.bazaar_tracker.clear_all_orders();
+            deps.command_queue.enqueue(
+                CommandType::ManageOrders { cancel_open: true, target_item: None },
+                CommandPriority::High,
+                false,
+            );
+            (true, format!("queued cancel of all bazaar orders ({} tracked)", removed))
+        }
+        "toggle_ah" => {
+            let enabled = args.and_then(|a| a.get("enabled")).and_then(|v| v.as_bool());
+            let enabled = match enabled {
+                Some(e) => e,
+                None => !deps.enable_ah_flips.load(Ordering::Relaxed),
+            };
+            deps.enable_ah_flips.store(enabled, Ordering::Relaxed);
+            let _ = deps.config_loader.update_property(|c| c.enable_ah_flips = enabled);
+            (true, format!("AH flips {}", if enabled { "enabled" } else { "disabled" }))
+        }
+        "toggle_bazaar" => {
+            let enabled = args.and_then(|a| a.get("enabled")).and_then(|v| v.as_bool());
+            let enabled = match enabled {
+                Some(e) => e,
+                None => !deps.enable_bazaar_flips.load(Ordering::Relaxed),
+            };
+            deps.enable_bazaar_flips.store(enabled, Ordering::Relaxed);
+            let _ = deps.config_loader.update_property(|c| c.enable_bazaar_flips = enabled);
+            (true, format!("Bazaar flips {}", if enabled { "enabled" } else { "disabled" }))
         }
         "switch_account" => (false, "account switching not supported via backend yet".to_string()),
         // Operator kill switch: lets the central backend GUI shut a bot down
