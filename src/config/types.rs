@@ -178,26 +178,6 @@ pub struct Config {
     #[serde(default, with = "opt_string_as_empty")]
     pub discord_id: Option<String>,
 
-    // ── Discord OAuth (bring-your-own application) ──────────────
-    // Users register their own Discord application at
-    // https://discord.com/developers/applications and paste its credentials
-    // here.  The web panel uses these to build a standard OAuth2 authorize link
-    // ("Connect Discord").  NOTE: there is no hosted backend yet — the callback /
-    // token-exchange step is not implemented, so this currently only stores the
-    // application and generates the authorize URL.
-    /// OAuth2 Client ID of the user's own Discord application. Empty = disabled.
-    #[serde(default, with = "opt_string_as_empty")]
-    pub discord_client_id: Option<String>,
-
-    /// OAuth2 Client Secret of the user's own Discord application. Empty = none.
-    /// Stored for the future token-exchange backend; not used client-side.
-    #[serde(default, with = "opt_string_as_empty")]
-    pub discord_client_secret: Option<String>,
-
-    /// OAuth2 redirect URI registered on the user's Discord application
-    /// (e.g. `http://localhost:8080/api/discord/callback`). Empty = disabled.
-    #[serde(default, with = "opt_string_as_empty")]
-    pub discord_redirect_uri: Option<String>,
 
     /// Password to protect the web control panel. Leave empty to disable authentication.
     #[serde(default, with = "opt_string_as_empty")]
@@ -249,6 +229,11 @@ pub struct Config {
     /// Central backend gateway WebSocket URL. Defaults to the shared server.
     #[serde(default = "default_backend_url")]
     pub backend_url: String,
+
+    /// Extra Discord user IDs (comma-separated) allowed to control this bot from
+    /// Discord, in addition to `discord_id` (the owner). Leave empty for none.
+    #[serde(default, with = "opt_string_as_empty")]
+    pub backend_allowed_ids: Option<String>,
 
     // ── Humanization / Rest Breaks ──────────────────────────────
     /// Enable periodic "human-like" rest breaks where the macro disconnects
@@ -378,9 +363,6 @@ impl Default for Config {
             webhook_url: None,
             bazaar_webhook_url: None,
             discord_id: None,
-            discord_client_id: None,
-            discord_client_secret: None,
-            discord_redirect_uri: None,
             web_gui_password: None,
             web_https: false,
             web_tls_cert_path: None,
@@ -391,6 +373,7 @@ impl Default for Config {
             instance_id: None,
             backend_enabled: true,
             backend_url: default_backend_url(),
+            backend_allowed_ids: None,
             humanization_enabled: false,
             humanization_min_interval_minutes: default_humanization_min_interval_minutes(),
             humanization_max_interval_minutes: default_humanization_max_interval_minutes(),
@@ -426,6 +409,18 @@ impl Config {
     /// Returns the Discord user ID only if it is non-empty.
     pub fn active_discord_id(&self) -> Option<&str> {
         self.discord_id.as_deref().filter(|id| !id.is_empty())
+    }
+
+    /// Parse `backend_allowed_ids` (comma-separated) into a list of Discord IDs.
+    pub fn backend_allowed_ids_list(&self) -> Vec<String> {
+        match &self.backend_allowed_ids {
+            None => vec![],
+            Some(s) => s
+                .split(',')
+                .map(|id| id.trim().to_string())
+                .filter(|id| !id.is_empty())
+                .collect(),
+        }
     }
 
     /// Returns all ingame names parsed from the (comma-separated) `ingame_name` field.

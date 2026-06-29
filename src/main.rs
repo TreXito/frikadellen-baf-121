@@ -793,6 +793,10 @@ async fn main() -> Result<()> {
             let raw = uuid::Uuid::new_v4().simple().to_string();
             raw[..6].to_uppercase()
         };
+        // Already-owned (discord_id set in config) → no link needed; otherwise the
+        // terminal re-prints the code so it isn't lost in the startup scroll.
+        let already_linked = config.active_discord_id().is_some();
+        let linked = Arc::new(AtomicBool::new(already_linked));
         let handle = frikadellen_baf::backend::spawn(frikadellen_baf::backend::BackendDeps {
             url: config.backend_url.clone(),
             instance_id: config.instance_id.clone().unwrap_or_default(),
@@ -800,18 +804,44 @@ async fn main() -> Result<()> {
             ingame_names: ingame_names.clone(),
             version: env!("CARGO_PKG_VERSION").to_string(),
             link_code: link_code.clone(),
+            discord_id: config.active_discord_id().map(|s| s.to_string()),
+            allowed_ids: config.backend_allowed_ids_list(),
             macro_paused: macro_paused.clone(),
             command_queue: command_queue.clone(),
             bot_client: bot_client.clone(),
             profit_tracker: profit_tracker.clone(),
+            config_loader: config_loader.clone(),
+            linked: linked.clone(),
         });
-        let msg = format!(
-            "§f[§4BAF§f]: §bDiscord link code: §e{} §7— run §f/link {}§7 in Discord to control this bot",
-            link_code, link_code
-        );
-        print_mc_chat(&msg);
-        let _ = chat_tx.send(msg);
-        info!("[Backend] Discord link code: {}", link_code);
+        if !already_linked {
+            // Prominent boxed banner so the code stands out, then re-print it
+            // periodically until the bot is linked.
+            let chat_tx_link = chat_tx.clone();
+            tokio::spawn(async move {
+                let mut first = true;
+                loop {
+                    if linked.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let banner = format!(
+                        "§f[§4BAF§f]: §b╔══════════════════════════════════════╗\n\
+                         §f[§4BAF§f]: §b║  §eDISCORD LINK CODE: §6§l{:<8}§r§b       ║\n\
+                         §f[§4BAF§f]: §b║  §7Run §f/link {}§7 in Discord{}║\n\
+                         §f[§4BAF§f]: §b╚══════════════════════════════════════╝",
+                        link_code,
+                        link_code,
+                        " ".repeat(11usize.saturating_sub(link_code.len()))
+                    );
+                    print_mc_chat(&banner);
+                    let _ = chat_tx_link.send(banner);
+                    info!("[Backend] Discord link code: {} (run /link {} in Discord)", link_code, link_code);
+                    // Re-show sooner the first time (right after startup scroll), then every 2 min.
+                    let wait = if first { 20 } else { 120 };
+                    first = false;
+                    tokio::time::sleep(tokio::time::Duration::from_secs(wait)).await;
+                }
+            });
+        }
         handle
     } else {
         frikadellen_baf::backend::BackendHandle::disabled()
