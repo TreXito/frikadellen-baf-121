@@ -80,6 +80,42 @@ impl BackendHandle {
             "isBazaar": is_bazaar,
         }));
     }
+
+    /// Report a purchase (a flip) with the full detail the backend renders as a
+    /// purchase webhook in the all-flips channel.
+    #[allow(clippy::too_many_arguments)]
+    pub fn report_purchase(
+        &self,
+        ingame_name: &str,
+        item_name: &str,
+        price: i64,
+        target: Option<i64>,
+        profit: Option<i64>,
+        buy_speed_ms: Option<u64>,
+        finder: Option<&str>,
+        purse: Option<u64>,
+        auction_uuid: Option<&str>,
+    ) {
+        if self.tx.is_none() {
+            return;
+        }
+        self.send_raw(json!({
+            "type": "event",
+            "kind": "buy",
+            "ingameName": ingame_name,
+            "itemName": item_name,
+            "price": price,
+            "profit": profit,
+            "isBazaar": false,
+            "data": {
+                "target": target,
+                "buySpeedMs": buy_speed_ms,
+                "finder": finder,
+                "purse": purse,
+                "auctionUuid": auction_uuid,
+            },
+        }));
+    }
 }
 
 /// Everything the backend client needs to authenticate and execute commands.
