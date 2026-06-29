@@ -3,9 +3,25 @@ use crate::types::{BazaarFlipRecommendation, Flip};
 use anyhow::{Context, Result};
 use futures::{stream::SplitSink, StreamExt, SinkExt};
 use tokio::sync::{mpsc, Mutex};
-use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{
+    connect_async_tls_with_config, tungstenite::Message, Connector, MaybeTlsStream, WebSocketStream,
+};
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
+
+/// Build a TLS connector for the Coflnet modsocket that tolerates self-signed /
+/// untrusted certificates. Coflnet's regional servers (e.g. us-sky.coflnet.com)
+/// present self-signed certs that the system trust store rejects; this connector
+/// is used ONLY for the Coflnet websocket (which the bot already authenticates
+/// to), so the relaxed verification is scoped to that single endpoint. `ws://`
+/// (non-TLS) URLs ignore the connector entirely.
+fn cofl_tls_connector() -> Option<Connector> {
+    native_tls::TlsConnector::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .ok()
+        .map(Connector::NativeTls)
+}
 
 pub enum CoflEvent {
     AuctionFlip(Flip),
@@ -57,9 +73,10 @@ impl CoflWebSocket {
 
         info!("Connecting to Coflnet WebSocket: {}", url);
 
-        let (ws_stream, _) = connect_async(&full_url)
-            .await
-            .context("Failed to connect to WebSocket")?;
+        let (ws_stream, _) =
+            connect_async_tls_with_config(&full_url, None, false, cofl_tls_connector())
+                .await
+                .context("Failed to connect to WebSocket")?;
 
         info!("WebSocket connected successfully");
 
@@ -108,7 +125,7 @@ impl CoflWebSocket {
                 let mut backoff_secs = 5u64;
                 loop {
                     tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
-                    match connect_async(&full_url).await {
+                    match connect_async_tls_with_config(&full_url, None, false, cofl_tls_connector()).await {
                         Ok((new_stream, _)) => {
                             let (new_write, new_read) = new_stream.split();
                             *write_for_task.lock().await = new_write;

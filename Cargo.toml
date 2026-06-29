@@ -27,6 +27,7 @@ bevy_ecs = "0.18"
 # Async runtime
 tokio = { version = "1.40", features = ["full"] }
 tokio-tungstenite = { version = "0.24", features = ["native-tls"] }
+native-tls = "0.2"
 futures = "0.3"
 
 # Networking
