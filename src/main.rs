@@ -2452,9 +2452,22 @@ async fn main() -> Result<()> {
                             // (which silently failed and left the bot on an unreachable
                             // regional host, e.g. an unresolvable us.sky.coflnet.com).
                             if command == "connect" && !args.is_empty() {
-                                info!("[RegionSwitch] Reconnecting to: {}", args);
+                                // COFL sends a scheme-less host (e.g.
+                                // "us-sky.coflnet.com/modsocket"); normalise it to a
+                                // wss:// URL the bot can actually dial.
+                                let raw = args.trim();
+                                let new_url = if raw.starts_with("ws://") || raw.starts_with("wss://") {
+                                    raw.to_string()
+                                } else {
+                                    format!("wss://{}", raw)
+                                };
+                                info!("[RegionSwitch] /cofl connect → reconnecting to {}", new_url);
+                                let _ = chat_tx_ws.send(format!(
+                                    "§f[§4BAF§f]: §bSwitching server → §e{}§7 (restarting)…",
+                                    new_url
+                                ));
                                 let mut new_config = config_clone.clone();
-                                new_config.websocket_url = args;
+                                new_config.websocket_url = new_url;
                                 if let Err(e) = config_loader_ws.save(&new_config) {
                                     error!("[RegionSwitch] Failed to save new websocket URL: {}", e);
                                 }
@@ -3242,14 +3255,9 @@ async fn main() -> Result<()> {
                             info!("Command queue cleared");
                             continue;
                         }
-                        "ping" => {
-                            // Measure round-trip latency to Coflnet via a WebSocket ping.
-                            // The RTT is printed to chat when the pong arrives.
-                            if let Err(e) = ws_client_for_console.send_ping().await {
-                                error!("Failed to send ping to websocket: {}", e);
-                            }
-                            continue;
-                        }
+                        // `/cofl ping` is handled server-side by Coflnet (a ping-pong
+                        // round-trip measured over the modsocket); we forward it like
+                        // any other command rather than intercepting it.
                         // TODO: Add other local commands like forceClaim, connect, sellbz when implemented
                         _ => {
                             // Fall through to send to websocket
