@@ -255,9 +255,14 @@ impl CoflWebSocket {
                 // "/cofl connect <url>" or "/cofl ping <sid> <ticks>"), which is NOT
                 // valid JSON — parse_message_data would fail and silently drop it,
                 // breaking /cofl ping reflection and /cofl connect (region switch).
-                // Try the JSON path (for double-encoded payloads) but fall back to
-                // the raw string.
-                let command = parse_message_data::<String>(&msg.data)
+                // The execute payload is a command STRING that COFL JSON-encodes
+                // (e.g. data = "\"/tip x cnc\"" → after serde, msg.data = "/tip x cnc"
+                // WITH quotes). Decode exactly ONE JSON-string level to strip those
+                // quotes; fall back to the raw value when it isn't a quoted string.
+                // (Using parse_message_data here double-decodes, fails on the inner
+                // non-JSON command, and left the quotes on — so the bot typed
+                // `"/tip x cnc"` literally instead of running it.)
+                let command = serde_json::from_str::<String>(&msg.data)
                     .unwrap_or_else(|_| msg.data.clone());
                 if !command.trim().is_empty() {
                     let _ = tx.send(CoflEvent::Command(command));
