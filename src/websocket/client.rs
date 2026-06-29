@@ -15,6 +15,17 @@ use tracing::{debug, error, info, warn};
 /// is used ONLY for the Coflnet websocket (which the bot already authenticates
 /// to), so the relaxed verification is scoped to that single endpoint. `ws://`
 /// (non-TLS) URLs ignore the connector entirely.
+/// Force the secure `wss://` scheme on a Coflnet modsocket URL. Accepts a
+/// scheme-less host, a plaintext `ws://` URL, or an already-secure `wss://` URL
+/// and always returns a `wss://` URL.
+fn normalize_ws_url(url: &str) -> String {
+    let host = url
+        .strip_prefix("wss://")
+        .or_else(|| url.strip_prefix("ws://"))
+        .unwrap_or(url);
+    format!("wss://{}", host)
+}
+
 fn cofl_tls_connector() -> Option<Connector> {
     native_tls::TlsConnector::builder()
         .danger_accept_invalid_certs(true)
@@ -66,6 +77,10 @@ impl CoflWebSocket {
         version: String,
         session_id: String,
     ) -> Result<(Self, mpsc::UnboundedReceiver<CoflEvent>)> {
+        // Coflnet fully switched to TLS. Upgrade any plaintext `ws://` URL left in
+        // an older persisted config to `wss://` so the bot never tries (and fails)
+        // a plaintext connection to a regional server that only speaks TLS.
+        let url = normalize_ws_url(&url);
         let full_url = format!(
             "{}?player={}&version={}&SId={}",
             url, username, version, session_id

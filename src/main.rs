@@ -2454,15 +2454,18 @@ async fn main() -> Result<()> {
                             // (which silently failed and left the bot on an unreachable
                             // regional host, e.g. an unresolvable us.sky.coflnet.com).
                             if command == "connect" && !args.is_empty() {
-                                // COFL sends a scheme-less host (e.g.
-                                // "us-sky.coflnet.com/modsocket"); normalise it to a
-                                // wss:// URL the bot can actually dial.
+                                // COFL fully switched to TLS. It may hand us a
+                                // scheme-less host ("us-sky.coflnet.com/modsocket")
+                                // or, on older paths, a plaintext "ws://" URL. Force
+                                // the secure scheme either way so a region switch
+                                // never downgrades the bot to a plaintext socket the
+                                // regional server now refuses.
                                 let raw = args.trim();
-                                let new_url = if raw.starts_with("ws://") || raw.starts_with("wss://") {
-                                    raw.to_string()
-                                } else {
-                                    format!("wss://{}", raw)
-                                };
+                                let host = raw
+                                    .strip_prefix("wss://")
+                                    .or_else(|| raw.strip_prefix("ws://"))
+                                    .unwrap_or(raw);
+                                let new_url = format!("wss://{}", host);
                                 info!("[RegionSwitch] /cofl connect → reconnecting to {}", new_url);
                                 let _ = chat_tx_ws.send(format!(
                                     "§f[§4BAF§f]: §bSwitching server → §e{}§7 (restarting)…",
