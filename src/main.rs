@@ -812,6 +812,7 @@ async fn main() -> Result<()> {
             profit_tracker: profit_tracker.clone(),
             config_loader: config_loader.clone(),
             linked: linked.clone(),
+            anon: Arc::new(std::sync::Mutex::new(None)),
         });
         if !already_linked {
             // Prominent boxed banner so the code stands out, then re-print it

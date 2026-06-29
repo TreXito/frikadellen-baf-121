@@ -40,18 +40,30 @@ fn backend_token() -> Option<String> {
 #[derive(Clone)]
 pub struct BackendHandle {
     tx: Option<mpsc::UnboundedSender<String>>,
+    /// When set (via `/anonymous`), this random name replaces the real IGN in all
+    /// events reported to the backend.
+    anon: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 impl BackendHandle {
     /// A handle that drops everything (backend disabled).
     pub fn disabled() -> Self {
-        Self { tx: None }
+        Self { tx: None, anon: Arc::new(std::sync::Mutex::new(None)) }
     }
 
     fn send_raw(&self, value: Value) {
         if let Some(tx) = &self.tx {
             let _ = tx.send(value.to_string());
         }
+    }
+
+    /// The name to report — the anonymous alias when set, else the real IGN.
+    fn display_name(&self, ingame_name: &str) -> String {
+        self.anon
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .unwrap_or_else(|| ingame_name.to_string())
     }
 
     /// Report an owner-identified activity event for profit tracking.
@@ -72,7 +84,7 @@ impl BackendHandle {
         self.send_raw(json!({
             "type": "event",
             "kind": kind,
-            "ingameName": ingame_name,
+            "ingameName": self.display_name(ingame_name),
             "itemName": item_name,
             "amount": amount,
             "price": price,
@@ -102,7 +114,7 @@ impl BackendHandle {
         self.send_raw(json!({
             "type": "event",
             "kind": "buy",
-            "ingameName": ingame_name,
+            "ingameName": self.display_name(ingame_name),
             "itemName": item_name,
             "price": price,
             "profit": profit,
@@ -139,6 +151,8 @@ pub struct BackendDeps {
     /// Set once this instance is linked/owned, so the terminal stops re-printing
     /// the link code.
     pub linked: Arc<AtomicBool>,
+    /// Shared anonymous-alias state (set by `/anonymous`); shared with the handle.
+    pub anon: Arc<std::sync::Mutex<Option<String>>>,
 }
 
 /// Spawn the backend client task. Returns a [`BackendHandle`]; if the token is
@@ -150,9 +164,25 @@ pub fn spawn(deps: BackendDeps) -> BackendHandle {
     };
 
     let (tx, rx) = mpsc::unbounded_channel::<String>();
-    let handle = BackendHandle { tx: Some(tx.clone()) };
+    let handle = BackendHandle { tx: Some(tx.clone()), anon: deps.anon.clone() };
     tokio::spawn(run(deps, token, rx, tx));
     handle
+}
+
+/// Generate a random anonymous alias like "lazybug238".
+fn random_anon_name() -> String {
+    use rand::Rng;
+    const ADJ: &[&str] = &[
+        "lazy", "happy", "sneaky", "fuzzy", "grumpy", "silly", "brave", "calm", "witty", "shiny",
+        "spicy", "cozy", "jolly", "nifty", "zesty",
+    ];
+    const NOUN: &[&str] = &[
+        "bug", "fox", "cat", "owl", "wolf", "duck", "frog", "bee", "crab", "yak", "moth", "newt",
+    ];
+    let mut rng = rand::rng();
+    let a = ADJ[rng.random_range(0..ADJ.len())];
+    let n = NOUN[rng.random_range(0..NOUN.len())];
+    format!("{}{}{}", a, n, rng.random_range(100..=999))
 }
 
 async fn run(
@@ -288,6 +318,27 @@ fn execute_command(action: &str, args: Option<&Value>, deps: &BackendDeps) -> (b
                     (true, "linked; discord_id saved to config".to_string())
                 }
                 Err(e) => (false, format!("failed to load config: {}", e)),
+            }
+        }
+        "anonymize" => {
+            let enabled = args
+                .and_then(|a| a.get("enabled"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(true);
+            let mut guard = match deps.anon.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            if enabled {
+                let alias = random_anon_name();
+                info!("[Backend] Anonymous mode ON → reporting as {}", alias);
+                let msg = format!("anonymous: now reporting as {}", alias);
+                *guard = Some(alias);
+                (true, msg)
+            } else {
+                *guard = None;
+                info!("[Backend] Anonymous mode OFF → reporting real IGN");
+                (true, "anonymous off: reporting real IGN".to_string())
             }
         }
         "pause" => {
