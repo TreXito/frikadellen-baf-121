@@ -485,23 +485,6 @@ a{color:var(--accent2);text-decoration:none}
         <div class="cfg-row"><label class="cfg-label" for="cfg-discord_id">Discord User ID (for pings)</label><input class="cfg-input" id="cfg-discord_id" placeholder="e.g. 123456789012345678"></div>
     </div>
 
-    <!-- Category: Discord Integration (bring-your-own OAuth application) -->
-    <div class="card" style="margin-bottom:16px">
-        <h2>🤝 Discord Integration</h2>
-        <p style="color:var(--text-dim);font-size:.8rem;margin:0 0 10px">
-            Use your <strong>own</strong> Discord application for OAuth. Create one at
-            <a href="https://discord.com/developers/applications" target="_blank" rel="noopener noreferrer">discord.com/developers</a>,
-            add the redirect URI below to its OAuth2 settings, then save and click <em>Connect Discord</em>.
-            <br><span style="opacity:.8">Note: login completion (token exchange) needs a backend that isn't implemented yet — for now this registers your app and opens the authorize page.</span>
-        </p>
-        <div class="cfg-row"><label class="cfg-label" for="cfg-discord_client_id">Client ID</label><input class="cfg-input" id="cfg-discord_client_id" placeholder="Application Client ID"></div>
-        <div class="cfg-row"><label class="cfg-label" for="cfg-discord_client_secret">Client Secret</label><input class="cfg-input" id="cfg-discord_client_secret" type="password" placeholder="Application Client Secret (stored for future use)"></div>
-        <div class="cfg-row"><label class="cfg-label" for="cfg-discord_redirect_uri">Redirect URI</label><input class="cfg-input" id="cfg-discord_redirect_uri" placeholder="http://localhost:8080/api/discord/callback"></div>
-        <div class="cfg-row" style="justify-content:flex-end">
-            <button class="btn btn-sm" type="button" onclick="connectDiscord()">🤝 Connect Discord</button>
-        </div>
-    </div>
-
     <!-- Category: Proxy -->
     <div class="card" style="margin-bottom:16px">
         <h2>🌐 Proxy</h2>
@@ -803,27 +786,6 @@ async function toggleConnection() {
 async function killSession() {
     if (!confirm('Kill the bot session? The process will terminate immediately.')) return;
     await fetch('/api/kill_session', {method:'POST'});
-}
-
-/**
- * Build the Discord OAuth2 authorize URL from the user's own application
- * credentials (entered in the Discord Integration config card) and open it.
- * No backend: this only starts the authorize flow with the user's app; the
- * callback/token-exchange step is not implemented yet.
- */
-function connectDiscord() {
-    const clientId = ($('cfg-discord_client_id').value || '').trim();
-    const redirectUri = ($('cfg-discord_redirect_uri').value || '').trim();
-    if (!clientId || !redirectUri) {
-        alert('Enter your Discord application Client ID and Redirect URI first, then Save Config.');
-        return;
-    }
-    const url = 'https://discord.com/oauth2/authorize'
-        + '?client_id=' + encodeURIComponent(clientId)
-        + '&redirect_uri=' + encodeURIComponent(redirectUri)
-        + '&response_type=code'
-        + '&scope=' + encodeURIComponent('identify');
-    window.open(url, '_blank', 'noopener,noreferrer');
 }
 
 async function fetchInventory() {
@@ -1531,9 +1493,6 @@ const CONFIG_FIELDS = {
     webhook_url: {type:'string', default:''},
     bazaar_webhook_url: {type:'string', default:''},
     discord_id: {type:'string', default:''},
-    discord_client_id: {type:'string', default:''},
-    discord_client_secret: {type:'string', default:''},
-    discord_redirect_uri: {type:'string', default:''},
     web_gui_password: {type:'string', default:''},
     hypixel_api_key: {type:'string', default:''},
     proxy_address: {type:'string', default:''},

@@ -90,10 +90,19 @@ pub struct BackendDeps {
     pub ingame_names: Vec<String>,
     pub version: String,
     pub link_code: String,
+    /// The configured Discord owner id (auto-ownership; TPM-style).
+    pub discord_id: Option<String>,
+    /// Extra Discord ids allowed to control this bot.
+    pub allowed_ids: Vec<String>,
     pub macro_paused: Arc<AtomicBool>,
     pub command_queue: CommandQueue,
     pub bot_client: BotClient,
     pub profit_tracker: Arc<ProfitTracker>,
+    /// Persists config changes (e.g. discord_id written on /link).
+    pub config_loader: Arc<crate::config::ConfigLoader>,
+    /// Set once this instance is linked/owned, so the terminal stops re-printing
+    /// the link code.
+    pub linked: Arc<AtomicBool>,
 }
 
 /// Spawn the backend client task. Returns a [`BackendHandle`]; if the token is
@@ -132,6 +141,8 @@ async fn run(
                     "coflOwnerId": deps.cofl_owner_id,
                     "ingameNames": deps.ingame_names,
                     "version": deps.version,
+                    "discordId": deps.discord_id,
+                    "allowedIds": deps.allowed_ids,
                     "linkCode": deps.link_code,
                 })
                 .to_string();
@@ -195,6 +206,9 @@ fn handle_inbound(text: &str, deps: &BackendDeps, tx: &mpsc::UnboundedSender<Str
     match value.get("type").and_then(|v| v.as_str()) {
         Some("welcome") => {
             let owner = value.get("ownerDiscordId").and_then(|v| v.as_str());
+            if owner.is_some() {
+                deps.linked.store(true, Ordering::Relaxed);
+            }
             info!("[Backend] authenticated (owner: {})", owner.unwrap_or("unlinked"));
         }
         Some("ping") => {
@@ -222,6 +236,24 @@ fn handle_inbound(text: &str, deps: &BackendDeps, tx: &mpsc::UnboundedSender<Str
 
 fn execute_command(action: &str, args: Option<&Value>, deps: &BackendDeps) -> (bool, String) {
     match action {
+        "set_discord_id" => {
+            let Some(id) = args.and_then(|a| a.get("discord_id")).and_then(|v| v.as_str()) else {
+                return (false, "missing discord_id".to_string());
+            };
+            // Persist the owner's Discord id so ownership survives restarts.
+            match deps.config_loader.load() {
+                Ok(mut cfg) => {
+                    cfg.discord_id = Some(id.to_string());
+                    if let Err(e) = deps.config_loader.save(&cfg) {
+                        return (false, format!("failed to save config: {}", e));
+                    }
+                    deps.linked.store(true, Ordering::Relaxed);
+                    info!("[Backend] Linked — saved discord_id {} to config", id);
+                    (true, "linked; discord_id saved to config".to_string())
+                }
+                Err(e) => (false, format!("failed to load config: {}", e)),
+            }
+        }
         "pause" => {
             deps.macro_paused.store(true, Ordering::Relaxed);
             (true, "macro paused".to_string())
