@@ -4099,26 +4099,35 @@ async fn handle_window_interaction(
                         t0.elapsed().as_secs_f64() * 1000.0
                     );
                 }
-                // The Confirm Purchase window is open right now (the server just
-                // sent it), so clicking slot 11 is a valid action on a window that
-                // actually exists — fire it immediately. We no longer suppress this
-                // when a `skip` pre-click was sent: if that pre-click already
-                // confirmed, this redundant click hits an already-closing window and
-                // is harmlessly ignored; if it did NOT land in time, this fires the
-                // confirm at window-open instead of after a ~50ms retry interval.
-                state.skip_click_sent.store(false, Ordering::Relaxed);
-                send_raw_click(bot, window_id, 11);
+                // CRITICAL: every confirm click reserves the coins in escrow, so a
+                // duplicate click on an already-bought/expired auction churns escrow
+                // (put → AUCTION_EXPIRED → refund). To avoid that:
+                //  * If a `skip` pre-click was already sent for this window, DON'T
+                //    click reactively now — that would race the pre-click and double
+                //    up. Instead wait one retry interval (~one RTT) so the pre-click's
+                //    outcome settles; the bounded retry below only fires if the window
+                //    is *still* open (i.e. the pre-click missed).
+                //  * Cap the retries so a contested/stuck Confirm Purchase window
+                //    can't churn escrow indefinitely.
+                let skip_was_sent = state.skip_click_sent.swap(false, Ordering::Relaxed);
+                if !skip_was_sent {
+                    send_raw_click(bot, window_id, 11);
+                }
 
                 tokio::time::sleep(tokio::time::Duration::from_millis(CONFIRM_PURCHASE_RETRY_MS)).await;
 
-                // Safety retry loop: if the window is still open (pre-click failed,
-                // click was lost, or the server needs more time), keep retrying.
-                while state.handlers.current_window_title()
-                    .as_deref()
-                    .map(|t| t.contains("Confirm Purchase"))
-                    .unwrap_or(false)
+                // Bounded safety retry: only while the window is still the Confirm
+                // Purchase window (a successful or expired purchase closes it).
+                const MAX_CONFIRM_RETRIES: u32 = 3;
+                let mut retries = 0u32;
+                while retries < MAX_CONFIRM_RETRIES
+                    && state.handlers.current_window_title()
+                        .as_deref()
+                        .map(|t| t.contains("Confirm Purchase"))
+                        .unwrap_or(false)
                 {
                     send_raw_click(bot, window_id, 11);
+                    retries += 1;
                     tokio::time::sleep(tokio::time::Duration::from_millis(CONFIRM_PURCHASE_RETRY_MS)).await;
                 }
 
