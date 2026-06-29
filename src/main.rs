@@ -1035,8 +1035,11 @@ async fn main() -> Result<()> {
                     // "According to our data <ign> made <amount> in the last <days> days across <N> auctions"
                     let clean = frikadellen_baf::utils::remove_minecraft_colors(&msg);
                     if let Some(profit) = parse_cofl_profit_response(&clean) {
-                        profit_tracker_events.set_ah_total(profit);
-                        tracing::info!("[CoflProfit] Updated AH total from Coflnet: {} coins", profit);
+                        // `/cofl profit` is the REALIZED total. The panel now shows
+                        // THEORETICAL AH profit (accumulated at purchase), so we log
+                        // the realized figure for reference but do not overwrite the
+                        // theoretical total with it.
+                        tracing::info!("[CoflProfit] Realized AH total from Coflnet (not shown on panel): {} coins", profit);
                     }
 
                     // Parse `/cofl bz h` response for authoritative BZ session profit.
@@ -1296,6 +1299,14 @@ async fn main() -> Result<()> {
                         bot_client_clone.get_purse(),
                         opt_auction_uuid.as_deref(),
                     );
+                    // Accumulate THEORETICAL AH profit at purchase time (target −
+                    // price − AH fee), i.e. what you'd net if it sold at the COFL
+                    // target. The panel/terminal/webhook show this instead of the
+                    // realized `/cofl profit` figure, matching the backend's
+                    // theoretical profit definition.
+                    if let Some(p) = opt_profit {
+                        profit_tracker_events.record_ah_profit(p);
+                    }
                     // Print colorful purchase announcement (item rarity shown via color code)
                     let profit_str = opt_profit.map(|p| {
                         let color = if p >= 0 { "§a" } else { "§c" };
@@ -1404,10 +1415,9 @@ async fn main() -> Result<()> {
                             }
                         }
                     };
-                    // Record realized AH profit
-                    if let Some(profit) = opt_profit {
-                        profit_tracker_events.record_ah_profit(profit);
-                    }
+                    // NOTE: AH profit is now accumulated as THEORETICAL at purchase
+                    // time (see ItemPurchased), so we no longer add realized profit
+                    // here — doing so would double-count each flip.
                     backend_handle_events.report_event(
                         "sell",
                         &ingame_name_for_events,
