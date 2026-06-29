@@ -299,7 +299,27 @@ fn execute_query(action: &str, deps: &BackendDeps) -> Option<Value> {
                 .unwrap_or(Value::Null);
             Some(json!({ "auctions": auctions }))
         }
+        // Operator log download: returns the tail of this instance's live log so
+        // the central backend GUI can offer a per-bot log download.
+        "get_logs" => Some(json!({ "logs": read_log_tail() })),
         _ => None,
+    }
+}
+
+/// Maximum number of bytes of the live log returned to the operator. Bounds the
+/// websocket frame size for very long-running sessions.
+const MAX_LOG_BYTES: usize = 400_000;
+
+/// Read the tail (last [`MAX_LOG_BYTES`]) of the active `latest.log`.
+fn read_log_tail() -> String {
+    let path = crate::logging::get_logs_dir().join("latest.log");
+    match std::fs::read(&path) {
+        Ok(bytes) => {
+            let start = bytes.len().saturating_sub(MAX_LOG_BYTES);
+            // Slice on a char boundary fallback via lossy conversion.
+            String::from_utf8_lossy(&bytes[start..]).into_owned()
+        }
+        Err(e) => format!("(could not read log file: {})", e),
     }
 }
 
@@ -407,6 +427,16 @@ fn execute_command(action: &str, args: Option<&Value>, deps: &BackendDeps) -> (b
             (true, "queued bazaar order collection".to_string())
         }
         "switch_account" => (false, "account switching not supported via backend yet".to_string()),
+        // Operator kill switch: lets the central backend GUI shut a bot down
+        // remotely. Exit shortly after so the command_result is flushed first.
+        "shutdown" => {
+            warn!("[Backend] shutdown requested by operator — exiting");
+            std::thread::spawn(|| {
+                std::thread::sleep(Duration::from_millis(500));
+                std::process::exit(0);
+            });
+            (true, "shutting down".to_string())
+        }
         other => (false, format!("unknown action: {}", other)),
     }
 }
