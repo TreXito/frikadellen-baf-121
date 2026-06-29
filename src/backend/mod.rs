@@ -260,13 +260,46 @@ fn handle_inbound(text: &str, deps: &BackendDeps, tx: &mpsc::UnboundedSender<Str
             let id = value.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
             let action = value.get("action").and_then(|v| v.as_str()).unwrap_or("");
             let args = value.get("args");
-            let (ok, message) = execute_command(action, args, deps);
-            let _ = tx.send(
-                json!({ "type": "command_result", "id": id, "ok": ok, "message": message })
-                    .to_string(),
-            );
+            // Data-returning queries (inventory/auctions) carry a `data` payload;
+            // everything else is a control command with an ok/message result.
+            if let Some(data) = execute_query(action, deps) {
+                let _ = tx.send(
+                    json!({ "type": "command_result", "id": id, "ok": true, "data": data })
+                        .to_string(),
+                );
+            } else {
+                let (ok, message) = execute_command(action, args, deps);
+                let _ = tx.send(
+                    json!({ "type": "command_result", "id": id, "ok": ok, "message": message })
+                        .to_string(),
+                );
+            }
         }
         other => debug!("[Backend] unhandled message type: {:?}", other),
+    }
+}
+
+/// Data-returning queries. Returns `Some(data)` when the action is a query (so
+/// the caller replies with a `data` payload), or `None` for control commands.
+fn execute_query(action: &str, deps: &BackendDeps) -> Option<Value> {
+    match action {
+        "get_inventory" => {
+            let inv = deps
+                .bot_client
+                .get_cached_inventory_json()
+                .and_then(|j| serde_json::from_str::<Value>(&j).ok())
+                .unwrap_or_else(|| Value::Array(vec![]));
+            Some(json!({ "inventory": inv }))
+        }
+        "get_auctions" => {
+            let auctions = deps
+                .bot_client
+                .get_cached_my_auctions_json()
+                .and_then(|j| serde_json::from_str::<Value>(&j).ok())
+                .unwrap_or(Value::Null);
+            Some(json!({ "auctions": auctions }))
+        }
+        _ => None,
     }
 }
 
@@ -326,12 +359,15 @@ fn execute_command(action: &str, args: Option<&Value>, deps: &BackendDeps) -> (b
             if starting_bid == 0 {
                 return (false, "missing or zero starting_bid".to_string());
             }
+            // Optional exact inventory slot (from /list picking an item). When
+            // present the lister targets that slot instead of searching by name.
+            let item_slot = args.and_then(|a| a.get("item_slot")).and_then(|v| v.as_u64());
             deps.command_queue.enqueue(
                 CommandType::SellToAuction {
                     item_name: item_name.to_string(),
                     starting_bid,
                     duration_hours: 24,
-                    item_slot: None,
+                    item_slot,
                     item_id: None,
                 },
                 CommandPriority::Normal,
