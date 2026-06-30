@@ -54,6 +54,11 @@ pub enum CoflEvent {
     /// COFL "countdown" message – AH flips arriving in ~10 seconds.
     /// Used to pause bazaar flips while the AH flip window is active.
     Countdown,
+    /// COFL "collectAuctions" message – the server has detected sold/expired
+    /// auctions to collect, so the bot should run a claim-sold cycle now instead
+    /// of waiting. Makes claiming proactive (frees AH slots → can list → frees
+    /// inventory → can keep buying).
+    CollectAuctions,
     /// Parsed license list from `/cofl licenses list` response.
     /// Fields: `(entries, page_number)` where entries are `(ign, 1-based page-local index, tier)` tuples
     /// and `page_number` is the 1-based page that was returned.
@@ -338,6 +343,12 @@ impl CoflWebSocket {
                 // Matches TypeScript: used by bazaarFlipPauser to pause bazaar flips.
                 debug!("Received countdown");
                 let _ = tx.send(CoflEvent::Countdown);
+            }
+            "collectAuctions" => {
+                // COFL tells the bot it has sold/expired auctions to collect.
+                // Trigger a claim-sold cycle proactively.
+                debug!("Received collectAuctions");
+                let _ = tx.send(CoflEvent::CollectAuctions);
             }
             _ => {
                 // Log any unknown message types for debugging

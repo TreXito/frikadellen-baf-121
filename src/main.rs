@@ -618,6 +618,10 @@ async fn main() -> Result<()> {
     // Bazaar-flip pause flag (matches TypeScript bazaarFlipPauser.ts).
     // Set to true for 20 seconds when a `countdown` message arrives (AH flips incoming).
     let bazaar_flips_paused = Arc::new(AtomicBool::new(false));
+    // Unix-millis deadline until which the bazaar stays paused. Repeated rapid
+    // `countdown` messages just extend this deadline instead of each spawning a
+    // resume task (which spammed "Bazaar flips resumed" and churned pause state).
+    let bazaar_pause_until = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
     // Master macro pause — web panel can set this to pause all command processing.
     let macro_paused = Arc::new(AtomicBool::new(false));
@@ -1889,6 +1893,7 @@ async fn main() -> Result<()> {
     let ws_client_clone = ws_client.clone();
     let bot_client_for_ws = bot_client.clone();
     let bazaar_flips_paused_ws = bazaar_flips_paused.clone();
+    let bazaar_pause_until_ws = bazaar_pause_until.clone();
     let flip_tracker_ws = flip_tracker.clone();
     let cofl_connection_id_ws = cofl_connection_id.clone();
     let cofl_premium_ws = cofl_premium.clone();
@@ -2750,16 +2755,21 @@ async fn main() -> Result<()> {
                     // when both AH flips and bazaar flips are enabled.
                     // Relaxed ordering is fine here — these are simple toggle flags where
                     // eventual visibility across threads is sufficient.
+                    // Only relevant when BOTH AH and bazaar flips are enabled — if
+                    // bazaar is off there's nothing to pause, so don't print/churn.
                     if enable_bazaar_flips_ws.load(Ordering::Relaxed) && enable_ah_flips_ws.load(Ordering::Relaxed) {
-                        let baf_msg = "§f[§4BAF§f]: §c⚡ AH Flips incoming in ~10s — closing windows, pausing bazaar".to_string();
-                        print_mc_chat(&baf_msg);
-                        let _ = chat_tx_ws.send(baf_msg);
-                        let flag = bazaar_flips_paused_ws.clone();
-                        flag.store(true, Ordering::Relaxed);
+                        // Always (re)extend the pause window to now+20s. Rapid repeated
+                        // countdowns just push the deadline out.
+                        let now_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64;
+                        let deadline = now_ms + 20_000;
+                        bazaar_pause_until_ws.fetch_max(deadline, Ordering::Relaxed);
 
-                        // Close any open window so the bot is free for AH flips.
-                        // Also force state to Idle if it's in an interruptible state
-                        // so the AH flip can be processed immediately.
+                        let flag = bazaar_flips_paused_ws.clone();
+                        // Close any open window so the bot is free for AH flips, and
+                        // drop out of interruptible states immediately.
                         bot_client_for_ws.close_current_window();
                         let current_state = bot_client_for_ws.state();
                         if current_state != frikadellen_baf::types::BotState::Purchasing
@@ -2768,29 +2778,57 @@ async fn main() -> Result<()> {
                             bot_client_for_ws.set_state(frikadellen_baf::types::BotState::Idle);
                         }
 
-                        let chat_tx_resume = chat_tx_ws.clone();
-                        let command_queue_resume = command_queue_clone.clone();
-                        tokio::spawn(async move {
-                            sleep(Duration::from_secs(20)).await;
-                            flag.store(false, Ordering::Relaxed);
-                            // Notify user that bazaar flips are resuming (matching TypeScript bazaarFlipPauser.ts)
-                            let baf_msg = "§f[§4BAF§f]: §aBazaar flips resumed".to_string();
+                        // Only the unpaused→paused transition prints and spawns the
+                        // single resume watcher; later countdowns are silent no-ops
+                        // that merely extended the deadline above.
+                        if flag.compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+                            let baf_msg = "§f[§4BAF§f]: §c⚡ AH Flips incoming — pausing bazaar".to_string();
                             print_mc_chat(&baf_msg);
-                            let _ = chat_tx_resume.send(baf_msg);
-                            info!("[BazaarFlips] Bazaar flips resumed after AH flip window");
-                            // Queue a ManageOrders run to handle any deferred order
-                            // management (filled orders that need collecting, etc.).
-                            if !command_queue_resume.has_manage_orders() {
-                                info!("[BazaarFlips] Queuing deferred ManageOrders after AH flip window");
-                                command_queue_resume.enqueue(
-                                    CommandType::ManageOrders { cancel_open: false, target_item: None },
-                                    CommandPriority::Normal,
-                                    false,
-                                );
-                            }
-                            // COFL now automatically sends bazaar flip recommendations —
-                            // no need to request getbazaarflips here.
-                        });
+                            let _ = chat_tx_ws.send(baf_msg);
+                            let chat_tx_resume = chat_tx_ws.clone();
+                            let command_queue_resume = command_queue_clone.clone();
+                            let pause_until = bazaar_pause_until_ws.clone();
+                            tokio::spawn(async move {
+                                // Sleep until the (possibly-extended) deadline passes.
+                                loop {
+                                    let now = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_millis() as u64;
+                                    let until = pause_until.load(Ordering::Relaxed);
+                                    if now >= until {
+                                        break;
+                                    }
+                                    sleep(Duration::from_millis((until - now).min(20_000))).await;
+                                }
+                                flag.store(false, Ordering::Relaxed);
+                                let baf_msg = "§f[§4BAF§f]: §aBazaar flips resumed".to_string();
+                                print_mc_chat(&baf_msg);
+                                let _ = chat_tx_resume.send(baf_msg);
+                                info!("[BazaarFlips] Bazaar flips resumed after AH flip window");
+                                if !command_queue_resume.has_manage_orders() {
+                                    info!("[BazaarFlips] Queuing deferred ManageOrders after AH flip window");
+                                    command_queue_resume.enqueue(
+                                        CommandType::ManageOrders { cancel_open: false, target_item: None },
+                                        CommandPriority::Normal,
+                                        false,
+                                    );
+                                }
+                            });
+                        }
+                    }
+                }
+                CoflEvent::CollectAuctions => {
+                    // COFL detected sold/expired auctions to collect. Claim them
+                    // proactively so AH slots free up (→ can list → frees inventory
+                    // → keeps buying) instead of waiting for the periodic sweep.
+                    if !command_queue_clone.has_claim_sold() {
+                        info!("[CollectAuctions] COFL signalled sold auctions — queuing ClaimSold");
+                        command_queue_clone.enqueue(
+                            CommandType::ClaimSoldItem,
+                            CommandPriority::High,
+                            true,
+                        );
                     }
                 }
                 CoflEvent::LicenseList { entries, page: _ } => {
