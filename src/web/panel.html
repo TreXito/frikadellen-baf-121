@@ -1,20 +1,26 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="en" data-theme="aurum">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <!-- OG_META_TAGS -->
 <title>Frikadellen BAF — Control Panel</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 <style>
 *,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
-:root,[data-theme="midnight"]{--bg:#0b0d17;--bg-card:#111425;--surface:#171a2e;--border:#1e2240;--text:#c9cde8;--text-dim:#7b82a8;--heading:#eaedf9;--accent:#6c5ce7;--accent2:#a29bfe;--success:#00cec9;--danger:#ff5f56;--warn:#ffbd2e;--radius:10px;--lore-bg:#1a0e2e;--lore-border:#2d1b4e}
-[data-theme="obsidian"]{--bg:#0e0e0e;--bg-card:#181818;--surface:#222;--border:#333;--text:#d4d4d4;--text-dim:#888;--heading:#f0f0f0;--accent:#e74c3c;--accent2:#ff6b6b;--success:#2ecc71;--danger:#e74c3c;--warn:#f39c12;--lore-bg:#1a1a1a;--lore-border:#333}
-[data-theme="emerald"]{--bg:#0a1612;--bg-card:#0f2018;--surface:#15291f;--border:#1e3a2b;--text:#b8d8c8;--text-dim:#6b9b82;--heading:#e0f0e8;--accent:#00b894;--accent2:#55efc4;--success:#00cec9;--danger:#ff5f56;--warn:#fdcb6e;--lore-bg:#0d1f16;--lore-border:#1e3a2b}
-[data-theme="sakura"]{--bg:#1a0f18;--bg-card:#221520;--surface:#2d1b28;--border:#3d2535;--text:#e0c8d8;--text-dim:#a07898;--heading:#f5e0f0;--accent:#e84393;--accent2:#fd79a8;--success:#00cec9;--danger:#ff5f56;--warn:#fdcb6e;--lore-bg:#200e1c;--lore-border:#3d2535}
-[data-theme="ocean"]{--bg:#0a1628;--bg-card:#0f1e35;--surface:#152642;--border:#1e3455;--text:#b8d0e8;--text-dim:#6890b8;--heading:#e0f0ff;--accent:#0984e3;--accent2:#74b9ff;--success:#00cec9;--danger:#ff5f56;--warn:#ffeaa7;--lore-bg:#0c1a30;--lore-border:#1e3455}
+:root,[data-theme="aurum"]{--bg:#0a0806;--bg-card:#14110b;--surface:#1b1710;--border:#2c2417;--text:#e7e0cf;--text-dim:#a99c7e;--heading:#fff8ea;--accent:#f5b942;--accent2:#ffd470;--success:#46d98c;--danger:#ff6b6b;--warn:#ffbd2e;--radius:12px;--lore-bg:#15110a;--lore-border:#2c2417;--btn-text:#241700}
+[data-theme="midnight"]{--bg:#0b0d17;--bg-card:#111425;--surface:#171a2e;--border:#1e2240;--text:#c9cde8;--text-dim:#7b82a8;--heading:#eaedf9;--accent:#6c5ce7;--accent2:#a29bfe;--success:#00cec9;--danger:#ff5f56;--warn:#ffbd2e;--radius:10px;--lore-bg:#1a0e2e;--lore-border:#2d1b4e;--btn-text:#fff}
+[data-theme="obsidian"]{--bg:#0e0e0e;--bg-card:#181818;--surface:#222;--border:#333;--text:#d4d4d4;--text-dim:#888;--heading:#f0f0f0;--accent:#e74c3c;--accent2:#ff6b6b;--success:#2ecc71;--danger:#e74c3c;--warn:#f39c12;--lore-bg:#1a1a1a;--lore-border:#333;--btn-text:#fff}
+[data-theme="emerald"]{--bg:#0a1612;--bg-card:#0f2018;--surface:#15291f;--border:#1e3a2b;--text:#b8d8c8;--text-dim:#6b9b82;--heading:#e0f0e8;--accent:#00b894;--accent2:#55efc4;--success:#00cec9;--danger:#ff5f56;--warn:#fdcb6e;--lore-bg:#0d1f16;--lore-border:#1e3a2b;--btn-text:#fff}
+[data-theme="sakura"]{--bg:#1a0f18;--bg-card:#221520;--surface:#2d1b28;--border:#3d2535;--text:#e0c8d8;--text-dim:#a07898;--heading:#f5e0f0;--accent:#e84393;--accent2:#fd79a8;--success:#00cec9;--danger:#ff5f56;--warn:#fdcb6e;--lore-bg:#200e1c;--lore-border:#3d2535;--btn-text:#fff}
+[data-theme="ocean"]{--bg:#0a1628;--bg-card:#0f1e35;--surface:#152642;--border:#1e3455;--text:#b8d0e8;--text-dim:#6890b8;--heading:#e0f0ff;--accent:#0984e3;--accent2:#74b9ff;--success:#00cec9;--danger:#ff5f56;--warn:#ffeaa7;--lore-bg:#0c1a30;--lore-border:#1e3455;--btn-text:#fff}
 html{font-size:16px}
 body{font-family:'Inter',-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:var(--bg);color:var(--text);line-height:1.6;min-height:100vh}
+h1,h2,h3,.header h1,.login-box h1,.modal-box h2{font-family:'Space Grotesk','Inter',sans-serif;letter-spacing:-.01em}
+.tab-btn.active,.chat-input-row button,.login-box button,button[style*="--accent"]{color:var(--btn-text,#fff)!important}
 a{color:var(--accent2);text-decoration:none}
 
 /* Layout */
@@ -75,8 +81,8 @@ a{color:var(--accent2);text-decoration:none}
 /* Accounts */
 .account-list{display:flex;flex-direction:column;gap:8px}
 .account-item{display:flex;align-items:center;gap:12px;background:var(--surface);border-radius:8px;padding:10px 14px;cursor:pointer;border:1px solid transparent;transition:border-color .2s,background .2s}
-.account-item:hover{background:rgba(108,92,231,.1);border-color:var(--accent2)}
-.account-item.active{border-color:var(--accent);background:rgba(108,92,231,.12)}
+.account-item:hover{background:rgba(245,185,66,.1);border-color:var(--accent2)}
+.account-item.active{border-color:var(--accent);background:rgba(245,185,66,.12)}
 .account-head{width:32px;height:32px;border-radius:4px;image-rendering:pixelated;flex-shrink:0}
 .account-info{display:flex;flex-direction:column}
 .account-name{font-size:.9rem;font-weight:600;color:var(--heading)}
@@ -85,12 +91,12 @@ a{color:var(--accent2);text-decoration:none}
 /* Inventory */
 .inv-grid{display:grid;grid-template-columns:repeat(9,1fr);gap:4px}
 .inv-slot{aspect-ratio:1;background:var(--surface);border:1px solid var(--border);border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:.65rem;text-align:center;padding:2px;overflow:visible;cursor:default;position:relative}
-.inv-slot.has-item{border-color:var(--accent);background:rgba(108,92,231,.08)}
+.inv-slot.has-item{border-color:var(--accent);background:rgba(245,185,66,.08)}
 .inv-slot .count{position:absolute;bottom:1px;right:3px;font-size:.6rem;color:var(--warn);font-weight:700}
 .inv-slot:hover .tooltip{display:block}
 .inv-slot .item-icon{width:80%;height:80%;object-fit:contain;image-rendering:pixelated}
 .gv-slot{aspect-ratio:1;background:var(--surface);border:1px solid var(--border);border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:.6rem;text-align:center;padding:2px;overflow:visible;cursor:default;position:relative}
-.gv-slot.has-item{border-color:var(--accent);background:rgba(108,92,231,.08)}
+.gv-slot.has-item{border-color:var(--accent);background:rgba(245,185,66,.08)}
 .gv-slot .item-icon{width:80%;height:80%;object-fit:contain;image-rendering:pixelated}
 .gv-slot .count{position:absolute;bottom:1px;right:3px;font-size:.55rem;color:var(--warn);font-weight:700}
 .gv-slot .slot-num{position:absolute;top:1px;left:3px;font-size:.5rem;color:var(--text-dim);opacity:.6}
@@ -105,7 +111,7 @@ a{color:var(--accent2);text-decoration:none}
 .auction-table td{padding:10px;border-bottom:1px solid rgba(30,34,64,.5);vertical-align:middle}
 .auction-table tr:last-child td{border-bottom:none}
 .auction-table tr{position:relative}
-.auction-table tr:hover td{background:rgba(108,92,231,.05)}
+.auction-table tr:hover td{background:rgba(245,185,66,.05)}
 .auction-table td:hover .tooltip{display:block}
 .auction-icon{width:28px;height:28px;image-rendering:pixelated;border-radius:4px;vertical-align:middle}
 .auction-bid{color:var(--warn);font-weight:700}
@@ -158,7 +164,7 @@ a{color:var(--accent2);text-decoration:none}
 .modal-actions .btn{flex:1}
 /* Make inventory slots with items feel clickable */
 .inv-slot.has-item{cursor:pointer}
-.inv-slot.has-item:hover{border-color:var(--accent2);background:rgba(108,92,231,.18)}
+.inv-slot.has-item:hover{border-color:var(--accent2);background:rgba(245,185,66,.18)}
 .login-overlay.hidden{display:none}
 .login-container{display:flex;flex-direction:column;align-items:center;gap:32px;width:100%;max-width:900px}
 .login-box{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:40px 44px;width:420px;max-width:90vw;text-align:center}
@@ -260,7 +266,8 @@ a{color:var(--accent2);text-decoration:none}
         <div class="theme-picker" id="theme-picker">
             <button class="theme-btn" onclick="toggleThemeMenu(event)">🎨 Theme</button>
             <div class="theme-dropdown" id="theme-dropdown">
-                <div class="theme-opt active" data-theme="midnight" onclick="setTheme('midnight')"><span class="theme-swatch" style="background:#6c5ce7"></span>Midnight</div>
+                <div class="theme-opt active" data-theme="aurum" onclick="setTheme('aurum')"><span class="theme-swatch" style="background:#f5b942"></span>Aurum</div>
+                <div class="theme-opt" data-theme="midnight" onclick="setTheme('midnight')"><span class="theme-swatch" style="background:#6c5ce7"></span>Midnight</div>
                 <div class="theme-opt" data-theme="obsidian" onclick="setTheme('obsidian')"><span class="theme-swatch" style="background:#e74c3c"></span>Obsidian</div>
                 <div class="theme-opt" data-theme="emerald" onclick="setTheme('emerald')"><span class="theme-swatch" style="background:#00b894"></span>Emerald</div>
                 <div class="theme-opt" data-theme="sakura" onclick="setTheme('sakura')"><span class="theme-swatch" style="background:#e84393"></span>Sakura</div>
@@ -1202,7 +1209,7 @@ function positionTooltip(tip, e) {
 }
 
 // ── Theme Switching ──────────────────────────────────────────
-const THEMES = ['midnight','obsidian','emerald','sakura','ocean'];
+const THEMES = ['aurum','midnight','obsidian','emerald','sakura','ocean'];
 
 function setTheme(name) {
     document.documentElement.setAttribute('data-theme', name);
