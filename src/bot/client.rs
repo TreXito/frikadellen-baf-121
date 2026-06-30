@@ -4593,21 +4593,37 @@ async fn handle_window_interaction(
                 // Prefer fixed slot 31 in auction detail; use name matching only as fallback.
                 let slot_31_name = slots.get(31).and_then(get_item_display_name_from_slot).unwrap_or_default();
                 let slot_31_lower = remove_mc_colors(&slot_31_name).to_lowercase();
-                if slot_31_lower.contains("claim") {
-                    info!("[ClaimSold] Clicking preferred Claim slot 31");
-                    click_window_slot(bot, &state.last_window_id, window_id, 31).await;
-                } else if let Some(i) = find_slot_by_name(&slots, "Claim") {
-                    info!("[ClaimSold] Slot 31 not claimable, falling back to Claim name match at slot {}", i);
-                    click_window_slot(bot, &state.last_window_id, window_id, i as i16).await;
-                } else {
-                    // No Claim button present (e.g. the auction was already claimed and
-                    // this view now offers a "Sell Again"/relist button). Do NOT blindly
-                    // click slot 31 — in that state slot 31 can open "Create BIN Auction"
-                    // and relist the item. Close and go idle instead.
-                    warn!("[ClaimSold] No Claim button in auction view — closing (avoiding accidental relist)");
+                // Guard ONLY against the relist/create button: when an auction was
+                // already claimed, this view can offer "Sell Again"/"Create BIN
+                // Auction" at slot 31 — clicking it would relist the item (the
+                // earlier "Unexpected window 'Create BIN Auction'" bug). For every
+                // other case default to clicking the claim slot, because the slot-31
+                // name read sometimes races the window content (it arrives a tick
+                // later) and an over-strict "only if it literally says claim" check
+                // silently dropped legitimate single-item claims.
+                let slot_31_is_relist = slot_31_lower.contains("create")
+                    || slot_31_lower.contains("sell again")
+                    || slot_31_lower.contains("relist")
+                    || slot_31_lower.contains("bin auction")
+                    || slot_31_lower.contains("auction again");
+                if slot_31_is_relist {
+                    warn!("[ClaimSold] Slot 31 is a relist/create button — closing (avoiding accidental relist)");
                     send_raw_close(bot, window_id, &state.handlers);
                     state.auction_slot_blocked.store(false, Ordering::Relaxed);
                     *state.bot_state.write() = BotState::Idle;
+                } else if slot_31_lower.contains("claim") || slot_31_lower.contains("collect") {
+                    info!("[ClaimSold] Clicking preferred Claim slot 31");
+                    click_window_slot(bot, &state.last_window_id, window_id, 31).await;
+                } else if let Some(i) = find_slot_by_name(&slots, "Claim")
+                    .or_else(|| find_slot_by_name(&slots, "Collect"))
+                {
+                    info!("[ClaimSold] Falling back to Claim/Collect name match at slot {}", i);
+                    click_window_slot(bot, &state.last_window_id, window_id, i as i16).await;
+                } else {
+                    // Ambiguous (likely the slot-31 item hasn't synced yet) and NOT a
+                    // relist button — click slot 31, the historical claim position.
+                    info!("[ClaimSold] Claim name not yet resolved — clicking slot 31 (claim position)");
+                    click_window_slot(bot, &state.last_window_id, window_id, 31).await;
                 }
                 // Spawn a short watchdog: if Hypixel doesn't re-open Manage Auctions within
                 // 1.5 s, transition to Idle so the command queue can proceed.
