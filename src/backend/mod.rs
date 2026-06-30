@@ -95,6 +95,7 @@ impl BackendHandle {
         finder: Option<&str>,
         purse: Option<u64>,
         auction_uuid: Option<&str>,
+        via_bed: Option<bool>,
     ) {
         if self.tx.is_none() {
             return;
@@ -113,6 +114,7 @@ impl BackendHandle {
                 "finder": finder,
                 "purse": purse,
                 "auctionUuid": auction_uuid,
+                "viaBed": via_bed,
             },
         }));
     }

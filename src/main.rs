@@ -1236,7 +1236,7 @@ async fn main() -> Result<()> {
                         });
                     }
                 }
-                frikadellen_baf::bot::BotEvent::ItemPurchased { item_name, price, buy_speed_ms: event_buy_speed_ms } => {
+                frikadellen_baf::bot::BotEvent::ItemPurchased { item_name, price, buy_speed_ms: event_buy_speed_ms, via_bed: event_via_bed } => {
                     // Send uploadScoreboard (with real data) and uploadTab to COFL
                     let ws = ws_client_for_events.clone();
                     let scoreboard_lines = bot_client_clone.get_scoreboard_lines();
@@ -1302,6 +1302,7 @@ async fn main() -> Result<()> {
                         opt_finder.as_deref(),
                         bot_client_clone.get_purse(),
                         opt_auction_uuid.as_deref(),
+                        event_via_bed,
                     );
                     // Accumulate THEORETICAL AH profit at purchase time (target −
                     // price − AH fee), i.e. what you'd net if it sold at the COFL
@@ -1316,7 +1317,12 @@ async fn main() -> Result<()> {
                         let color = if p >= 0 { "§a" } else { "§c" };
                         format!(" §7| Expected profit: {}{}§r", color, format_coins(p))
                     }).unwrap_or_default();
-                    let speed_str = event_buy_speed_ms.map(|ms| format!(" §7| Buy speed: §e{}ms§r", ms)).unwrap_or_default();
+                    let kind_label = match event_via_bed {
+                        Some(true) => " §7(§dBed§7)§r",
+                        Some(false) => " §7(§6Nugget§7)§r",
+                        None => "",
+                    };
+                    let speed_str = event_buy_speed_ms.map(|ms| format!(" §7| Buy speed: §e{}ms{}§r", ms, kind_label)).unwrap_or_default();
                     let baf_msg = format!(
                         "§f[§4BAF§f]: §a✦ PURCHASED §r{}§r §7for §6{}§7 coins!{}{}",
                         colored_name, format_coins(price as i64), profit_str, speed_str
@@ -1343,7 +1349,7 @@ async fn main() -> Result<()> {
                                     tokio::spawn(async move {
                                         frikadellen_baf::webhook::send_webhook_divine_flip(
                                             &name, &item, price, opt_target, profit, purse,
-                                            event_buy_speed_ms, uuid_str.as_deref(), finder.as_deref(),
+                                            event_buy_speed_ms, event_via_bed, uuid_str.as_deref(), finder.as_deref(),
                                             did.as_deref(), &url,
                                         ).await;
                                     });
@@ -1351,7 +1357,7 @@ async fn main() -> Result<()> {
                                     tokio::spawn(async move {
                                         frikadellen_baf::webhook::send_webhook_legendary_flip(
                                             &name, &item, price, opt_target, profit, purse,
-                                            event_buy_speed_ms, uuid_str.as_deref(), finder.as_deref(),
+                                            event_buy_speed_ms, event_via_bed, uuid_str.as_deref(), finder.as_deref(),
                                             did.as_deref(), &url,
                                         ).await;
                                     });
@@ -1382,7 +1388,7 @@ async fn main() -> Result<()> {
                             tokio::spawn(async move {
                                 frikadellen_baf::webhook::send_webhook_item_purchased(
                                     &name, &item, price, opt_target, opt_profit, purse,
-                                    event_buy_speed_ms, uuid_str.as_deref(), opt_finder.as_deref(), &url,
+                                    event_buy_speed_ms, event_via_bed, uuid_str.as_deref(), opt_finder.as_deref(), &url,
                                 ).await;
                             });
                         }
