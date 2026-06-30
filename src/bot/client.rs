@@ -398,7 +398,7 @@ pub enum BotEvent {
         orders_cancelled: u64,
     },
     /// Item purchased from AH
-    ItemPurchased { item_name: String, price: u64, buy_speed_ms: Option<u64> },
+    ItemPurchased { item_name: String, price: u64, buy_speed_ms: Option<u64>, via_bed: Option<bool> },
     /// Item sold on AH
     ItemSold { item_name: String, price: u64, buyer: String },
     /// Bazaar order placed successfully
@@ -588,6 +588,7 @@ impl BotClient {
             purchase_start_time: self.purchase_start_time.clone(),
             bin_view_open_time: self.bin_view_open_time.clone(),
             last_buy_speed_ms: Arc::new(RwLock::new(None)),
+            last_buy_via_bed: Arc::new(RwLock::new(None)),
             grace_period_spam_active: Arc::new(AtomicBool::new(false)),
             pending_purchase_at_ms: Arc::new(RwLock::new(None)),
             bed_timing_active: Arc::new(AtomicBool::new(false)),
@@ -1194,6 +1195,10 @@ pub struct BotClientState {
     pub bin_view_open_time: Arc<RwLock<Option<std::time::Instant>>>,
     /// Buy speed in ms: from /viewauction sent to "Putting coins in escrow..."
     pub last_buy_speed_ms: Arc<RwLock<Option<u64>>>,
+    /// How the last buy resolved: `Some(true)` if it went through a bed
+    /// (grace-period) timing loop, `Some(false)` if it was an instant gold_nugget
+    /// buy. Taken alongside `last_buy_speed_ms` when the purchase confirms.
+    pub last_buy_via_bed: Arc<RwLock<Option<bool>>>,
     /// Set to true while a grace-period spam-click loop is running so a second
     /// chat message does not start a duplicate loop.
     pub grace_period_spam_active: Arc<AtomicBool>,
@@ -1371,6 +1376,7 @@ impl Default for BotClientState {
             purchase_start_time: Arc::new(RwLock::new(None)),
             bin_view_open_time: Arc::new(RwLock::new(None)),
             last_buy_speed_ms: Arc::new(RwLock::new(None)),
+            last_buy_via_bed: Arc::new(RwLock::new(None)),
             grace_period_spam_active: Arc::new(AtomicBool::new(false)),
             pending_purchase_at_ms: Arc::new(RwLock::new(None)),
             bed_timing_active: Arc::new(AtomicBool::new(false)),
@@ -2376,7 +2382,9 @@ async fn event_handler(
                 if let Some((item_name, price)) = parse_purchased_message(&clean_message) {
                     // Include the buy speed measured from flip received to escrow message
                     let buy_speed_ms = state.last_buy_speed_ms.write().take();
-                    let _ = state.event_tx.send(BotEvent::ItemPurchased { item_name, price, buy_speed_ms });
+                    // Whether this buy went through bed timing (vs an instant nugget).
+                    let via_bed = state.last_buy_via_bed.write().take();
+                    let _ = state.event_tx.send(BotEvent::ItemPurchased { item_name, price, buy_speed_ms, via_bed });
                 }
             } else if clean_message.contains("Putting coins in escrow") {
                 // "Putting coins in escrow..." — purchase accepted by server.
@@ -2387,6 +2395,12 @@ async fn event_handler(
                     .or_else(|| *state.purchase_start_time.read());
                 // Always clear the /viewauction marker too so it doesn't leak.
                 *state.purchase_start_time.write() = None;
+                // If the bed branch never fired for this purchase, it was an
+                // instant gold_nugget buy ("nugget"). Don't overwrite a bed flag.
+                {
+                    let mut via = state.last_buy_via_bed.write();
+                    if via.is_none() { *via = Some(false); }
+                }
                 if let Some(start) = start {
                     let speed_ms = start.elapsed().as_millis() as u64;
                     *state.last_buy_speed_ms.write() = Some(speed_ms);
@@ -3368,6 +3382,8 @@ async fn execute_command(
             // Clear stale observer data from any previous window so the timing
             // comparison in the OpenScreen handler is accurate for THIS purchase.
             *state.window_open_info.write() = None;
+            // Reset the bed/nugget classifier for THIS purchase.
+            *state.last_buy_via_bed.write() = None;
 
             // Send /viewauction immediately — do NOT wait for tick alignment.
             // The server processes incoming packets at the end of each 50ms
@@ -3847,6 +3863,9 @@ async fn handle_window_interaction(
                 }
 
                 if slot_31_kind.contains("bed") {
+                    // Bed = auction is still in grace period. Remember that this
+                    // purchase was won via bed timing so the webhook can label it.
+                    *state.last_buy_via_bed.write() = Some(true);
                     // Bed = auction is still in grace period.
                     // No buy-click or skip-click was sent (we waited for
                     // confirmation first).  The bed-spam loop below
