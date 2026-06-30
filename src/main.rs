@@ -3236,7 +3236,29 @@ async fn main() -> Result<()> {
             }
             
             let lowercase_input = input.to_lowercase();
-            
+
+            // `/hypixel ping` (alias `/ping`): measure real RTT to mc.hypixel.net
+            // over the Minecraft protocol — 4 pings in ~1s, averaged. This is the
+            // latency the game connection actually sees (through Cloudflare to
+            // Hypixel's backend), unlike an ICMP ping which only hits the edge.
+            if lowercase_input == "/hypixel ping" || lowercase_input == "/ping" {
+                info!("[Ping] Measuring ping to {} …", frikadellen_baf::hypixel_ping::HYPIXEL_HOST);
+                tokio::spawn(async move {
+                    match frikadellen_baf::hypixel_ping::measure(4, std::time::Duration::from_millis(200)).await {
+                        Ok(s) => {
+                            print_mc_chat(&format!(
+                                "§f[§4BAF§f]: §bHypixel ping §7→ §aavg {}ms §7(min {}ms, max {}ms over {} pings)",
+                                s.avg.as_millis(), s.min.as_millis(), s.max.as_millis(), s.count
+                            ));
+                        }
+                        Err(e) => {
+                            print_mc_chat(&format!("§f[§4BAF§f]: §cPing failed: {}", e));
+                        }
+                    }
+                });
+                continue;
+            }
+
             // Handle /cofl and /baf commands (matching TypeScript consoleHandler.ts)
             if lowercase_input.starts_with("/cofl") || lowercase_input.starts_with("/baf") {
                 let parts: Vec<&str> = input.split_whitespace().collect();
@@ -3589,6 +3611,10 @@ async fn main() -> Result<()> {
 
     // Periodic log cleanup — delete archived logs older than 7 days once a day.
     frikadellen_baf::logging::spawn_periodic_log_cleanup();
+
+    // Keep a fresh Hypixel ping figure so bed timing can lead clicks by the real
+    // connection latency (refreshed every 60s; also updated by `/hypixel ping`).
+    frikadellen_baf::hypixel_ping::spawn_background_refresher(std::time::Duration::from_secs(60));
 
     // Island guard: if "Your Island" is not in the scoreboard, send
     // /lobby → /play sb → /is to return to the island.

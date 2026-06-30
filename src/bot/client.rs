@@ -3874,9 +3874,17 @@ async fn handle_window_interaction(
 
                     if state.bedtiming {
                         // Bedtiming mode: use COFL purchaseAt timing for bed auctions.
-                        // Start clicking bed_pre_click_ms (default 30ms) before the deadline.
-                        // If purchaseAt is not available, fall through to immediate bed spam.
-                        let pre_click_lead_ms = state.bed_pre_click_ms;
+                        // Lead the first click by the real connection latency so the
+                        // click *arrives* at Hypixel right as the grace period ends:
+                        // COFL gives the buy time, we measure our ping to mc.hypixel.net,
+                        // and start clicking `ping + 20ms` early. Clicking early on a bed
+                        // is safe (the item just isn't buyable yet) whereas clicking late
+                        // misses it. Falls back to the configured static lead until the
+                        // first ping is measured.
+                        let pre_click_lead_ms = match crate::hypixel_ping::latest_ping_ms() {
+                            Some(ping) => ping + 20,
+                            None => state.bed_pre_click_ms,
+                        };
                         // Convert the raw epoch-ms timestamp to a remaining-ms delta.
                         let remaining_ms_from_purchase_at = state.pending_purchase_at_ms.read()
                             .and_then(|purchase_at_ms| {
