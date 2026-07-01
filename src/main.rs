@@ -1146,7 +1146,10 @@ async fn main() -> Result<()> {
                                 webhook_url,
                             ).await;
                         }
-                        frikadellen_baf::webhook::send_webhook_banned_public().await;
+                        frikadellen_baf::webhook::send_webhook_banned_public(
+                            &ingame_name_for_events,
+                            &reason,
+                        ).await;
                         // Terminate immediately so we don't reconnect and re-send the webhook
                         std::process::exit(1);
                     }

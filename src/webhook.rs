@@ -743,15 +743,33 @@ pub async fn send_webhook_banned(
     post_embed_with_content(webhook_url, ping.as_deref(), payload).await;
 }
 
-/// Send a public ban notification via the configured relay endpoint.
-/// Anonymized — no IGN or user-identifying information.
+/// Send a public ban notification via the configured relay endpoint, including
+/// who got banned and the parsed ban details (kind, duration, reason, ban id).
 ///
 /// The relay endpoint and signing secret are read from the `BAF_NOTIFY_RELAY_URL`
 /// and `BAF_NOTIFY_SECRET` environment variables.  If not configured, this is a
 /// no-op.
-pub async fn send_webhook_banned_public() {
+pub async fn send_webhook_banned_public(ingame_name: &str, reason: &str) {
+    let parsed = parse_ban_reason(reason);
+    // "temporary" covers fresh timed bans (29d 23h…); a ban-shaped disconnect
+    // with no duration and no permanent marker is an existing ("old") ban the
+    // account already carried when it tried to log in.
+    let kind = if parsed.is_security_ban {
+        "security"
+    } else if parsed.is_permanent {
+        "permanent"
+    } else if parsed.duration.is_some() {
+        "temporary"
+    } else {
+        "old"
+    };
     let payload = serde_json::json!({
-        "message": "A user of this macro just got banned"
+        "message": "A user of this macro just got banned",
+        "ign": ingame_name,
+        "kind": kind,
+        "duration": parsed.duration,
+        "reason": parsed.reason,
+        "ban_id": parsed.ban_id,
     });
     post_relay("ban_notify", payload).await;
 }
