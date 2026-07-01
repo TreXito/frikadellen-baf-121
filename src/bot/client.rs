@@ -1605,31 +1605,47 @@ fn extract_text_with_colors(val: &serde_json::Value) -> String {
     result
 }
 
-/// Get lore lines from an item slot as plain strings (no color codes)
-fn get_item_lore_from_slot(item: &azalea_inventory::ItemStack) -> Vec<String> {
-    let mut lore_lines = Vec::new();
+/// Read the raw `minecraft:lore` array directly from an item's Lore component.
+///
+/// This deliberately avoids `serde_json::to_value(item_data)` on the whole stack:
+/// that fails for enchanted items (their `HashMap<Enchantment, i32>` has non-string
+/// map keys), which previously made lore come back empty even though the item's own
+/// `Lore` component serialises fine. Reading the component directly is robust and
+/// keeps the top-level `lore` consistent with the `nbt.minecraft:lore` we emit.
+fn lore_component_array(item: &azalea_inventory::ItemStack) -> Vec<serde_json::Value> {
+    use azalea_inventory::components::Lore;
     if let Some(item_data) = item.as_present() {
-        if let Ok(value) = serde_json::to_value(item_data) {
-            if let Some(lore_arr) = value
-                .get("components")
-                .and_then(|c| c.get("minecraft:lore"))
-                .and_then(|l| l.as_array())
-            {
-                for entry in lore_arr {
-                    let raw = if entry.is_string() {
-                        entry.as_str().unwrap_or("").to_string()
-                    } else {
-                        entry.to_string()
-                    };
-                    let plain = if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&raw) {
-                        extract_text_from_chat_component(&json_val)
-                    } else {
-                        remove_mc_colors(&raw)
-                    };
-                    lore_lines.push(plain);
+        if let Some(lore) = item_data.component_patch.get::<Lore>() {
+            if let Ok(val) = serde_json::to_value(lore) {
+                // Depending on the azalea version the Lore component serialises either
+                // as a bare array of text components or as `{ "lines": [...] }`.
+                if let Some(arr) = val.as_array() {
+                    return arr.clone();
+                }
+                if let Some(arr) = val.get("lines").and_then(|l| l.as_array()) {
+                    return arr.clone();
                 }
             }
         }
+    }
+    Vec::new()
+}
+
+/// Get lore lines from an item slot as plain strings (no color codes)
+fn get_item_lore_from_slot(item: &azalea_inventory::ItemStack) -> Vec<String> {
+    let mut lore_lines = Vec::new();
+    for entry in lore_component_array(item) {
+        let raw = if entry.is_string() {
+            entry.as_str().unwrap_or("").to_string()
+        } else {
+            entry.to_string()
+        };
+        let plain = if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&raw) {
+            extract_text_from_chat_component(&json_val)
+        } else {
+            remove_mc_colors(&raw)
+        };
+        lore_lines.push(plain);
     }
     lore_lines
 }
@@ -1638,28 +1654,18 @@ fn get_item_lore_from_slot(item: &azalea_inventory::ItemStack) -> Vec<String> {
 /// Used by the web panel to render colorful lore tooltips.
 fn get_item_lore_with_colors_from_slot(item: &azalea_inventory::ItemStack) -> Vec<String> {
     let mut lore_lines = Vec::new();
-    if let Some(item_data) = item.as_present() {
-        if let Ok(value) = serde_json::to_value(item_data) {
-            if let Some(lore_arr) = value
-                .get("components")
-                .and_then(|c| c.get("minecraft:lore"))
-                .and_then(|l| l.as_array())
-            {
-                for entry in lore_arr {
-                    let raw = if entry.is_string() {
-                        entry.as_str().unwrap_or("").to_string()
-                    } else {
-                        entry.to_string()
-                    };
-                    let colored = if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&raw) {
-                        extract_text_with_colors(&json_val)
-                    } else {
-                        raw
-                    };
-                    lore_lines.push(colored);
-                }
-            }
-        }
+    for entry in lore_component_array(item) {
+        let raw = if entry.is_string() {
+            entry.as_str().unwrap_or("").to_string()
+        } else {
+            entry.to_string()
+        };
+        let colored = if let Ok(json_val) = serde_json::from_str::<serde_json::Value>(&raw) {
+            extract_text_with_colors(&json_val)
+        } else {
+            raw
+        };
+        lore_lines.push(colored);
     }
     lore_lines
 }
