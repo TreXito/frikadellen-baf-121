@@ -638,6 +638,10 @@ async fn main() -> Result<()> {
     // of queueing them.  Cleared by the Connect button (or process restart).
     let flip_intake_paused = Arc::new(AtomicBool::new(false));
     let anonymize_webhook_name = Arc::new(AtomicBool::new(false));
+    // Set on the first bazaar flip recommendation from COFL. If the user's
+    // COFL bazaar finder is off none ever arrive, and the panel hides all
+    // bazaar UI (autodetection — no extra config needed).
+    let bazaar_flip_seen = Arc::new(AtomicBool::new(false));
 
     // Broadcast channel for chat messages → web panel clients.
     let (chat_tx, _chat_rx) = broadcast::channel::<String>(256);
@@ -902,6 +906,7 @@ async fn main() -> Result<()> {
             anonymize_webhook_name: anonymize_webhook_name.clone(),
             bazaar_tracker: bazaar_tracker.clone(),
             config_loader: config_loader.clone(),
+            bazaar_flip_seen: bazaar_flip_seen.clone(),
         };
         let web_port = config.web_gui_port;
         let web_tls = if config.web_https {
@@ -1915,6 +1920,7 @@ async fn main() -> Result<()> {
     let cofl_premium_ws = cofl_premium.clone();
     let enable_ah_flips_ws = enable_ah_flips.clone();
     let enable_bazaar_flips_ws = enable_bazaar_flips.clone();
+    let bazaar_flip_seen_ws = bazaar_flip_seen.clone();
     let flip_intake_paused_ws = flip_intake_paused.clone();
     let chat_tx_ws = chat_tx.clone();
     let detected_cofl_license_ws = detected_cofl_license.clone();
@@ -2027,6 +2033,10 @@ async fn main() -> Result<()> {
                     );
                 }
                 CoflEvent::BazaarFlip(bazaar_flip) => {
+                    // Receiving ANY bazaar flip proves the COFL bazaar finder is
+                    // on — record it (before the skip checks) so the panel shows
+                    // the bazaar UI.
+                    bazaar_flip_seen_ws.store(true, Ordering::Relaxed);
                     // Skip if bazaar flips are disabled
                     if !enable_bazaar_flips_ws.load(Ordering::Relaxed) {
                         continue;

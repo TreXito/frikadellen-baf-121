@@ -77,6 +77,10 @@ pub struct WebSharedState {
     pub bazaar_tracker: Arc<BazaarOrderTracker>,
     /// Config loader for persisting changes to config.toml.
     pub config_loader: Arc<crate::config::ConfigLoader>,
+    /// Set when at least one bazaar flip recommendation has arrived from COFL
+    /// this session. Stays false when the COFL bazaar finder is off, letting
+    /// the panel auto-hide all bazaar UI.
+    pub bazaar_flip_seen: Arc<AtomicBool>,
 }
 
 // ── JSON payloads ────────────────────────────────────────────
@@ -97,6 +101,10 @@ struct StatusResponse {
     bazaar_at_limit: bool,
     auction_at_limit: bool,
     inventory_full: bool,
+    /// Whether bazaar flipping is actually in use this session (config on AND
+    /// evidence of activity: a received bazaar flip, live orders, or bz profit).
+    /// The panel hides all bazaar UI when false.
+    bazaar_active: bool,
 }
 
 #[derive(Deserialize)]
@@ -571,6 +579,10 @@ async fn get_status(State(s): State<WebSharedState>) -> Json<StatusResponse> {
         bazaar_at_limit: s.bot_client.is_bazaar_at_limit(),
         auction_at_limit: s.bot_client.is_auction_at_limit(),
         inventory_full: s.bot_client.is_inventory_full(),
+        bazaar_active: s.enable_bazaar_flips.load(Ordering::Relaxed)
+            && (s.bazaar_flip_seen.load(Ordering::Relaxed)
+                || s.bazaar_tracker.order_count() > 0
+                || s.profit_tracker.totals().1 != 0),
     })
 }
 

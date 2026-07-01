@@ -285,7 +285,7 @@ a{color:var(--accent2);text-decoration:none}
 <div class="tab-bar">
     <button class="tab-btn active" onclick="switchTab('controls')">Controls</button>
     <button class="tab-btn" onclick="switchTab('ah-profit')">AH Profit</button>
-    <button class="tab-btn" onclick="switchTab('bz-profit')">BZ Profit</button>
+    <button class="tab-btn bz-ui" onclick="switchTab('bz-profit')">BZ Profit</button>
     <button class="tab-btn" onclick="switchTab('total-profit')">Total Profit</button>
     <button class="tab-btn" onclick="switchTab('game-view')">Game View</button>
     <button class="tab-btn" onclick="switchTab('config')">Config</button>
@@ -315,8 +315,8 @@ a{color:var(--accent2);text-decoration:none}
         </div>
         <div style="display:flex;gap:10px;margin-bottom:16px">
             <button class="btn btn-sm" style="background:var(--accent);color:#fff" onclick="claimPurchases()">📦 Claim Purchases</button>
-            <button class="btn btn-sm" style="background:var(--warn);color:#1a1a1a" onclick="collectBzOrders()">💰 Sell Instantly (BZ)</button>
-            <button class="btn btn-sm" style="background:var(--accent);color:#fff" onclick="claimBzOrders()">📋 Claim BZ Orders</button>
+            <button class="btn btn-sm bz-ui" style="background:var(--warn);color:#1a1a1a" onclick="collectBzOrders()">💰 Sell Instantly (BZ)</button>
+            <button class="btn btn-sm bz-ui" style="background:var(--accent);color:#fff" onclick="claimBzOrders()">📋 Claim BZ Orders</button>
         </div>
         <div style="display:flex;gap:10px;margin-bottom:16px">
             <button class="btn btn-sm" id="btn-disconnect" style="background:#e74c3c;color:#fff" onclick="toggleConnection()">🔌 Disconnect</button>
@@ -355,7 +355,7 @@ a{color:var(--accent2);text-decoration:none}
         <p class="auction-empty">Loading...</p>
     </div>
 </div>
-<div class="card">
+<div class="card bz-ui">
     <h2>Bazaar Orders</h2>
     <div id="bazaar-orders-container">
         <p class="auction-empty">Loading...</p>
@@ -677,10 +677,26 @@ async function fetchStatus() {
         isAnonymized = d.anonymize_webhook_name;
         $('btn-pause').style.display = d.macro_paused ? 'none' : '';
         $('btn-resume').style.display = d.macro_paused ? '' : 'none';
+        updateBazaarVisibility(d.bazaar_active !== false);
         accounts = d.accounts || [];
         currentAccountIndex = d.current_account_index || 0;
         renderAccounts();
     } catch(e) { console.error('Status fetch failed', e); }
+}
+
+// Hide/show all bazaar UI (BZ Profit tab, orders card, BZ buttons) based on
+// autodetection: the bot reports bazaar_active=false when bazaar flipping is
+// off or the COFL bazaar finder never sent a flip this session.
+let bazaarVisible = true;
+function updateBazaarVisibility(active) {
+    if (active === bazaarVisible) return;
+    bazaarVisible = active;
+    document.querySelectorAll('.bz-ui').forEach(el => { el.style.display = active ? '' : 'none'; });
+    // If the hidden BZ Profit tab was open, fall back to Controls.
+    if (!active) {
+        const bzTab = document.getElementById('tab-bz-profit');
+        if (bzTab && bzTab.classList.contains('active')) switchTab('controls');
+    }
 }
 
 function renderAccounts() {
