@@ -1372,7 +1372,7 @@ async fn main() -> Result<()> {
                                 tokio::spawn(async move {
                                     frikadellen_baf::webhook::send_webhook_flip_channel(
                                         &item_for_channel, price, opt_target, profit,
-                                        event_buy_speed_ms, finder_for_channel.as_deref(),
+                                        event_buy_speed_ms, event_via_bed, finder_for_channel.as_deref(),
                                     ).await;
                                 });
                             }

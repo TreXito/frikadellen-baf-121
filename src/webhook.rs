@@ -909,6 +909,7 @@ pub async fn send_webhook_flip_channel(
     target: Option<u64>,
     profit: i64,
     buy_speed_ms: Option<u64>,
+    via_bed: Option<bool>,
     finder: Option<&str>,
 ) {
     let event_type = if profit >= DIVINE_PROFIT_THRESHOLD as i64 {
@@ -922,6 +923,7 @@ pub async fn send_webhook_flip_channel(
         "target": target,
         "profit": profit,
         "buy_speed_ms": buy_speed_ms,
+        "via_bed": via_bed,
         "finder": finder,
     });
     post_relay(event_type, payload).await;
