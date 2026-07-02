@@ -816,6 +816,8 @@ async fn main() -> Result<()> {
             profit_tracker: profit_tracker.clone(),
             config_loader: config_loader.clone(),
             linked: linked.clone(),
+            enable_ah_flips: enable_ah_flips.clone(),
+            enable_bazaar_flips: enable_bazaar_flips.clone(),
         });
         if !already_linked {
             // Prominent boxed banner so the code stands out, then re-print it
