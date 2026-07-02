@@ -345,6 +345,17 @@ fn execute_command(action: &str, args: Option<&Value>, deps: &BackendDeps) -> (b
                 Err(e) => (false, format!("failed to load config: {}", e)),
             }
         }
+        // Backend-only toggle for adaptive buy timing. Not surfaced in config or
+        // the instance web panel — controlled solely from the operator backend.
+        "set_adaptive_timing" => {
+            let enabled = args
+                .and_then(|a| a.get("enabled"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            crate::hypixel_ping::ADAPTIVE_TIMING.store(enabled, Ordering::Relaxed);
+            info!("[Backend] adaptive timing set to {}", enabled);
+            (true, format!("adaptive timing {}", if enabled { "on" } else { "off" }))
+        }
         "pause" => {
             deps.macro_paused.store(true, Ordering::Relaxed);
             (true, "macro paused".to_string())
@@ -360,13 +371,14 @@ fn execute_command(action: &str, args: Option<&Value>, deps: &BackendDeps) -> (b
             let free = deps.bot_client.empty_slot_count();
             let auctions = deps.bot_client.active_auction_count();
             let msg = format!(
-                "{} • profit AH {} / BZ {} • {} free slots • {} listings{}",
+                "{} • profit AH {} / BZ {} • {} free slots • {} listings{} • adaptive:{}",
                 if paused { "paused" } else { "running" },
                 ah,
                 bz,
                 free,
                 auctions,
                 purse.map(|p| format!(" • purse {}", p)).unwrap_or_default(),
+                if crate::hypixel_ping::adaptive_timing_enabled() { "on" } else { "off" },
             );
             (true, msg)
         }

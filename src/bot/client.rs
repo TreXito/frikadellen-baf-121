@@ -2328,8 +2328,24 @@ async fn event_handler(
                     }
                 });
             }
+
+            // Spawn the live-RTT pinger for this login. Sends a vanilla F3+3 ping
+            // every few seconds so `hypixel_ping::LATEST_LIVE_PING_MS` reflects the
+            // true game-connection RTT (proxy hop included) for bed timing.
+            {
+                let my_gen = PINGER_GEN.fetch_add(1, Ordering::AcqRel) + 1;
+                let bot_ping = bot.clone();
+                tokio::spawn(async move {
+                    // Let the connection settle into the play state first.
+                    tokio::time::sleep(tokio::time::Duration::from_secs(15)).await;
+                    while PINGER_GEN.load(Ordering::Acquire) == my_gen {
+                        send_ping_request(&bot_ping);
+                        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                    }
+                });
+            }
         }
-        
+
         Event::Init => {
             info!("Bot initialized and spawned in world");
             if state.event_tx.send(BotEvent::Spawn).is_err() {
@@ -2965,6 +2981,11 @@ async fn event_handler(
                     }
                 }
                 
+                ClientboundGamePacket::PongResponse(pong) => {
+                    // Reply to our F3+3 ping — measures true live-connection RTT.
+                    crate::hypixel_ping::record_pong(pong.time);
+                }
+
                 ClientboundGamePacket::ContainerClose(_) => {
                     // Clear grace-period spam and bed-timing flags so a new BIN Auction View
                     // can start fresh.
@@ -3534,18 +3555,32 @@ async fn execute_command(
                     send_raw_click(&fast_bot, window_id, 31);
 
                     if fast_state.skip {
-                        // Skip pre-click: confirm slot 11 on the Confirm Purchase
-                        // window (predicted id window_id+1) in the SAME burst as the
-                        // buy click. The gold_nugget is confirmed present, so the buy
-                        // click deterministically opens the confirm window — this is a
-                        // legitimate click-ahead, not an impossible action. If the
-                        // server opens the window in time, the confirm lands a full
-                        // RTT early; if not, the Confirm Purchase handler clicks the
-                        // moment the window actually opens.
                         let next_wid = if window_id == 255 { 1u8 } else { window_id + 1 };
-                        info!("[AH] Fast-path skip: pre-clicking confirm slot 11 on window {} (same burst)", next_wid);
                         fast_state.skip_click_sent.store(true, Ordering::Relaxed);
-                        send_raw_click(&fast_bot, next_wid, 11);
+                        if crate::hypixel_ping::adaptive_timing_enabled() {
+                            // Tick-safe skip: the same-burst confirm click below
+                            // clicks window N+1 before the server has iterated it in
+                            // the current tick — the "impossible" click Watchdog
+                            // flags. Instead, delay the confirm click by ~one RTT so
+                            // the confirm window has been created AND iterated
+                            // server-side by the time the click lands (it arrives in
+                            // the tick the window opens, not before). The Confirm
+                            // Purchase handler remains the backstop if we're early.
+                            let lead = crate::hypixel_ping::best_ping_ms().unwrap_or(50).clamp(15, 150);
+                            let bot_confirm = fast_bot.clone();
+                            info!("[AH] Fast-path skip (adaptive): confirm slot 11 on window {} in ~{}ms (tick-safe)", next_wid, lead);
+                            tokio::spawn(async move {
+                                tokio::time::sleep(tokio::time::Duration::from_millis(lead)).await;
+                                send_raw_click(&bot_confirm, next_wid, 11);
+                            });
+                        } else {
+                            // Legacy same-burst pre-click (default). The gold_nugget
+                            // is confirmed present, so the buy click deterministically
+                            // opens the confirm window; if it isn't open in time the
+                            // Confirm Purchase handler clicks when it actually opens.
+                            info!("[AH] Fast-path skip: pre-clicking confirm slot 11 on window {} (same burst)", next_wid);
+                            send_raw_click(&fast_bot, next_wid, 11);
+                        }
                     } else {
                         info!("[AH] Fast-path: gold_nugget confirmed — buy click sent");
                     }
@@ -3900,13 +3935,13 @@ async fn handle_window_interaction(
                     if state.bedtiming {
                         // Bedtiming mode: use COFL purchaseAt timing for bed auctions.
                         // Lead the first click by the real connection latency so the
-                        // click *arrives* at Hypixel right as the grace period ends:
-                        // COFL gives the buy time, we measure our ping to mc.hypixel.net,
-                        // and start clicking `ping + 20ms` early. Clicking early on a bed
-                        // is safe (the item just isn't buyable yet) whereas clicking late
-                        // misses it. Falls back to the configured static lead until the
-                        // first ping is measured.
-                        let pre_click_lead_ms = match crate::hypixel_ping::latest_ping_ms() {
+                        // click *arrives* at Hypixel right as the grace period ends.
+                        // Prefer the live game-connection RTT (measured via F3+3
+                        // ping, includes the proxy hop); fall back to the SLP figure,
+                        // then to the configured static lead. Clicking early on a bed
+                        // is safe (the item just isn't buyable yet) whereas clicking
+                        // late misses it.
+                        let pre_click_lead_ms = match crate::hypixel_ping::best_ping_ms() {
                             Some(ping) => ping + 20,
                             None => state.bed_pre_click_ms,
                         };
@@ -6757,6 +6792,26 @@ fn send_chat_command(bot: &Client, content: &str) {
 /// and confirm clicks on the auction purchase path.
 ///
 /// `content` should include the leading `/` (e.g. `"/viewauction <uuid>"`).
+/// Generation counter for the live-RTT pinger. Each `Event::Login` bumps it and
+/// spawns a fresh pinger bound to that generation; the loop exits when a newer
+/// login supersedes it, guaranteeing exactly one active pinger on a fresh client
+/// handle across reconnects.
+static PINGER_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Send a vanilla F3+3 ping (`ServerboundPingRequest`) on the live connection,
+/// recording the token/send-time so the `PongResponse` handler can measure RTT.
+/// Bypasses the ECS queue via the raw connection for an accurate timestamp.
+fn send_ping_request(bot: &Client) {
+    use azalea_protocol::packets::game::s_ping_request::ServerboundPingRequest;
+    let token = crate::hypixel_ping::ping_request_started();
+    let packet = ServerboundPingRequest { time: token };
+    bot.with_raw_connection_mut(|mut raw_conn| {
+        if let Err(e) = raw_conn.write(packet) {
+            debug!("ping request write failed: {e}");
+        }
+    });
+}
+
 fn send_raw_chat_command(bot: &Client, content: &str) {
     let command = content.strip_prefix('/').unwrap_or_else(|| {
         debug!("send_raw_chat_command called without leading '/' — sending as-is: {}", content);
