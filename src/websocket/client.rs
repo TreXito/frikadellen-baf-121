@@ -3,13 +3,45 @@ use crate::types::{BazaarFlipRecommendation, Flip};
 use anyhow::{Context, Result};
 use futures::{stream::SplitSink, StreamExt, SinkExt};
 use tokio::sync::{mpsc, Mutex};
-use tokio_tungstenite::{connect_async, tungstenite::Message, MaybeTlsStream, WebSocketStream};
+use tokio_tungstenite::{
+    connect_async_tls_with_config, tungstenite::Message, Connector, MaybeTlsStream, WebSocketStream,
+};
 use std::sync::Arc;
 use tracing::{debug, error, info, warn};
+
+/// Build a TLS connector for the Coflnet modsocket that tolerates self-signed /
+/// untrusted certificates. Coflnet's regional servers (e.g. us-sky.coflnet.com)
+/// present self-signed certs that the system trust store rejects; this connector
+/// is used ONLY for the Coflnet websocket (which the bot already authenticates
+/// to), so the relaxed verification is scoped to that single endpoint. `ws://`
+/// (non-TLS) URLs ignore the connector entirely.
+/// Force the secure `wss://` scheme on a Coflnet modsocket URL. Accepts a
+/// scheme-less host, a plaintext `ws://` URL, or an already-secure `wss://` URL
+/// and always returns a `wss://` URL.
+fn normalize_ws_url(url: &str) -> String {
+    let host = url
+        .strip_prefix("wss://")
+        .or_else(|| url.strip_prefix("ws://"))
+        .unwrap_or(url);
+    format!("wss://{}", host)
+}
+
+fn cofl_tls_connector() -> Option<Connector> {
+    native_tls::TlsConnector::builder()
+        .danger_accept_invalid_certs(true)
+        .build()
+        .ok()
+        .map(Connector::NativeTls)
+}
 
 pub enum CoflEvent {
     AuctionFlip(Flip),
     BazaarFlip(BazaarFlipRecommendation),
+    /// COFL confirmed the mod session is authenticated (`loggedIn` with
+    /// `verified: true`). Used as a reliable signal to enable flip/order buying,
+    /// independent of the textual "Hello <ign> (<email>)" chat greeting (which
+    /// COFL does not always send).
+    Authenticated,
     ChatMessage(String),
     Command(String),
     GetInventory,
@@ -22,6 +54,11 @@ pub enum CoflEvent {
     /// COFL "countdown" message – AH flips arriving in ~10 seconds.
     /// Used to pause bazaar flips while the AH flip window is active.
     Countdown,
+    /// COFL "collectAuctions" message – the server has detected sold/expired
+    /// auctions to collect, so the bot should run a claim-sold cycle now instead
+    /// of waiting. Makes claiming proactive (frees AH slots → can list → frees
+    /// inventory → can keep buying).
+    CollectAuctions,
     /// Parsed license list from `/cofl licenses list` response.
     /// Fields: `(entries, page_number)` where entries are `(ign, 1-based page-local index, tier)` tuples
     /// and `page_number` is the 1-based page that was returned.
@@ -45,6 +82,10 @@ impl CoflWebSocket {
         version: String,
         session_id: String,
     ) -> Result<(Self, mpsc::UnboundedReceiver<CoflEvent>)> {
+        // Coflnet fully switched to TLS. Upgrade any plaintext `ws://` URL left in
+        // an older persisted config to `wss://` so the bot never tries (and fails)
+        // a plaintext connection to a regional server that only speaks TLS.
+        let url = normalize_ws_url(&url);
         let full_url = format!(
             "{}?player={}&version={}&SId={}",
             url, username, version, session_id
@@ -52,9 +93,10 @@ impl CoflWebSocket {
 
         info!("Connecting to Coflnet WebSocket: {}", url);
 
-        let (ws_stream, _) = connect_async(&full_url)
-            .await
-            .context("Failed to connect to WebSocket")?;
+        let (ws_stream, _) =
+            connect_async_tls_with_config(&full_url, None, false, cofl_tls_connector())
+                .await
+                .context("Failed to connect to WebSocket")?;
 
         info!("WebSocket connected successfully");
 
@@ -103,7 +145,7 @@ impl CoflWebSocket {
                 let mut backoff_secs = 5u64;
                 loop {
                     tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
-                    match connect_async(&full_url).await {
+                    match connect_async_tls_with_config(&full_url, None, false, cofl_tls_connector()).await {
                         Ok((new_stream, _)) => {
                             let (new_write, new_read) = new_stream.split();
                             *write_for_task.lock().await = new_write;
@@ -148,6 +190,22 @@ impl CoflWebSocket {
         info!("[COFL <-] type={} data={}", msg.msg_type, msg.data);
 
         match msg.msg_type.as_str() {
+            "loggedIn" => {
+                // COFL confirms the mod session is authenticated. Treat this as
+                // the auth signal that enables flip/order buying — the previous
+                // logic relied solely on a "Hello <ign> (<email>)" chat greeting
+                // which COFL does not reliably send, leaving the bot unable to
+                // ever buy flips or place orders.
+                let verified = parse_message_data::<serde_json::Value>(&msg.data)
+                    .ok()
+                    .and_then(|v| v.get("verified").and_then(|b| b.as_bool()))
+                    // If the field is missing, receiving `loggedIn` at all still
+                    // means the session is established, so default to true.
+                    .unwrap_or(true);
+                if verified {
+                    let _ = tx.send(CoflEvent::Authenticated);
+                }
+            }
             "flip" => {
                 if let Ok(value) = parse_message_data::<serde_json::Value>(&msg.data) {
                     // Normalize: COFL sends itemName/startingBid nested inside "auction"
@@ -230,7 +288,20 @@ impl CoflWebSocket {
                 }
             }
             "execute" => {
-                if let Ok(command) = parse_message_data::<String>(&msg.data) {
+                // COFL's execute payload is a raw command string (e.g.
+                // "/cofl connect <url>" or "/cofl ping <sid> <ticks>"), which is NOT
+                // valid JSON — parse_message_data would fail and silently drop it,
+                // breaking /cofl ping reflection and /cofl connect (region switch).
+                // The execute payload is a command STRING that COFL JSON-encodes
+                // (e.g. data = "\"/tip x cnc\"" → after serde, msg.data = "/tip x cnc"
+                // WITH quotes). Decode exactly ONE JSON-string level to strip those
+                // quotes; fall back to the raw value when it isn't a quoted string.
+                // (Using parse_message_data here double-decodes, fails on the inner
+                // non-JSON command, and left the quotes on — so the bot typed
+                // `"/tip x cnc"` literally instead of running it.)
+                let command = serde_json::from_str::<String>(&msg.data)
+                    .unwrap_or_else(|_| msg.data.clone());
+                if !command.trim().is_empty() {
                     let _ = tx.send(CoflEvent::Command(command));
                 }
             }
@@ -272,6 +343,12 @@ impl CoflWebSocket {
                 // Matches TypeScript: used by bazaarFlipPauser to pause bazaar flips.
                 debug!("Received countdown");
                 let _ = tx.send(CoflEvent::Countdown);
+            }
+            "collectAuctions" => {
+                // COFL tells the bot it has sold/expired auctions to collect.
+                // Trigger a claim-sold cycle proactively.
+                debug!("Received collectAuctions");
+                let _ = tx.send(CoflEvent::CollectAuctions);
             }
             _ => {
                 // Log any unknown message types for debugging

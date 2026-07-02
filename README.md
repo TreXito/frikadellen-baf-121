@@ -26,7 +26,7 @@ A high-performance, Rust-powered macro that automates auction house sniping, baz
 - [Quick Start — Your First Run](#quick-start--your-first-run)
 - [Web Control Panel](#web-control-panel)
 - [Discord Webhooks](#discord-webhooks)
-- [Discord Integration (OAuth)](#discord-integration-oauth)
+- [Discord Integration (central backend)](#discord-integration-central-backend)
 - [Multi-Account Support](#multi-account-support)
 - [Humanization / Rest Breaks](#humanization--rest-breaks)
 - [Proxy Support](#proxy-support)
@@ -86,16 +86,67 @@ Go to the [Releases page](../../releases/latest) and download the binary for you
 
 > **Tip:** The **Loader** binary is recommended — it automatically checks for and downloads the latest version every time you run it.
 
-### Linux VPS (one-liner)
+### Renting a VPS (recommended for 24/7 running)
 
-Using the loader (recommended):
+Running on a VPS keeps the bot online when your PC is off **and** — if you pick a
+well-located host — gives you lower latency to Hypixel, which is the single
+biggest factor in buy speed and bed-flip timing.
+
+**1. Pick a provider and location.** Any cheap Ubuntu VPS works (1 vCPU / 1–2 GB
+RAM is plenty). Hypixel's servers are in the **US**, so choose a US datacenter
+(US-East/Central are usually best) for the lowest in-game ping. Popular options:
+Hetzner (has US locations), DigitalOcean, Vultr, Linode/Akamai, OVH.
+
+> After the bot is running you can check your real latency with the in-terminal
+> command **`/hypixel ping`** — it reports the actual Minecraft-protocol round
+> trip to `mc.hypixel.net` (an ICMP `ping` only reaches Cloudflare's edge and
+> understates it). Aim for well under ~50 ms.
+
+**2. Create an Ubuntu 22.04/24.04 server** in the provider's dashboard. You'll get
+an **IP address**, a **username** (usually `root`), and a **password** (or you
+add an SSH key).
+
+**3. Connect to it over SSH** from your own machine:
+
+```bash
+ssh root@YOUR_SERVER_IP
+```
+
+(On Windows, use the built-in `ssh` in PowerShell/Terminal, or [PuTTY](https://www.putty.org/).)
+
+**4. Download and run the bot** (the **loader** auto-updates itself each start):
+
+```bash
+wget https://github.com/TreXito/frikadellen-baf-121/releases/latest/download/FrikadellenBAF-loader-linux-x86_64
+chmod +x FrikadellenBAF-loader-linux-x86_64
+./FrikadellenBAF-loader-linux-x86_64
+```
+
+**5. Keep it running after you log out.** An SSH session ends when you close it,
+which would stop the bot. Run it inside a **`screen`** (or `tmux`) session so it
+keeps going:
+
+```bash
+sudo apt update && sudo apt install -y screen   # one-time
+screen -S baf                                    # open a persistent session
+./FrikadellenBAF-loader-linux-x86_64             # start the bot inside it
+# Detach (leave it running):  press Ctrl+A then D
+# Reattach later:             screen -r baf
+```
+
+That's it — the bot stays online 24/7. Reconnect any time with `ssh` +
+`screen -r baf` to see the console.
+
+### Linux (one-liner, local or already on a server)
+
+Using the loader (recommended — auto-updates):
 
 ```bash
 wget https://github.com/TreXito/frikadellen-baf-121/releases/latest/download/FrikadellenBAF-loader-linux-x86_64 && chmod +x FrikadellenBAF-loader-linux-x86_64
 ./FrikadellenBAF-loader-linux-x86_64
 ```
 
-Or the standalone binary:
+Or the standalone binary (no auto-update):
 
 ```bash
 wget https://github.com/TreXito/frikadellen-baf-121/releases/latest/download/frikadellen_baf-linux-x86_64 && chmod +x frikadellen_baf-linux-x86_64
@@ -174,25 +225,35 @@ Send flip notifications and profit summaries to a Discord channel.
 
 ---
 
-## Discord Integration (OAuth)
+## Discord Integration (central backend)
 
-You can connect the panel to your **own** Discord application via OAuth. This is a
-bring-your-own-app setup — no shared/hosted backend is involved.
+Beyond per-bot webhooks, the bot can connect to the shared **BAF Discord backend**
+so you control and monitor it from Discord — no port-forwarding or public web
+panel required (the bot dials out, which is NAT/firewall friendly).
 
-1. Create an application at [discord.com/developers/applications](https://discord.com/developers/applications).
-2. Under **OAuth2**, add a redirect URI (e.g. `http://localhost:8080/api/discord/callback`).
-3. In the web panel **Config → Discord Integration**, paste your **Client ID**, **Client Secret**, and the same **Redirect URI**, then save.
-4. Click **Connect Discord** to open the authorize page.
+**Linking your bot to your Discord account:**
 
-> **Note:** The OAuth callback / token-exchange step is not implemented yet, so this
-> currently registers your application and opens the authorize flow. The stored
-> credentials are the foundation for full login support in a future release.
+1. On startup the terminal prints a one-time **link code** (e.g. `A1B2C3`).
+2. In the Discord server, run **`/link <code>`**. Your bot is now tied to your
+   Discord account and the code is consumed.
+3. From then on the bot reconnects automatically and only **you** (and anyone you
+   allow) can control it.
 
-| Field | Type | Default | Description |
-|---|---|---|---|
-| `discord_client_id` | string | — | OAuth2 Client ID of your own Discord application |
-| `discord_client_secret` | string | — | OAuth2 Client Secret (stored for the future token-exchange backend) |
-| `discord_redirect_uri` | string | — | Redirect URI registered on your Discord application |
+**What you can do from Discord once linked:**
+
+| Command | What it does |
+|---|---|
+| `/bots` | List your linked bots and online status |
+| `/status` | Connection, accounts, and theoretical profit today |
+| `/pause` · `/resume` | Pause/resume flipping |
+| `/list` | Pick an inventory item from a dropdown and list it on the AH at a price |
+| `/auctions` | View your active auctions (price, BIN/auction, time left) and cancel them |
+| `/profit` · `/leaderboard` | Theoretical profit (value if every flip sells at target) |
+| `/anonymous` | Hide your IGN on the public leaderboard |
+
+> Profit is measured as **theoretical** — what you'd have if every flip sold at
+> its Coflnet target — so it's comparable across bots regardless of how fast
+> items actually sell.
 
 ---
 

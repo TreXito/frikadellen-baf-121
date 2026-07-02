@@ -8,7 +8,7 @@ use frikadellen_baf::{
     websocket::CoflWebSocket,
     bot::BotClient,
     types::Flip,
-    web::{start_web_server, WebSharedState},
+    web::WebSharedState,
 };
 use tracing::{debug, error, info, warn};
 use tokio::time::{sleep, Duration};
@@ -268,13 +268,21 @@ fn should_enqueue_periodic_auction_claim(
 fn should_drop_bazaar_command_during_ah_pause(
     command_type: &frikadellen_baf::types::CommandType,
     bazaar_flips_paused: bool,
+    inventory_full: bool,
 ) -> bool {
-    bazaar_flips_paused
-        && matches!(
-            command_type,
-            frikadellen_baf::types::CommandType::BazaarBuyOrder { .. }
-            | frikadellen_baf::types::CommandType::ManageOrders { .. }
-        )
+    if !bazaar_flips_paused {
+        return false;
+    }
+    match command_type {
+        // Never place new bazaar BUY orders while AH flips are incoming.
+        frikadellen_baf::types::CommandType::BazaarBuyOrder { .. } => true,
+        // Normally defer ManageOrders during the AH flip window. BUT when the
+        // inventory is full the bot won't buy AH flips anyway, and it MUST keep
+        // managing orders (collecting fills, freeing order/inventory space) to
+        // escape the full-inventory deadlock — so don't defer it then.
+        frikadellen_baf::types::CommandType::ManageOrders { .. } => !inventory_full,
+        _ => false,
+    }
 }
 
 /// Flip tracker entry: (flip, actual_buy_price, purchase_instant, flip_receive_instant)
@@ -442,10 +450,24 @@ fn clear_session_time(path: &std::path::Path, ign: &str) {
     }
 }
 
+/// Print a colorful ANSI startup banner to the terminal.
+fn print_startup_banner() {
+    const C: &str = "\x1b[96m"; // aqua
+    const G: &str = "\x1b[93m"; // gold
+    const D: &str = "\x1b[90m"; // dim
+    const R: &str = "\x1b[0m";
+    println!("{C}╔════════════════════════════════════════════╗{R}");
+    println!("{C}║   {G}🐟 Frikadellen BAF{C}  —  Auction Flipper       ║{R}");
+    println!("{C}║   {D}Hypixel Skyblock bazaar + AH automation{C}   ║{R}");
+    println!("{C}╚════════════════════════════════════════════╝{R}");
+    println!("{D}   v{VERSION}{R}");
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize logging
     init_logger()?;
+    print_startup_banner();
     info!("Starting Frikadellen BAF v{}", VERSION);
 
     // Check for outdated version (non-loader users).
@@ -462,6 +484,13 @@ async fn main() -> Result<()> {
             .with_prompt("Enter your ingame name(s) (comma-separated for multiple accounts)")
             .interact_text()?;
         config.ingame_name = Some(name);
+        config_loader.save(&config)?;
+    }
+
+    // Ensure a stable instance id so the central backend recognises this bot
+    // across reconnects.
+    if config.instance_id.is_none() {
+        config.instance_id = Some(uuid::Uuid::new_v4().to_string());
         config_loader.save(&config)?;
     }
 
@@ -589,6 +618,10 @@ async fn main() -> Result<()> {
     // Bazaar-flip pause flag (matches TypeScript bazaarFlipPauser.ts).
     // Set to true for 20 seconds when a `countdown` message arrives (AH flips incoming).
     let bazaar_flips_paused = Arc::new(AtomicBool::new(false));
+    // Unix-millis deadline until which the bazaar stays paused. Repeated rapid
+    // `countdown` messages just extend this deadline instead of each spawning a
+    // resume task (which spammed "Bazaar flips resumed" and churned pause state).
+    let bazaar_pause_until = Arc::new(std::sync::atomic::AtomicU64::new(0));
 
     // Master macro pause — web panel can set this to pause all command processing.
     let macro_paused = Arc::new(AtomicBool::new(false));
@@ -756,6 +789,90 @@ async fn main() -> Result<()> {
     // Shared tracker for active bazaar orders (web panel + profit calculation).
     let bazaar_tracker = Arc::new(frikadellen_baf::bazaar_tracker::BazaarOrderTracker::new());
 
+    // ── Central backend (baf-backend) gateway ───────────────────────────────
+    // Dial out to the shared backend for remote control + profit tracking and
+    // show the one-time Discord link code. A no-op when disabled/unconfigured.
+    let backend_handle = if config.backend_enabled {
+        let link_code = {
+            let raw = uuid::Uuid::new_v4().simple().to_string();
+            raw[..6].to_uppercase()
+        };
+        // Already-owned (discord_id set in config) → no link needed; otherwise the
+        // terminal re-prints the code so it isn't lost in the startup scroll.
+        let already_linked = config.active_discord_id().is_some();
+        let linked = Arc::new(AtomicBool::new(already_linked));
+        let handle = frikadellen_baf::backend::spawn(frikadellen_baf::backend::BackendDeps {
+            url: config.backend_url.clone(),
+            instance_id: config.instance_id.clone().unwrap_or_default(),
+            cofl_owner_id: None,
+            ingame_names: ingame_names.clone(),
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            link_code: link_code.clone(),
+            discord_id: config.active_discord_id().map(|s| s.to_string()),
+            allowed_ids: config.backend_allowed_ids_list(),
+            macro_paused: macro_paused.clone(),
+            command_queue: command_queue.clone(),
+            bot_client: bot_client.clone(),
+            profit_tracker: profit_tracker.clone(),
+            config_loader: config_loader.clone(),
+            linked: linked.clone(),
+        });
+        if !already_linked {
+            // Prominent boxed banner so the code stands out, then re-print it
+            // periodically until the bot is linked.
+            let chat_tx_link = chat_tx.clone();
+            tokio::spawn(async move {
+                let mut first = true;
+                loop {
+                    if linked.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let banner = format!(
+                        "§f[§4BAF§f]: §b╔══════════════════════════════════════╗\n\
+                         §f[§4BAF§f]: §b║  §eDISCORD LINK CODE: §6§l{:<8}§r§b       ║\n\
+                         §f[§4BAF§f]: §b║  §7Run §f/link {}§7 in Discord{}║\n\
+                         §f[§4BAF§f]: §b╚══════════════════════════════════════╝",
+                        link_code,
+                        link_code,
+                        " ".repeat(11usize.saturating_sub(link_code.len()))
+                    );
+                    print_mc_chat(&banner);
+                    let _ = chat_tx_link.send(banner);
+                    info!("[Backend] Discord link code: {} (run /link {} in Discord)", link_code, link_code);
+                    // Re-show sooner the first time (right after startup scroll), then every 2 min.
+                    let wait = if first { 20 } else { 120 };
+                    first = false;
+                    tokio::time::sleep(tokio::time::Duration::from_secs(wait)).await;
+                }
+            });
+        }
+        handle
+    } else {
+        frikadellen_baf::backend::BackendHandle::disabled()
+    };
+
+    // Occasional friendly "stay hydrated" reminder at a random 1min–2h interval.
+    {
+        let chat_tx_hydrate = chat_tx.clone();
+        tokio::spawn(async move {
+            use rand::Rng;
+            const MESSAGES: [&str; 4] = [
+                "§b💧 Stay hydrated — take a sip of water!",
+                "§b💧 Hydration check: go drink some water 🚰",
+                "§b💧 Quick reminder: water break! 💙",
+                "§b💧 Don't forget to drink water while you flip.",
+            ];
+            loop {
+                let secs = rand::rng().random_range(60..=7200);
+                tokio::time::sleep(tokio::time::Duration::from_secs(secs)).await;
+                let pick = MESSAGES[rand::rng().random_range(0..MESSAGES.len())];
+                let msg = format!("§f[§4BAF§f]: {}", pick);
+                print_mc_chat(&msg);
+                let _ = chat_tx_hydrate.send(msg);
+            }
+        });
+    }
+
     // Start web control panel server BEFORE bot connect so the chat GUI
     // is available to show login links during Microsoft/Coflnet auth.
     {
@@ -787,8 +904,16 @@ async fn main() -> Result<()> {
             config_loader: config_loader.clone(),
         };
         let web_port = config.web_gui_port;
+        let web_tls = if config.web_https {
+            Some(frikadellen_baf::web::WebTlsOptions {
+                cert_path: config.web_tls_cert_path.clone(),
+                key_path: config.web_tls_key_path.clone(),
+            })
+        } else {
+            None
+        };
         tokio::spawn(async move {
-            start_web_server(web_state, web_port).await;
+            frikadellen_baf::web::start_web_server_tls(web_state, web_port, web_tls).await;
         });
     }
 
@@ -888,6 +1013,7 @@ async fn main() -> Result<()> {
     let enable_ah_flips_events = enable_ah_flips.clone();
     let profit_tracker_events = profit_tracker.clone();
     let bazaar_tracker_events = bazaar_tracker.clone();
+    let backend_handle_events = backend_handle.clone();
     // Tracks when the last AH auction was listed; the idle-inventory timer uses
     // this to detect 30-minute stalls and force `/cofl sellinventory`.
     let last_auction_listed_at: Arc<Mutex<Instant>> = Arc::new(Mutex::new(Instant::now()));
@@ -913,8 +1039,11 @@ async fn main() -> Result<()> {
                     // "According to our data <ign> made <amount> in the last <days> days across <N> auctions"
                     let clean = frikadellen_baf::utils::remove_minecraft_colors(&msg);
                     if let Some(profit) = parse_cofl_profit_response(&clean) {
-                        profit_tracker_events.set_ah_total(profit);
-                        tracing::info!("[CoflProfit] Updated AH total from Coflnet: {} coins", profit);
+                        // `/cofl profit` is the REALIZED total. The panel now shows
+                        // THEORETICAL AH profit (accumulated at purchase), so we log
+                        // the realized figure for reference but do not overwrite the
+                        // theoretical total with it.
+                        tracing::info!("[CoflProfit] Realized AH total from Coflnet (not shown on panel): {} coins", profit);
                     }
 
                     // Parse `/cofl bz h` response for authoritative BZ session profit.
@@ -1107,7 +1236,7 @@ async fn main() -> Result<()> {
                         });
                     }
                 }
-                frikadellen_baf::bot::BotEvent::ItemPurchased { item_name, price, buy_speed_ms: event_buy_speed_ms } => {
+                frikadellen_baf::bot::BotEvent::ItemPurchased { item_name, price, buy_speed_ms: event_buy_speed_ms, via_bed: event_via_bed } => {
                     // Send uploadScoreboard (with real data) and uploadTab to COFL
                     let ws = ws_client_for_events.clone();
                     let scoreboard_lines = bot_client_clone.get_scoreboard_lines();
@@ -1161,12 +1290,39 @@ async fn main() -> Result<()> {
                             }
                         }
                     };
+                    // Report the buy to the backend with full purchase detail (the
+                    // all-flips channel renders it as a normal purchase webhook).
+                    backend_handle_events.report_purchase(
+                        &ingame_name_for_events,
+                        &item_name,
+                        price as i64,
+                        opt_target.map(|t| t as i64),
+                        opt_profit,
+                        event_buy_speed_ms,
+                        opt_finder.as_deref(),
+                        bot_client_clone.get_purse(),
+                        opt_auction_uuid.as_deref(),
+                        event_via_bed,
+                    );
+                    // Accumulate THEORETICAL AH profit at purchase time (target −
+                    // price − AH fee), i.e. what you'd net if it sold at the COFL
+                    // target. The panel/terminal/webhook show this instead of the
+                    // realized `/cofl profit` figure, matching the backend's
+                    // theoretical profit definition.
+                    if let Some(p) = opt_profit {
+                        profit_tracker_events.record_ah_profit(p);
+                    }
                     // Print colorful purchase announcement (item rarity shown via color code)
                     let profit_str = opt_profit.map(|p| {
                         let color = if p >= 0 { "§a" } else { "§c" };
                         format!(" §7| Expected profit: {}{}§r", color, format_coins(p))
                     }).unwrap_or_default();
-                    let speed_str = event_buy_speed_ms.map(|ms| format!(" §7| Buy speed: §e{}ms§r", ms)).unwrap_or_default();
+                    let kind_label = match event_via_bed {
+                        Some(true) => " §7(§dBed§7)§r",
+                        Some(false) => " §7(§6Nugget§7)§r",
+                        None => "",
+                    };
+                    let speed_str = event_buy_speed_ms.map(|ms| format!(" §7| Buy speed: §e{}ms{}§r", ms, kind_label)).unwrap_or_default();
                     let baf_msg = format!(
                         "§f[§4BAF§f]: §a✦ PURCHASED §r{}§r §7for §6{}§7 coins!{}{}",
                         colored_name, format_coins(price as i64), profit_str, speed_str
@@ -1193,7 +1349,7 @@ async fn main() -> Result<()> {
                                     tokio::spawn(async move {
                                         frikadellen_baf::webhook::send_webhook_divine_flip(
                                             &name, &item, price, opt_target, profit, purse,
-                                            event_buy_speed_ms, uuid_str.as_deref(), finder.as_deref(),
+                                            event_buy_speed_ms, event_via_bed, uuid_str.as_deref(), finder.as_deref(),
                                             did.as_deref(), &url,
                                         ).await;
                                     });
@@ -1201,7 +1357,7 @@ async fn main() -> Result<()> {
                                     tokio::spawn(async move {
                                         frikadellen_baf::webhook::send_webhook_legendary_flip(
                                             &name, &item, price, opt_target, profit, purse,
-                                            event_buy_speed_ms, uuid_str.as_deref(), finder.as_deref(),
+                                            event_buy_speed_ms, event_via_bed, uuid_str.as_deref(), finder.as_deref(),
                                             did.as_deref(), &url,
                                         ).await;
                                     });
@@ -1232,7 +1388,7 @@ async fn main() -> Result<()> {
                             tokio::spawn(async move {
                                 frikadellen_baf::webhook::send_webhook_item_purchased(
                                     &name, &item, price, opt_target, opt_profit, purse,
-                                    event_buy_speed_ms, uuid_str.as_deref(), opt_finder.as_deref(), &url,
+                                    event_buy_speed_ms, event_via_bed, uuid_str.as_deref(), opt_finder.as_deref(), &url,
                                 ).await;
                             });
                         }
@@ -1269,10 +1425,18 @@ async fn main() -> Result<()> {
                             }
                         }
                     };
-                    // Record realized AH profit
-                    if let Some(profit) = opt_profit {
-                        profit_tracker_events.record_ah_profit(profit);
-                    }
+                    // NOTE: AH profit is now accumulated as THEORETICAL at purchase
+                    // time (see ItemPurchased), so we no longer add realized profit
+                    // here — doing so would double-count each flip.
+                    backend_handle_events.report_event(
+                        "sell",
+                        &ingame_name_for_events,
+                        Some(&item_name),
+                        None,
+                        Some(price as i64),
+                        opt_profit,
+                        false,
+                    );
                     // Print colorful sold announcement
                     let profit_str = opt_profit.map(|p| {
                         let color = if p >= 0 { "§a" } else { "§c" };
@@ -1337,6 +1501,8 @@ async fn main() -> Result<()> {
                                     "data": inv_json
                                 }).to_string();
                                 let _ = ws_si.send_message(&upload_msg).await;
+                                // Let COFL ingest the uploaded inventory before selling.
+                                tokio::time::sleep(tokio::time::Duration::from_millis(600)).await;
                             }
                             let msg = serde_json::json!({
                                 "type": "sellinventory",
@@ -1351,6 +1517,15 @@ async fn main() -> Result<()> {
                     }
                 }
                 frikadellen_baf::bot::BotEvent::BazaarOrderPlaced { item_name, amount, price_per_unit, is_buy_order } => {
+                    backend_handle_events.report_event(
+                        "order_placed",
+                        &ingame_name_for_events,
+                        Some(&item_name),
+                        Some(amount),
+                        Some(price_per_unit as i64),
+                        None,
+                        true,
+                    );
                     // Track the order for the web panel and profit calculation on collect.
                     bazaar_tracker_events.add_order(item_name.clone(), amount, price_per_unit, is_buy_order);
                     let (order_color, order_type) = if is_buy_order { ("§a", "BUY") } else { ("§c", "SELL") };
@@ -1375,6 +1550,15 @@ async fn main() -> Result<()> {
                     }
                 }
                 frikadellen_baf::bot::BotEvent::AuctionListed { item_name, starting_bid, duration_hours } => {
+                    backend_handle_events.report_event(
+                        "list",
+                        &ingame_name_for_events,
+                        Some(&item_name),
+                        None,
+                        Some(starting_bid as i64),
+                        None,
+                        false,
+                    );
                     // Reset the idle-inventory timer so the 30-minute failsafe doesn't fire
                     // while items are being actively listed.
                     *last_auction_listed_at_events.lock().unwrap() = Instant::now();
@@ -1418,6 +1602,15 @@ async fn main() -> Result<()> {
                     }
                 }
                 frikadellen_baf::bot::BotEvent::BazaarOrderCollected { item_name, is_buy_order, claimed_amount } => {
+                    backend_handle_events.report_event(
+                        "order_collected",
+                        &ingame_name_for_events,
+                        Some(&item_name),
+                        claimed_amount,
+                        None,
+                        None,
+                        true,
+                    );
                     // Remove from tracker.
                     let order_data = bazaar_tracker_events.remove_order(&item_name, is_buy_order);
                     // Determine the actual quantity collected.  `claimed_amount` is
@@ -1712,9 +1905,11 @@ async fn main() -> Result<()> {
     // Spawn WebSocket message handler
     let command_queue_clone = command_queue.clone();
     let config_clone = config.clone();
+    let config_loader_ws = config_loader.clone();
     let ws_client_clone = ws_client.clone();
     let bot_client_for_ws = bot_client.clone();
     let bazaar_flips_paused_ws = bazaar_flips_paused.clone();
+    let bazaar_pause_until_ws = bazaar_pause_until.clone();
     let flip_tracker_ws = flip_tracker.clone();
     let cofl_connection_id_ws = cofl_connection_id.clone();
     let cofl_premium_ws = cofl_premium.clone();
@@ -1745,6 +1940,16 @@ async fn main() -> Result<()> {
 
         while let Some(event) = ws_rx.recv().await {
             match event {
+                CoflEvent::Authenticated => {
+                    // COFL confirmed the session is authenticated (loggedIn).
+                    // This is the reliable signal that enables flip/order buying.
+                    if !cofl_authenticated_ws.swap(true, Ordering::Relaxed) {
+                        info!("[Coflnet] Authentication confirmed (loggedIn) — flips enabled");
+                        let baf_msg = "§f[§4BAF§f]: §aCoflnet authenticated — flip buying enabled".to_string();
+                        print_mc_chat(&baf_msg);
+                        let _ = chat_tx_ws.send(baf_msg);
+                    }
+                }
                 CoflEvent::AuctionFlip(flip) => {
                     // Skip if AH flips are disabled
                     if !enable_ah_flips_ws.load(Ordering::Relaxed) {
@@ -1889,8 +2094,13 @@ async fn main() -> Result<()> {
                     // collected from the bazaar without free inventory space.
                     // SELL orders are still accepted because they remove items
                     // from inventory, freeing space.
-                    if effective_is_buy && bot_client_for_ws.is_inventory_full() {
-                        debug!("Skipping BUY bazaar flip — inventory full: {}", bazaar_flip.item_name);
+                    //
+                    // Prevention: stop placing new BUY orders once the inventory is
+                    // NEAR full (not just at 0), so the bot keeps headroom to claim
+                    // already-filled buy orders and place sell orders instead of
+                    // filling completely and deadlocking. SELL orders still flow.
+                    if effective_is_buy && bot_client_for_ws.is_inventory_near_full() {
+                        debug!("Skipping BUY bazaar flip — inventory near full: {}", bazaar_flip.item_name);
                         continue;
                     }
 
@@ -2153,8 +2363,8 @@ async fn main() -> Result<()> {
                                     debug!("Skipping BUY bazaar flip from chat — at order limit: {}", rec.item_name);
                                 } else if bot_client_for_ws.is_bazaar_daily_limit() {
                                     debug!("Skipping bazaar flip from chat — daily sell value limit reached: {}", rec.item_name);
-                                } else if effective_is_buy && bot_client_for_ws.is_inventory_full() {
-                                    debug!("Skipping BUY bazaar flip from chat — inventory full: {}", rec.item_name);
+                                } else if effective_is_buy && bot_client_for_ws.is_inventory_near_full() {
+                                    debug!("Skipping BUY bazaar flip from chat — inventory near full: {}", rec.item_name);
                                 } else if effective_is_buy && bazaar_tracker_ws.has_filled_orders() {
                                     debug!("Skipping BUY bazaar flip from chat — filled orders pending: {}", rec.item_name);
                                 } else {
@@ -2257,7 +2467,40 @@ async fn main() -> Result<()> {
                         if parts.len() > 1 {
                             let command = parts[1].to_string(); // Clone to own the data
                             let args = parts[2..].join(" ");
-                            
+
+                            // Region switch: COFL's `/cofl switchregion` asks the bot to
+                            // reconnect to a different modsocket via a `connect <url>`
+                            // command. This must be executed locally — persist the new
+                            // websocket URL and restart — NOT echoed back over the socket
+                            // (which silently failed and left the bot on an unreachable
+                            // regional host, e.g. an unresolvable us.sky.coflnet.com).
+                            if command == "connect" && !args.is_empty() {
+                                // COFL fully switched to TLS. It may hand us a
+                                // scheme-less host ("us-sky.coflnet.com/modsocket")
+                                // or, on older paths, a plaintext "ws://" URL. Force
+                                // the secure scheme either way so a region switch
+                                // never downgrades the bot to a plaintext socket the
+                                // regional server now refuses.
+                                let raw = args.trim();
+                                let host = raw
+                                    .strip_prefix("wss://")
+                                    .or_else(|| raw.strip_prefix("ws://"))
+                                    .unwrap_or(raw);
+                                let new_url = format!("wss://{}", host);
+                                info!("[RegionSwitch] /cofl connect → reconnecting to {}", new_url);
+                                let _ = chat_tx_ws.send(format!(
+                                    "§f[§4BAF§f]: §bSwitching server → §e{}§7 (restarting)…",
+                                    new_url
+                                ));
+                                let mut new_config = config_clone.clone();
+                                new_config.websocket_url = new_url;
+                                if let Err(e) = config_loader_ws.save(&new_config) {
+                                    error!("[RegionSwitch] Failed to save new websocket URL: {}", e);
+                                }
+                                restart_process();
+                                return;
+                            }
+
                             // Send to websocket with command as type (JSON-stringified data)
                             let ws = ws_client_clone.clone();
                             let inv_client = bot_client_for_ws.clone();
@@ -2274,6 +2517,13 @@ async fn main() -> Result<()> {
                                         }).to_string();
                                         if let Err(e) = ws.send_message(&upload_msg).await {
                                             error!("[Inventory] sellinventory: failed to pre-upload inventory: {}", e);
+                                        } else {
+                                            // Give COFL a moment to ingest the uploaded inventory
+                                            // before it processes the sellinventory request.
+                                            // Without this the sell command frequently arrives
+                                            // before the new inventory is stored, so COFL sells
+                                            // against stale/empty data and "does nothing".
+                                            sleep(Duration::from_millis(600)).await;
                                         }
                                     } else {
                                         warn!("[Inventory] sellinventory: no cached inventory to upload");
@@ -2521,16 +2771,21 @@ async fn main() -> Result<()> {
                     // when both AH flips and bazaar flips are enabled.
                     // Relaxed ordering is fine here — these are simple toggle flags where
                     // eventual visibility across threads is sufficient.
+                    // Only relevant when BOTH AH and bazaar flips are enabled — if
+                    // bazaar is off there's nothing to pause, so don't print/churn.
                     if enable_bazaar_flips_ws.load(Ordering::Relaxed) && enable_ah_flips_ws.load(Ordering::Relaxed) {
-                        let baf_msg = "§f[§4BAF§f]: §c⚡ AH Flips incoming in ~10s — closing windows, pausing bazaar".to_string();
-                        print_mc_chat(&baf_msg);
-                        let _ = chat_tx_ws.send(baf_msg);
-                        let flag = bazaar_flips_paused_ws.clone();
-                        flag.store(true, Ordering::Relaxed);
+                        // Always (re)extend the pause window to now+20s. Rapid repeated
+                        // countdowns just push the deadline out.
+                        let now_ms = std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .unwrap_or_default()
+                            .as_millis() as u64;
+                        let deadline = now_ms + 20_000;
+                        bazaar_pause_until_ws.fetch_max(deadline, Ordering::Relaxed);
 
-                        // Close any open window so the bot is free for AH flips.
-                        // Also force state to Idle if it's in an interruptible state
-                        // so the AH flip can be processed immediately.
+                        let flag = bazaar_flips_paused_ws.clone();
+                        // Close any open window so the bot is free for AH flips, and
+                        // drop out of interruptible states immediately.
                         bot_client_for_ws.close_current_window();
                         let current_state = bot_client_for_ws.state();
                         if current_state != frikadellen_baf::types::BotState::Purchasing
@@ -2539,29 +2794,57 @@ async fn main() -> Result<()> {
                             bot_client_for_ws.set_state(frikadellen_baf::types::BotState::Idle);
                         }
 
-                        let chat_tx_resume = chat_tx_ws.clone();
-                        let command_queue_resume = command_queue_clone.clone();
-                        tokio::spawn(async move {
-                            sleep(Duration::from_secs(20)).await;
-                            flag.store(false, Ordering::Relaxed);
-                            // Notify user that bazaar flips are resuming (matching TypeScript bazaarFlipPauser.ts)
-                            let baf_msg = "§f[§4BAF§f]: §aBazaar flips resumed".to_string();
+                        // Only the unpaused→paused transition prints and spawns the
+                        // single resume watcher; later countdowns are silent no-ops
+                        // that merely extended the deadline above.
+                        if flag.compare_exchange(false, true, Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+                            let baf_msg = "§f[§4BAF§f]: §c⚡ AH Flips incoming — pausing bazaar".to_string();
                             print_mc_chat(&baf_msg);
-                            let _ = chat_tx_resume.send(baf_msg);
-                            info!("[BazaarFlips] Bazaar flips resumed after AH flip window");
-                            // Queue a ManageOrders run to handle any deferred order
-                            // management (filled orders that need collecting, etc.).
-                            if !command_queue_resume.has_manage_orders() {
-                                info!("[BazaarFlips] Queuing deferred ManageOrders after AH flip window");
-                                command_queue_resume.enqueue(
-                                    CommandType::ManageOrders { cancel_open: false, target_item: None },
-                                    CommandPriority::Normal,
-                                    false,
-                                );
-                            }
-                            // COFL now automatically sends bazaar flip recommendations —
-                            // no need to request getbazaarflips here.
-                        });
+                            let _ = chat_tx_ws.send(baf_msg);
+                            let chat_tx_resume = chat_tx_ws.clone();
+                            let command_queue_resume = command_queue_clone.clone();
+                            let pause_until = bazaar_pause_until_ws.clone();
+                            tokio::spawn(async move {
+                                // Sleep until the (possibly-extended) deadline passes.
+                                loop {
+                                    let now = std::time::SystemTime::now()
+                                        .duration_since(std::time::UNIX_EPOCH)
+                                        .unwrap_or_default()
+                                        .as_millis() as u64;
+                                    let until = pause_until.load(Ordering::Relaxed);
+                                    if now >= until {
+                                        break;
+                                    }
+                                    sleep(Duration::from_millis((until - now).min(20_000))).await;
+                                }
+                                flag.store(false, Ordering::Relaxed);
+                                let baf_msg = "§f[§4BAF§f]: §aBazaar flips resumed".to_string();
+                                print_mc_chat(&baf_msg);
+                                let _ = chat_tx_resume.send(baf_msg);
+                                info!("[BazaarFlips] Bazaar flips resumed after AH flip window");
+                                if !command_queue_resume.has_manage_orders() {
+                                    info!("[BazaarFlips] Queuing deferred ManageOrders after AH flip window");
+                                    command_queue_resume.enqueue(
+                                        CommandType::ManageOrders { cancel_open: false, target_item: None },
+                                        CommandPriority::Normal,
+                                        false,
+                                    );
+                                }
+                            });
+                        }
+                    }
+                }
+                CoflEvent::CollectAuctions => {
+                    // COFL detected sold/expired auctions to collect. Claim them
+                    // proactively so AH slots free up (→ can list → frees inventory
+                    // → keeps buying) instead of waiting for the periodic sweep.
+                    if !command_queue_clone.has_claim_sold() {
+                        info!("[CollectAuctions] COFL signalled sold auctions — queuing ClaimSold");
+                        command_queue_clone.enqueue(
+                            CommandType::ClaimSoldItem,
+                            CommandPriority::High,
+                            true,
+                        );
                     }
                 }
                 CoflEvent::LicenseList { entries, page: _ } => {
@@ -2630,6 +2913,12 @@ async fn main() -> Result<()> {
         use frikadellen_baf::types::BotState;
         // Debounce: avoid requesting sellinventory too frequently when inventory is full
         let mut last_sellinventory_request = Instant::now() - Duration::from_secs(300);
+        // Debounce: as a last resort when the inventory stays full (typically with
+        // bazaar-bought items the bot can't re-list), force a bazaar
+        // "Sell Inventory Now" to instantly sell everything sellable and free
+        // space, breaking the full-inventory deadlock.
+        let mut last_instasell_clear = Instant::now() - Duration::from_secs(300);
+        const FORCE_INSTASELL_SECS: u64 = 90;
         // Track how long the bot has been continuously in selling mode so we can
         // periodically force-clear the inventory_full flag (it may be stale if no
         // ContainerSetContent packets arrive while the bot is idle).
@@ -2678,6 +2967,7 @@ async fn main() -> Result<()> {
                 if should_drop_bazaar_command_during_ah_pause(
                     &cmd.command_type,
                     bazaar_flips_paused_proc.load(Ordering::Relaxed),
+                    bot_client_clone.is_inventory_full(),
                 ) {
                     if matches!(cmd.command_type, frikadellen_baf::types::CommandType::ManageOrders { .. }) {
                         info!("[Queue] Deferring ManageOrders — AH flip window active, will re-queue on resume");
@@ -2758,6 +3048,8 @@ async fn main() -> Result<()> {
                                         "data": inv_json
                                     }).to_string();
                                     let _ = ws.send_message(&upload_msg).await;
+                                    // Let COFL ingest the uploaded inventory before selling.
+                                    tokio::time::sleep(tokio::time::Duration::from_millis(600)).await;
                                 }
                                 let msg = serde_json::json!({
                                     "type": "sellinventory",
@@ -2777,6 +3069,23 @@ async fn main() -> Result<()> {
                         if !command_queue_processor.has_manage_orders() {
                             command_queue_processor.enqueue(
                                 frikadellen_baf::types::CommandType::ManageOrders { cancel_open: false, target_item: None },
+                                frikadellen_baf::types::CommandPriority::High,
+                                false,
+                            );
+                        }
+                        // Last-resort space recovery: if the inventory has stayed
+                        // full (the COFL sellinventory / sell-order route isn't
+                        // clearing it — common with bazaar-bought items the bot
+                        // can't re-list), force a bazaar "Sell Inventory Now" to
+                        // instantly sell everything sellable and free space.
+                        if last_instasell_clear.elapsed() > Duration::from_secs(FORCE_INSTASELL_SECS) {
+                            last_instasell_clear = Instant::now();
+                            warn!("[SellingMode] Inventory still full — forcing bazaar Sell-Inventory-Now to free space");
+                            let baf_msg = "§f[§4BAF§f]: §e📦 Inventory full — instantly selling inventory on bazaar to free space".to_string();
+                            print_mc_chat(&baf_msg);
+                            let _ = chat_tx_proc.send(baf_msg);
+                            command_queue_processor.enqueue(
+                                frikadellen_baf::types::CommandType::SellInventoryBz,
                                 frikadellen_baf::types::CommandPriority::High,
                                 false,
                             );
@@ -2981,7 +3290,29 @@ async fn main() -> Result<()> {
             }
             
             let lowercase_input = input.to_lowercase();
-            
+
+            // `/hypixel ping` (alias `/ping`): measure real RTT to mc.hypixel.net
+            // over the Minecraft protocol — 4 pings in ~1s, averaged. This is the
+            // latency the game connection actually sees (through Cloudflare to
+            // Hypixel's backend), unlike an ICMP ping which only hits the edge.
+            if lowercase_input == "/hypixel ping" || lowercase_input == "/ping" {
+                info!("[Ping] Measuring ping to {} …", frikadellen_baf::hypixel_ping::HYPIXEL_HOST);
+                tokio::spawn(async move {
+                    match frikadellen_baf::hypixel_ping::measure(4, std::time::Duration::from_millis(200)).await {
+                        Ok(s) => {
+                            print_mc_chat(&format!(
+                                "§f[§4BAF§f]: §bHypixel ping §7→ §aavg {}ms §7(min {}ms, max {}ms over {} pings)",
+                                s.avg.as_millis(), s.min.as_millis(), s.max.as_millis(), s.count
+                            ));
+                        }
+                        Err(e) => {
+                            print_mc_chat(&format!("§f[§4BAF§f]: §cPing failed: {}", e));
+                        }
+                    }
+                });
+                continue;
+            }
+
             // Handle /cofl and /baf commands (matching TypeScript consoleHandler.ts)
             if lowercase_input.starts_with("/cofl") || lowercase_input.starts_with("/baf") {
                 let parts: Vec<&str> = input.split_whitespace().collect();
@@ -3005,6 +3336,9 @@ async fn main() -> Result<()> {
                             info!("Command queue cleared");
                             continue;
                         }
+                        // `/cofl ping` is handled server-side by Coflnet (a ping-pong
+                        // round-trip measured over the modsocket); we forward it like
+                        // any other command rather than intercepting it.
                         // TODO: Add other local commands like forceClaim, connect, sellbz when implemented
                         _ => {
                             // Fall through to send to websocket
@@ -3310,6 +3644,8 @@ async fn main() -> Result<()> {
                             "data": inv_json
                         }).to_string();
                         let _ = ws.send_message(&upload_msg).await;
+                        // Let COFL ingest the uploaded inventory before selling.
+                        tokio::time::sleep(tokio::time::Duration::from_millis(600)).await;
                     }
                     let msg = serde_json::json!({
                         "type": "sellinventory",
@@ -3329,6 +3665,10 @@ async fn main() -> Result<()> {
 
     // Periodic log cleanup — delete archived logs older than 7 days once a day.
     frikadellen_baf::logging::spawn_periodic_log_cleanup();
+
+    // Keep a fresh Hypixel ping figure so bed timing can lead clicks by the real
+    // connection latency (refreshed every 60s; also updated by `/hypixel ping`).
+    frikadellen_baf::hypixel_ping::spawn_background_refresher(std::time::Duration::from_secs(60));
 
     // Island guard: if "Your Island" is not in the scoreboard, send
     // /lobby → /play sb → /is to return to the island.
@@ -3745,15 +4085,15 @@ mod tests {
     #[test]
     fn ah_pause_drops_bazaar_and_manage_orders_commands() {
         let paused = true;
-        assert!(should_drop_bazaar_command_during_ah_pause(
-            &CommandType::BazaarBuyOrder {
-                item_name: "Booster Cookie".into(),
-                item_tag: None,
-                amount: 1,
-                price_per_unit: 1.0,
-            },
-            paused,
-        ));
+        let buy = CommandType::BazaarBuyOrder {
+            item_name: "Booster Cookie".into(),
+            item_tag: None,
+            amount: 1,
+            price_per_unit: 1.0,
+        };
+        // BUY orders are always dropped during the AH pause, full or not.
+        assert!(should_drop_bazaar_command_during_ah_pause(&buy, paused, false));
+        assert!(should_drop_bazaar_command_during_ah_pause(&buy, paused, true));
         // BazaarSellOrder should NOT be dropped during AH pause (only buy orders are dropped)
         assert!(!should_drop_bazaar_command_during_ah_pause(
             &CommandType::BazaarSellOrder {
@@ -3763,21 +4103,22 @@ mod tests {
                 price_per_unit: 1.0,
             },
             paused,
+            false,
         ));
         assert!(!should_drop_bazaar_command_during_ah_pause(
             &CommandType::ClaimSoldItem,
             paused,
+            false,
         ));
-        // ManageOrders IS deferred during AH pause — it would block the AH
-        // flip purchase.  A new ManageOrders is re-queued when flips resume.
-        assert!(should_drop_bazaar_command_during_ah_pause(
-            &CommandType::ManageOrders { cancel_open: false, target_item: None },
-            paused,
-        ));
-        assert!(should_drop_bazaar_command_during_ah_pause(
-            &CommandType::ManageOrders { cancel_open: true, target_item: None },
-            paused,
-        ));
+        // ManageOrders IS deferred during AH pause when inventory is NOT full —
+        // it would block the AH flip purchase.
+        let manage = CommandType::ManageOrders { cancel_open: false, target_item: None };
+        assert!(should_drop_bazaar_command_during_ah_pause(&manage, paused, false));
+        // ...but when the inventory IS full it must NOT be deferred, so the bot
+        // can keep managing orders to free space and escape the deadlock.
+        assert!(!should_drop_bazaar_command_during_ah_pause(&manage, paused, true));
+        // Nothing is dropped when not paused.
+        assert!(!should_drop_bazaar_command_during_ah_pause(&manage, false, true));
     }
 
     #[test]

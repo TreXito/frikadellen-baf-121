@@ -23,7 +23,14 @@ fn notify_relay_url() -> Option<String> {
         .filter(|s| !s.is_empty())
         .map(|s| s.to_owned())
         .or_else(|| std::env::var("BAF_NOTIFY_RELAY_URL").ok().filter(|s| !s.is_empty()))
+        // Default every client to the central backend's relay endpoint. The
+        // request is still HMAC-signed with BAF_NOTIFY_SECRET, which the backend
+        // requires — so an unsigned build simply has its requests rejected.
+        .or_else(|| Some(DEFAULT_NOTIFY_RELAY_URL.to_string()))
 }
+
+/// Central backend relay endpoint used when no override is configured.
+const DEFAULT_NOTIFY_RELAY_URL: &str = "https://backend.auctionflipper.bz/relay";
 
 /// Return the HMAC-SHA256 signing secret.
 ///
@@ -320,11 +327,12 @@ pub async fn send_webhook_item_purchased(
     profit: Option<i64>,
     purse: Option<u64>,
     buy_speed_ms: Option<u64>,
+    via_bed: Option<bool>,
     auction_uuid: Option<&str>,
     finder: Option<&str>,
     webhook_url: &str,
 ) {
-    let fields = build_purchase_fields(price, target, profit, buy_speed_ms, finder, auction_uuid);
+    let fields = build_purchase_fields(price, target, profit, buy_speed_ms, via_bed, finder, auction_uuid);
     let safe_item = sanitize_item_name(item_name);
     let payload = serde_json::json!({
         "embeds": [{
@@ -821,12 +829,13 @@ pub async fn send_webhook_legendary_flip(
     profit: i64,
     purse: Option<u64>,
     buy_speed_ms: Option<u64>,
+    via_bed: Option<bool>,
     auction_uuid: Option<&str>,
     finder: Option<&str>,
     discord_id: Option<&str>,
     webhook_url: &str,
 ) {
-    let fields = build_purchase_fields(price, target, Some(profit), buy_speed_ms, finder, auction_uuid);
+    let fields = build_purchase_fields(price, target, Some(profit), buy_speed_ms, via_bed, finder, auction_uuid);
     let safe_item = sanitize_item_name(item_name);
     let payload = serde_json::json!({
         "embeds": [{
@@ -859,12 +868,13 @@ pub async fn send_webhook_divine_flip(
     profit: i64,
     purse: Option<u64>,
     buy_speed_ms: Option<u64>,
+    via_bed: Option<bool>,
     auction_uuid: Option<&str>,
     finder: Option<&str>,
     discord_id: Option<&str>,
     webhook_url: &str,
 ) {
-    let fields = build_purchase_fields(price, target, Some(profit), buy_speed_ms, finder, auction_uuid);
+    let fields = build_purchase_fields(price, target, Some(profit), buy_speed_ms, via_bed, finder, auction_uuid);
     let safe_item = sanitize_item_name(item_name);
     let payload = serde_json::json!({
         "embeds": [{
@@ -947,6 +957,7 @@ fn build_purchase_fields(
     target: Option<u64>,
     profit: Option<i64>,
     buy_speed_ms: Option<u64>,
+    via_bed: Option<bool>,
     finder: Option<&str>,
     auction_uuid: Option<&str>,
 ) -> Vec<serde_json::Value> {
@@ -982,9 +993,16 @@ fn build_purchase_fields(
         }));
     }
     if let Some(ms) = buy_speed_ms {
+        // Label how the buy resolved: a "Bed" flip waited out a grace period,
+        // a "Nugget" flip was instantly buyable.
+        let kind = match via_bed {
+            Some(true) => " (Bed)",
+            Some(false) => " (Nugget)",
+            None => "",
+        };
         fields.push(serde_json::json!({
             "name": "⚡ Buy Speed",
-            "value": format!("```\n{}ms\n```", ms),
+            "value": format!("```\n{}ms{}\n```", ms, kind),
             "inline": true
         }));
     }

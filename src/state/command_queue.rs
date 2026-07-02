@@ -211,6 +211,17 @@ impl CommandQueue {
         self.queue.read().iter().any(|c| matches!(c.command_type, CommandType::ManageOrders { .. }))
     }
 
+    /// Returns true if a ClaimSoldItem command is queued or currently executing.
+    /// Used to coalesce repeated `collectAuctions` signals into a single claim.
+    pub fn has_claim_sold(&self) -> bool {
+        if let Some(ref cur) = *self.current_command.read() {
+            if matches!(cur.command_type, CommandType::ClaimSoldItem) {
+                return true;
+            }
+        }
+        self.queue.read().iter().any(|c| matches!(c.command_type, CommandType::ClaimSoldItem))
+    }
+
     /// Check if queue is empty
     pub fn is_empty(&self) -> bool {
         self.queue.read().is_empty() && self.current_command.read().is_none()
