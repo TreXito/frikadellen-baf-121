@@ -161,10 +161,23 @@ pub fn handle_start_join_server_event(
 async fn create_conn_and_send_intention_packet(
     opts: ConnectOpts,
 ) -> Result<LoginConn, ConnectionError> {
-    let mut conn = if let Some(proxy) = opts.server_proxy {
+    let conn = if let Some(proxy) = opts.server_proxy {
         Connection::new_with_proxy(&opts.address.socket, proxy).await?
     } else {
         Connection::new(&opts.address.socket).await?
+    };
+
+    // Force TCP_NODELAY per the global flag. Upstream's `new_with_proxy` never
+    // sets it, so proxied sockets otherwise keep Nagle's algorithm on and delay
+    // small latency-critical packets. Reunite → set → re-wrap (no cipher or
+    // compression is active at the handshake stage, so wrapping is lossless).
+    let mut conn = match conn.unwrap() {
+        Ok(stream) => {
+            let _ = stream.set_nodelay(crate::TCP_NODELAY.load(std::sync::atomic::Ordering::Relaxed));
+            Connection::wrap(stream)
+        }
+        // Reuniting the two halves of a socket we just split cannot fail.
+        Err(_) => unreachable!("reunite own socket halves"),
     };
 
     conn.write(ServerboundIntention {

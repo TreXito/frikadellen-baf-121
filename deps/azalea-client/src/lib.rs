@@ -25,3 +25,12 @@ pub use client::{
 };
 pub use movement::{StartSprintEvent, StartWalkEvent};
 pub use plugins::*;
+
+/// Global switch for TCP_NODELAY (disabling Nagle's algorithm) on new game
+/// connections. Upstream `Connection::new` sets nodelay on the direct path but
+/// `Connection::new_with_proxy` does NOT set it on the SOCKS-proxied socket, so
+/// proxied bots suffer up to ~40ms of send buffering on small packets (clicks,
+/// commands). The join plugin reads this when a connection is established and
+/// forces the socket accordingly. Default: on. The host app may toggle it.
+pub static TCP_NODELAY: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(true);

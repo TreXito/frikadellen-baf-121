@@ -3293,23 +3293,37 @@ async fn main() -> Result<()> {
             
             let lowercase_input = input.to_lowercase();
 
-            // `/hypixel ping` (alias `/ping`): measure real RTT to mc.hypixel.net
-            // over the Minecraft protocol — 4 pings in ~1s, averaged. This is the
-            // latency the game connection actually sees (through Cloudflare to
-            // Hypixel's backend), unlike an ICMP ping which only hits the edge.
+            // `/hypixel ping` (alias `/ping`): report the TRUE game-connection RTT.
+            //
+            // The live figure comes from the vanilla F3+3 play-ping
+            // (ServerboundPingRequest/ClientboundPongResponse) that the bot sends
+            // on its actual game socket every few seconds — so it travels the
+            // exact path gameplay does, INCLUDING any SOCKS proxy hop. The SLP
+            // probe (measure()) opens a separate status connection straight to
+            // mc.hypixel.net, which Cloudflare answers at its nearest edge and
+            // which skips the proxy entirely — that's why it reads absurdly low
+            // (e.g. 3ms) and must not be treated as the real latency.
             if lowercase_input == "/hypixel ping" || lowercase_input == "/ping" {
-                info!("[Ping] Measuring ping to {} …", frikadellen_baf::hypixel_ping::HYPIXEL_HOST);
+                info!("[Ping] Reporting live game-connection RTT (F3+3) + SLP edge probe …");
                 tokio::spawn(async move {
+                    // Live in-connection RTT — the number that actually matters.
+                    match frikadellen_baf::hypixel_ping::latest_live_ping_ms() {
+                        Some(live) => print_mc_chat(&format!(
+                            "§f[§4BAF§f]: §bPing §7→ §agame connection {}ms §7(live, via proxy path)",
+                            live
+                        )),
+                        None => print_mc_chat(
+                            "§f[§4BAF§f]: §eLive game ping not measured yet §7(F3+3 pinger warms up ~15s after login) — showing edge probe only",
+                        ),
+                    }
+                    // SLP edge probe for comparison — explicitly labelled so it is
+                    // never mistaken for the real latency.
                     match frikadellen_baf::hypixel_ping::measure(4, std::time::Duration::from_millis(200)).await {
-                        Ok(s) => {
-                            print_mc_chat(&format!(
-                                "§f[§4BAF§f]: §bHypixel ping §7→ §aavg {}ms §7(min {}ms, max {}ms over {} pings)",
-                                s.avg.as_millis(), s.min.as_millis(), s.max.as_millis(), s.count
-                            ));
-                        }
-                        Err(e) => {
-                            print_mc_chat(&format!("§f[§4BAF§f]: §cPing failed: {}", e));
-                        }
+                        Ok(s) => print_mc_chat(&format!(
+                            "§f[§4BAF§f]: §7edge/SLP probe → avg {}ms (min {}ms, max {}ms) — skips proxy, hits Cloudflare edge",
+                            s.avg.as_millis(), s.min.as_millis(), s.max.as_millis()
+                        )),
+                        Err(e) => print_mc_chat(&format!("§f[§4BAF§f]: §7edge/SLP probe failed: {}", e)),
                     }
                 });
                 continue;
