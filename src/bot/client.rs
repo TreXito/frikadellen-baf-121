@@ -3942,16 +3942,14 @@ async fn handle_window_interaction(
                         // then to the configured static lead. Clicking early on a bed
                         // is safe (the item just isn't buyable yet) whereas clicking
                         // late misses it.
-                        // Ping-adaptive lead is operator-gated: only lead by the
-                        // measured RTT when the backend has enabled it for this
-                        // instance; otherwise use the static configured lead.
-                        let pre_click_lead_ms = if crate::hypixel_ping::adaptive_bed_enabled() {
-                            match crate::hypixel_ping::best_ping_ms() {
-                                Some(ping) => ping + 20,
-                                None => state.bed_pre_click_ms,
-                            }
-                        } else {
-                            state.bed_pre_click_ms
+                        // Lever 1 (always on): lead the bed pre-click by the true
+                        // live-connection RTT measured on the game socket via the
+                        // vanilla F3+3 play-ping (includes any SOCKS proxy hop, so
+                        // it is accurate per-bot). Falls back to the static config
+                        // lead only until the first ping resolves after login.
+                        let pre_click_lead_ms = match crate::hypixel_ping::best_ping_ms() {
+                            Some(ping) => ping + 20,
+                            None => state.bed_pre_click_ms,
                         };
                         // Convert the raw epoch-ms timestamp to a remaining-ms delta.
                         let remaining_ms_from_purchase_at = state.pending_purchase_at_ms.read()
