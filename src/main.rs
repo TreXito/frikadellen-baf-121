@@ -21,6 +21,11 @@ use frikadellen_baf::utils::restart_process;
 
 const VERSION: &str = "af-3.0";
 const PERIODIC_AH_CLAIM_CHECK_INTERVAL_SECS: u64 = 300;
+/// When the inventory is under pressure (near/full), poll My Auctions this
+/// often to claim sold/expired auctions — freeing AH slots so the bot can list
+/// and drain its inventory. Expired auctions emit no chat event, so without
+/// this the bot can deadlock (full inventory, no free AH slots, can't list).
+const PROACTIVE_CLAIM_UNDER_PRESSURE_SECS: u64 = 60;
 /// If no auction has been listed for this many seconds, force a `/cofl sellinventory`
 /// plus claim sold/purchased auctions to unblock stuck inventory.
 const INVENTORY_IDLE_SELLINVENTORY_SECS: u64 = 30 * 60; // 30 minutes
@@ -2781,9 +2786,15 @@ async fn main() -> Result<()> {
                     // when both AH flips and bazaar flips are enabled.
                     // Relaxed ordering is fine here — these are simple toggle flags where
                     // eventual visibility across threads is sufficient.
-                    // Only relevant when BOTH AH and bazaar flips are enabled — if
-                    // bazaar is off there's nothing to pause, so don't print/churn.
-                    if enable_bazaar_flips_ws.load(Ordering::Relaxed) && enable_ah_flips_ws.load(Ordering::Relaxed) {
+                    // Only relevant when BOTH AH and bazaar flips are enabled AND
+                    // bazaar flipping is actually in use (a bazaar flip arrived this
+                    // session — i.e. the COFL bazaar finder is on). Otherwise there's
+                    // nothing to pause, so don't print "pausing/resumed" or churn
+                    // ManageOrders on every countdown.
+                    if enable_bazaar_flips_ws.load(Ordering::Relaxed)
+                        && enable_ah_flips_ws.load(Ordering::Relaxed)
+                        && bazaar_flip_seen_ws.load(Ordering::Relaxed)
+                    {
                         // Always (re)extend the pause window to now+20s. Rapid repeated
                         // countdowns just push the deadline out.
                         let now_ms = std::time::SystemTime::now()
@@ -3573,6 +3584,42 @@ async fn main() -> Result<()> {
                         CommandType::ClaimSoldItem,
                         CommandPriority::Normal,
                         false,
+                    );
+                }
+            }
+        });
+    }
+
+    // Proactive anti-deadlock claim: when the inventory is near/full the bot
+    // can't buy, and it can only drain by listing — which needs a free AH slot.
+    // Expired auctions free slots but emit no chat event, so poll My Auctions
+    // on a short cadence under inventory pressure and claim (High priority so
+    // it runs ahead of queued bazaar work). Unlike the periodic check above
+    // this does NOT require an empty queue — that's the whole point, since a
+    // stuck bot often has commands sitting in the queue.
+    if config.enable_ah_flips {
+        let bot_client_pressure = bot_client.clone();
+        let command_queue_pressure = command_queue.clone();
+        tokio::spawn(async move {
+            use frikadellen_baf::types::{CommandPriority, CommandType};
+            sleep(Duration::from_secs(120)).await; // let startup finish
+            loop {
+                sleep(Duration::from_secs(PROACTIVE_CLAIM_UNDER_PRESSURE_SECS)).await;
+                let bot_state = bot_client_pressure.state();
+                // Only when the bot is idle-ish and actually under inventory
+                // pressure, and not already claiming/queued to claim.
+                if bot_state.allows_commands()
+                    && bot_client_pressure.is_inventory_near_full()
+                    && !command_queue_pressure.has_claim_sold()
+                {
+                    info!(
+                        "[ClaimSold] Inventory near-full — proactively checking My Auctions for claimable auctions (every {}s under pressure)",
+                        PROACTIVE_CLAIM_UNDER_PRESSURE_SECS
+                    );
+                    command_queue_pressure.enqueue(
+                        CommandType::ClaimSoldItem,
+                        CommandPriority::High,
+                        true,
                     );
                 }
             }
