@@ -141,6 +141,10 @@ pub struct BackendDeps {
     /// Set once this instance is linked/owned, so the terminal stops re-printing
     /// the link code.
     pub linked: Arc<AtomicBool>,
+    /// Runtime enable flag for AH flipping (shared with the web panel).
+    pub enable_ah_flips: Arc<AtomicBool>,
+    /// Runtime enable flag for Bazaar flipping (shared with the web panel).
+    pub enable_bazaar_flips: Arc<AtomicBool>,
 }
 
 /// Spawn the backend client task. Returns a [`BackendHandle`]; if the token is
@@ -304,6 +308,18 @@ fn execute_query(action: &str, deps: &BackendDeps) -> Option<Value> {
         // Operator log download: returns the tail of this instance's live log so
         // the central backend GUI can offer a per-bot log download.
         "get_logs" => Some(json!({ "logs": read_log_tail() })),
+        // Structured status for the operator GUI status bar. Mirrors the
+        // human-readable "status" control command as machine-readable fields.
+        "get_status" => Some(json!({
+            "paused": deps.macro_paused.load(Ordering::Relaxed),
+            "ahFlips": deps.enable_ah_flips.load(Ordering::Relaxed),
+            "bazaarFlips": deps.enable_bazaar_flips.load(Ordering::Relaxed),
+            "purse": deps.bot_client.get_purse(),
+            "freeSlots": deps.bot_client.empty_slot_count(),
+            "listings": deps.bot_client.active_auction_count(),
+            "adaptiveBed": crate::hypixel_ping::adaptive_bed_enabled(),
+            "adaptiveSkip": crate::hypixel_ping::tick_safe_skip_enabled(),
+        })),
         _ => None,
     }
 }
@@ -345,16 +361,30 @@ fn execute_command(action: &str, args: Option<&Value>, deps: &BackendDeps) -> (b
                 Err(e) => (false, format!("failed to load config: {}", e)),
             }
         }
-        // Backend-only toggle for adaptive buy timing. Not surfaced in config or
+        // Backend-only toggles for adaptive buy timing. Not surfaced in config or
         // the instance web panel — controlled solely from the operator backend.
+        // Args: `bed` (ping-adaptive bed lead) and/or `skip` (tick-safe skip
+        // pre-click) set the flags individually; legacy `enabled` sets both.
         "set_adaptive_timing" => {
-            let enabled = args
-                .and_then(|a| a.get("enabled"))
-                .and_then(|v| v.as_bool())
-                .unwrap_or(false);
-            crate::hypixel_ping::ADAPTIVE_TIMING.store(enabled, Ordering::Relaxed);
-            info!("[Backend] adaptive timing set to {}", enabled);
-            (true, format!("adaptive timing {}", if enabled { "on" } else { "off" }))
+            let get_bool = |k: &str| args.and_then(|a| a.get(k)).and_then(|v| v.as_bool());
+            if let Some(enabled) = get_bool("enabled") {
+                crate::hypixel_ping::ADAPTIVE_BED_TIMING.store(enabled, Ordering::Relaxed);
+                crate::hypixel_ping::TICK_SAFE_SKIP.store(enabled, Ordering::Relaxed);
+            }
+            if let Some(bed) = get_bool("bed") {
+                crate::hypixel_ping::ADAPTIVE_BED_TIMING.store(bed, Ordering::Relaxed);
+            }
+            if let Some(skip) = get_bool("skip") {
+                crate::hypixel_ping::TICK_SAFE_SKIP.store(skip, Ordering::Relaxed);
+            }
+            let bed = crate::hypixel_ping::adaptive_bed_enabled();
+            let skip = crate::hypixel_ping::tick_safe_skip_enabled();
+            info!("[Backend] adaptive timing: bed={} skip={}", bed, skip);
+            (true, format!(
+                "adaptive timing: bed {} / skip {}",
+                if bed { "on" } else { "off" },
+                if skip { "on" } else { "off" }
+            ))
         }
         "pause" => {
             deps.macro_paused.store(true, Ordering::Relaxed);
@@ -364,6 +394,16 @@ fn execute_command(action: &str, args: Option<&Value>, deps: &BackendDeps) -> (b
             deps.macro_paused.store(false, Ordering::Relaxed);
             (true, "macro resumed".to_string())
         }
+        "toggle_ah" => {
+            let now = !deps.enable_ah_flips.load(Ordering::Relaxed);
+            deps.enable_ah_flips.store(now, Ordering::Relaxed);
+            (true, format!("AH flips {}", if now { "enabled" } else { "disabled" }))
+        }
+        "toggle_bazaar" => {
+            let now = !deps.enable_bazaar_flips.load(Ordering::Relaxed);
+            deps.enable_bazaar_flips.store(now, Ordering::Relaxed);
+            (true, format!("Bazaar flips {}", if now { "enabled" } else { "disabled" }))
+        }
         "status" => {
             let (ah, bz) = deps.profit_tracker.totals();
             let paused = deps.macro_paused.load(Ordering::Relaxed);
@@ -371,14 +411,15 @@ fn execute_command(action: &str, args: Option<&Value>, deps: &BackendDeps) -> (b
             let free = deps.bot_client.empty_slot_count();
             let auctions = deps.bot_client.active_auction_count();
             let msg = format!(
-                "{} • profit AH {} / BZ {} • {} free slots • {} listings{} • adaptive:{}",
+                "{} • profit AH {} / BZ {} • {} free slots • {} listings{} • bed:{} skip:{}",
                 if paused { "paused" } else { "running" },
                 ah,
                 bz,
                 free,
                 auctions,
                 purse.map(|p| format!(" • purse {}", p)).unwrap_or_default(),
-                if crate::hypixel_ping::adaptive_timing_enabled() { "on" } else { "off" },
+                if crate::hypixel_ping::adaptive_bed_enabled() { "on" } else { "off" },
+                if crate::hypixel_ping::tick_safe_skip_enabled() { "on" } else { "off" },
             );
             (true, msg)
         }
