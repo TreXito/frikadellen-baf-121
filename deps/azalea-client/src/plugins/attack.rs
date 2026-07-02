@@ -1,10 +1,9 @@
 use azalea_core::{game_type::GameMode, tick::GameTick};
 use azalea_entity::{
-    Attributes, Crouching, Physics, indexing::EntityIdIndex, metadata::Sprinting,
-    update_bounding_box,
+    Attributes, Physics, indexing::EntityIdIndex, metadata::Sprinting, update_bounding_box,
 };
 use azalea_physics::PhysicsSystems;
-use azalea_protocol::packets::game::s_interact::{self, ServerboundInteract};
+use azalea_protocol::packets::game::ServerboundAttack;
 use bevy_app::{App, Plugin, Update};
 use bevy_ecs::prelude::*;
 use derive_more::{Deref, DerefMut};
@@ -12,7 +11,7 @@ use tracing::warn;
 
 use super::packet::game::SendGamePacketEvent;
 use crate::{
-    Client, interact::SwingArmEvent, local_player::LocalGameMode, movement::MoveEventsSystems,
+    interact::SwingArmEvent, local_player::LocalGameMode, movement::MoveEventsSystems,
     respawn::perform_respawn,
 };
 
@@ -43,49 +42,6 @@ impl Plugin for AttackPlugin {
     }
 }
 
-impl Client {
-    /// Attack an entity in the world.
-    ///
-    /// This doesn't automatically look at the entity or perform any
-    /// range/visibility checks, so it might trigger anticheats.
-    pub fn attack(&self, entity: Entity) {
-        self.ecs.lock().write_message(AttackEvent {
-            entity: self.entity,
-            target: entity,
-        });
-    }
-
-    /// Whether the player has an attack cooldown.
-    ///
-    /// Also see [`Client::attack_cooldown_remaining_ticks`].
-    pub fn has_attack_cooldown(&self) -> bool {
-        let Some(attack_strength_scale) = self.get_component::<AttackStrengthScale>() else {
-            // they don't even have an AttackStrengthScale so they probably can't even
-            // attack? whatever, just return false
-            return false;
-        };
-        *attack_strength_scale < 1.0
-    }
-
-    /// Returns the number of ticks until we can attack at full strength again.
-    ///
-    /// Also see [`Client::has_attack_cooldown`].
-    pub fn attack_cooldown_remaining_ticks(&self) -> usize {
-        let mut ecs = self.ecs.lock();
-        let Ok((attributes, ticks_since_last_attack)) = ecs
-            .query::<(&Attributes, &TicksSinceLastAttack)>()
-            .get(&ecs, self.entity)
-        else {
-            return 0;
-        };
-
-        let attack_strength_delay = get_attack_strength_delay(attributes);
-        let remaining_ticks = attack_strength_delay - **ticks_since_last_attack as f32;
-
-        remaining_ticks.max(0.).ceil() as usize
-    }
-}
-
 /// A component that indicates that this client will be attacking the given
 /// entity next tick.
 #[derive(Clone, Component, Debug)]
@@ -102,7 +58,6 @@ pub fn handle_attack_queued(
         &mut Sprinting,
         &AttackQueued,
         &LocalGameMode,
-        &Crouching,
         &EntityIdIndex,
     )>,
 ) {
@@ -113,7 +68,6 @@ pub fn handle_attack_queued(
         mut sprinting,
         attack_queued,
         game_mode,
-        crouching,
         entity_id_index,
     ) in &mut query
     {
@@ -127,10 +81,8 @@ pub fn handle_attack_queued(
 
         commands.trigger(SendGamePacketEvent::new(
             client_entity,
-            ServerboundInteract {
+            ServerboundAttack {
                 entity_id: target_entity_id,
-                action: s_interact::ActionType::Attack,
-                using_secondary_action: **crouching,
             },
         ));
         commands.trigger(SwingArmEvent {

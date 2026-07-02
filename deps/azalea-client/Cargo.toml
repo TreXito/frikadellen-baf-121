@@ -12,8 +12,8 @@
 [package]
 edition = "2024"
 name = "azalea-client"
-version = "0.15.1+mc1.21.11"
-build = false
+version = "0.16.0+mc26.1"
+build = "build.rs"
 autolib = false
 autobins = false
 autoexamples = false
@@ -42,72 +42,90 @@ packet-event = []
 name = "azalea_client"
 path = "src/lib.rs"
 
+[[test]]
+name = "main"
+path = "tests/main.rs"
+
 [dependencies.async-compat]
 version = "0.2.5"
 
 [dependencies.azalea-auth]
-version = "0.15.1"
+version = "0.16.0"
 default-features = false
 
 [dependencies.azalea-block]
-version = "0.15.1"
+version = "0.16.0"
+default-features = false
 
 [dependencies.azalea-buf]
-version = "0.15.1"
+version = "0.16.0"
+default-features = false
 
 [dependencies.azalea-chat]
-version = "0.15.1"
+version = "0.16.0"
+default-features = false
 
 [dependencies.azalea-core]
-version = "0.15.1"
+version = "0.16.0"
+default-features = false
 
 [dependencies.azalea-crypto]
-version = "0.15.1"
+version = "0.16.0"
+default-features = false
 
 [dependencies.azalea-entity]
-version = "0.15.1"
+version = "0.16.0"
+default-features = false
 
 [dependencies.azalea-inventory]
-version = "0.15.1"
+version = "0.16.0"
+default-features = false
 
 [dependencies.azalea-physics]
-version = "0.15.1"
+version = "0.16.0"
+default-features = false
 
 [dependencies.azalea-protocol]
-version = "0.15.1"
-features = ["connecting"]
+version = "0.16.0"
+features = [
+    "connecting",
+    "bevy_ecs",
+]
 default-features = false
 
 [dependencies.azalea-registry]
-version = "0.15.1"
+version = "0.16.0"
+default-features = false
 
 [dependencies.azalea-world]
-version = "0.15.1"
+version = "0.16.0"
+default-features = false
 
 [dependencies.bevy_app]
-version = "0.18.0"
+version = "0.18.1"
 
 [dependencies.bevy_ecs]
-version = "0.18.0"
+version = "0.18.1"
+features = ["multi_threaded"]
 default-features = false
 
 [dependencies.bevy_log]
-version = "0.18.0"
+version = "0.18.1"
 optional = true
 
 [dependencies.bevy_tasks]
-version = "0.18.0"
+version = "0.18.1"
 
 [dependencies.bevy_time]
-version = "0.18.0"
+version = "0.18.1"
 
 [dependencies.bevy_utils]
-version = "0.18.0"
+version = "0.18.1"
 features = ["debug"]
 default-features = false
 
 [dependencies.chrono]
-version = "0.4.43"
+version = "0.4.44"
 features = ["now"]
 default-features = false
 
@@ -127,36 +145,33 @@ version = "0.1.2"
 [dependencies.parking_lot]
 version = "0.12.5"
 
-[dependencies.pastey]
-version = "0.2.1"
-
 [dependencies.regex]
-version = "1.12.2"
+version = "1.12.3"
 
 [dependencies.reqwest]
-version = "0.13.1"
+version = "0.13.2"
 features = ["socks"]
 optional = true
 default-features = false
 
 [dependencies.simdnbt]
-version = "0.9.0"
+version = "0.10.0"
 
 [dependencies.thiserror]
 version = "2.0.18"
 
 [dependencies.tokio]
-version = "1.49.0"
+version = "1.50.0"
 features = ["sync"]
 
 [dependencies.tracing]
 version = "0.1.44"
 
 [dependencies.uuid]
-version = "1.20.0"
+version = "1.22.0"
 
-[dev-dependencies.anyhow]
-version = "1.0.100"
+[dev-dependencies.eyre]
+version = "0.6.12"
 
 [lints.clippy]
 str_to_string = "warn"
