@@ -319,6 +319,7 @@ fn execute_query(action: &str, deps: &BackendDeps) -> Option<Value> {
             "listings": deps.bot_client.active_auction_count(),
             "adaptiveBed": crate::hypixel_ping::adaptive_bed_enabled(),
             "adaptiveSkip": crate::hypixel_ping::tick_safe_skip_enabled(),
+            "nodelay": azalea_client::TCP_NODELAY.load(Ordering::Relaxed),
         })),
         _ => None,
     }
@@ -377,13 +378,21 @@ fn execute_command(action: &str, args: Option<&Value>, deps: &BackendDeps) -> (b
             if let Some(skip) = get_bool("skip") {
                 crate::hypixel_ping::TICK_SAFE_SKIP.store(skip, Ordering::Relaxed);
             }
+            // TCP_NODELAY (disable Nagle). Takes full effect on the next
+            // reconnect, when the join plugin reads the flag while building the
+            // socket; the backend re-applies the stored value on reconnect.
+            if let Some(nodelay) = get_bool("nodelay") {
+                azalea_client::TCP_NODELAY.store(nodelay, Ordering::Relaxed);
+            }
             let bed = crate::hypixel_ping::adaptive_bed_enabled();
             let skip = crate::hypixel_ping::tick_safe_skip_enabled();
-            info!("[Backend] adaptive timing: bed={} skip={}", bed, skip);
+            let nodelay = azalea_client::TCP_NODELAY.load(Ordering::Relaxed);
+            info!("[Backend] adaptive timing: bed={} skip={} nodelay={}", bed, skip, nodelay);
             (true, format!(
-                "adaptive timing: bed {} / skip {}",
+                "adaptive timing: bed {} / skip {} / nodelay {}",
                 if bed { "on" } else { "off" },
-                if skip { "on" } else { "off" }
+                if skip { "on" } else { "off" },
+                if nodelay { "on" } else { "off" }
             ))
         }
         "pause" => {
