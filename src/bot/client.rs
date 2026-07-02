@@ -3942,13 +3942,9 @@ async fn handle_window_interaction(
                         // then to the configured static lead. Clicking early on a bed
                         // is safe (the item just isn't buyable yet) whereas clicking
                         // late misses it.
-                        // Ping-adaptive bed lead — toggled per-instance from the
-                        // backend (adaptive_bed). When on, lead the bed pre-click
-                        // by the true live-connection RTT measured on the game
-                        // socket via the vanilla F3+3 play-ping (includes any SOCKS
-                        // proxy hop, so it is accurate per-bot); otherwise use the
-                        // static configured lead. Clicking a bed early is a harmless
-                        // no-op, so this is zero-risk either way.
+                        // Ping-adaptive lead is operator-gated: only lead by the
+                        // measured RTT when the backend has enabled it for this
+                        // instance; otherwise use the static configured lead.
                         let pre_click_lead_ms = if crate::hypixel_ping::adaptive_bed_enabled() {
                             match crate::hypixel_ping::best_ping_ms() {
                                 Some(ping) => ping + 20,
