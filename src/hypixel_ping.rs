@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Result};
+use once_cell::sync::Lazy;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
@@ -24,11 +25,76 @@ pub const HYPIXEL_PORT: u16 = 25565;
 /// bed-timing loop.
 pub static LATEST_PING_MS: AtomicU64 = AtomicU64::new(0);
 
-/// Returns the latest measured ping in ms, or `None` if never measured.
+/// Latest RTT measured on the **live game connection** (via the vanilla F3+3
+/// ping: `ServerboundPingRequest`/`ClientboundPongResponse`). `0` = not measured.
+/// This is strictly more accurate than the SLP figure for bed timing because it
+/// travels the exact same path as gameplay packets — including any SOCKS proxy
+/// hop the SLP probe skips. Updated from the packet handler in `bot::client`.
+pub static LATEST_LIVE_PING_MS: AtomicU64 = AtomicU64::new(0);
+
+/// Server-side opt-in for adaptive buy timing. Off by default; flipped only by a
+/// backend control command (never exposed in config.toml or the instance web
+/// panel). When off, the buy path behaves exactly as before.
+pub static ADAPTIVE_TIMING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Returns the latest SLP-measured ping in ms, or `None` if never measured.
 pub fn latest_ping_ms() -> Option<u64> {
     match LATEST_PING_MS.load(Ordering::Relaxed) {
         0 => None,
         v => Some(v),
+    }
+}
+
+/// Returns the latest live-connection RTT in ms, or `None` if never measured.
+pub fn latest_live_ping_ms() -> Option<u64> {
+    match LATEST_LIVE_PING_MS.load(Ordering::Relaxed) {
+        0 => None,
+        v => Some(v),
+    }
+}
+
+/// Best available RTT for timing decisions: the live-connection figure when we
+/// have one, else the SLP fallback. This is what bed timing should lead by.
+pub fn best_ping_ms() -> Option<u64> {
+    latest_live_ping_ms().or_else(latest_ping_ms)
+}
+
+/// Whether adaptive buy timing is currently enabled (backend-controlled).
+pub fn adaptive_timing_enabled() -> bool {
+    ADAPTIVE_TIMING.load(Ordering::Relaxed)
+}
+
+// ── live-connection RTT correlation (F3+3 ping) ──────────────────────────────
+// The pinger records a token + send time; the packet handler matches the pong's
+// token and publishes the RTT. Lock-free: only the most-recent ping is tracked
+// (older pongs are ignored), which is all bed timing needs.
+static PROCESS_START: Lazy<Instant> = Lazy::new(Instant::now);
+static PING_COUNTER: AtomicU64 = AtomicU64::new(0);
+static PING_TOKEN: AtomicU64 = AtomicU64::new(0);
+static PING_SENT_MICROS: AtomicU64 = AtomicU64::new(0);
+
+/// Allocate a token for a new ping and record its send time. The returned token
+/// must be placed in `ServerboundPingRequest.time`.
+pub fn ping_request_started() -> u64 {
+    let token = PING_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
+    PING_SENT_MICROS.store(PROCESS_START.elapsed().as_micros() as u64, Ordering::Relaxed);
+    // Publish the token last so a matching pong always sees a consistent send time.
+    PING_TOKEN.store(token, Ordering::Release);
+    token
+}
+
+/// Record a pong carrying `token`. Updates [`LATEST_LIVE_PING_MS`] when it
+/// matches the outstanding request.
+pub fn record_pong(token: u64) {
+    if token != PING_TOKEN.load(Ordering::Acquire) {
+        return;
+    }
+    let now = PROCESS_START.elapsed().as_micros() as u64;
+    let sent = PING_SENT_MICROS.load(Ordering::Relaxed);
+    if now >= sent {
+        let rtt_ms = ((now - sent) + 500) / 1000; // round to nearest ms
+        LATEST_LIVE_PING_MS.store(rtt_ms.max(1), Ordering::Relaxed);
     }
 }
 
