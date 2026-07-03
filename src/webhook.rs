@@ -330,9 +330,11 @@ pub async fn send_webhook_item_purchased(
     via_bed: Option<bool>,
     auction_uuid: Option<&str>,
     finder: Option<&str>,
+    received_at_ms: Option<i64>,
+    purchased_at_ms: Option<i64>,
     webhook_url: &str,
 ) {
-    let fields = build_purchase_fields(price, target, profit, buy_speed_ms, via_bed, finder, auction_uuid);
+    let fields = build_purchase_fields(price, target, profit, buy_speed_ms, via_bed, finder, auction_uuid, received_at_ms, purchased_at_ms);
     let safe_item = sanitize_item_name(item_name);
     let payload = serde_json::json!({
         "embeds": [{
@@ -833,9 +835,11 @@ pub async fn send_webhook_legendary_flip(
     auction_uuid: Option<&str>,
     finder: Option<&str>,
     discord_id: Option<&str>,
+    received_at_ms: Option<i64>,
+    purchased_at_ms: Option<i64>,
     webhook_url: &str,
 ) {
-    let fields = build_purchase_fields(price, target, Some(profit), buy_speed_ms, via_bed, finder, auction_uuid);
+    let fields = build_purchase_fields(price, target, Some(profit), buy_speed_ms, via_bed, finder, auction_uuid, received_at_ms, purchased_at_ms);
     let safe_item = sanitize_item_name(item_name);
     let payload = serde_json::json!({
         "embeds": [{
@@ -872,9 +876,11 @@ pub async fn send_webhook_divine_flip(
     auction_uuid: Option<&str>,
     finder: Option<&str>,
     discord_id: Option<&str>,
+    received_at_ms: Option<i64>,
+    purchased_at_ms: Option<i64>,
     webhook_url: &str,
 ) {
-    let fields = build_purchase_fields(price, target, Some(profit), buy_speed_ms, via_bed, finder, auction_uuid);
+    let fields = build_purchase_fields(price, target, Some(profit), buy_speed_ms, via_bed, finder, auction_uuid, received_at_ms, purchased_at_ms);
     let safe_item = sanitize_item_name(item_name);
     let payload = serde_json::json!({
         "embeds": [{
@@ -952,6 +958,14 @@ pub async fn send_webhook_bazaar_flip_channel(
 }
 
 /// Build embed fields for purchase-style webhooks (purchase price, target, profit/ROI, buy speed, finder, auction link).
+/// Format an epoch-ms timestamp as `HH:MM:SS.mmm UTC` for embed fields.
+fn format_ts_ms(epoch_ms: i64) -> String {
+    match chrono::DateTime::from_timestamp_millis(epoch_ms) {
+        Some(dt) => dt.format("%H:%M:%S%.3f UTC").to_string(),
+        None => format!("{}ms", epoch_ms),
+    }
+}
+
 fn build_purchase_fields(
     price: u64,
     target: Option<u64>,
@@ -960,6 +974,8 @@ fn build_purchase_fields(
     via_bed: Option<bool>,
     finder: Option<&str>,
     auction_uuid: Option<&str>,
+    received_at_ms: Option<i64>,
+    purchased_at_ms: Option<i64>,
 ) -> Vec<serde_json::Value> {
     let mut fields = vec![
         serde_json::json!({
@@ -1027,6 +1043,26 @@ fn build_purchase_fields(
                 "inline": true
             }));
         }
+    }
+    // Exact flip-pipeline timing: when the flip arrived over the COFL socket
+    // and when the purchase completed (escrow), both to the millisecond.
+    if let Some(r) = received_at_ms {
+        fields.push(serde_json::json!({
+            "name": "📥 Flip Received",
+            "value": format!("```\n{}\n```", format_ts_ms(r)),
+            "inline": true
+        }));
+    }
+    if let Some(p) = purchased_at_ms {
+        let delta = received_at_ms
+            .filter(|r| p >= *r)
+            .map(|r| format!(" (+{}ms)", p - r))
+            .unwrap_or_default();
+        fields.push(serde_json::json!({
+            "name": "🛒 Purchased At",
+            "value": format!("```\n{}{}\n```", format_ts_ms(p), delta),
+            "inline": true
+        }));
     }
     if let Some(uuid) = auction_uuid {
         if !uuid.is_empty() {

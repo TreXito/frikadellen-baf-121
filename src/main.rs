@@ -705,7 +705,7 @@ async fn main() -> Result<()> {
     info!("Connecting to Coflnet WebSocket...");
     
     // Connect to Coflnet WebSocket
-    let (ws_client, mut ws_rx) = CoflWebSocket::connect(
+    let (ws_client, ws_rx_primary) = CoflWebSocket::connect(
         config.websocket_url.clone(),
         ingame_name.clone(),
         VERSION.to_string(),
@@ -713,6 +713,109 @@ async fn main() -> Result<()> {
     ).await?;
 
     info!("WebSocket connected successfully");
+
+    // ── Multisocket ─────────────────────────────────────────────────────────
+    // Merge the primary socket with any extra modsocket connections from
+    // `multisocket_urls`. Auction flips from ALL sockets are deduped by UUID so
+    // the first socket to deliver wins; later duplicates are dropped before
+    // they reach the flip handler. Secondary sockets contribute ONLY auction
+    // flips — chat, commands, auth and bazaar flips stay primary-only so
+    // nothing else doubles up. With an empty `multisocket_urls` this is a
+    // plain pass-through of the primary socket.
+    let mut ws_rx = {
+        use frikadellen_baf::websocket::CoflEvent;
+
+        // Bounded FIFO of recently-seen flip UUIDs shared by all forwarders.
+        type SeenFlips = std::sync::Mutex<(std::collections::HashSet<String>, std::collections::VecDeque<String>)>;
+        const SEEN_FLIPS_CAP: usize = 512;
+        fn flip_already_seen(seen: &SeenFlips, uuid: &str) -> bool {
+            let Ok(mut g) = seen.lock() else { return false };
+            let (set, order) = &mut *g;
+            if !set.insert(uuid.to_string()) {
+                return true;
+            }
+            order.push_back(uuid.to_string());
+            if order.len() > SEEN_FLIPS_CAP {
+                if let Some(old) = order.pop_front() {
+                    set.remove(&old);
+                }
+            }
+            false
+        }
+
+        let (agg_tx, agg_rx) = tokio::sync::mpsc::unbounded_channel::<CoflEvent>();
+        let seen: Arc<SeenFlips> = Arc::new(std::sync::Mutex::new((
+            std::collections::HashSet::new(),
+            std::collections::VecDeque::new(),
+        )));
+
+        // Primary: forward everything, deduping auction flips.
+        {
+            let agg_tx = agg_tx.clone();
+            let seen = seen.clone();
+            let mut rx = ws_rx_primary;
+            tokio::spawn(async move {
+                while let Some(ev) = rx.recv().await {
+                    if let CoflEvent::AuctionFlip(ref f) = ev {
+                        if let Some(u) = f.uuid.as_deref() {
+                            if flip_already_seen(&seen, u) {
+                                debug!("[Multisocket] Duplicate flip {} (primary) — dropped", u);
+                                continue;
+                            }
+                        }
+                    }
+                    if agg_tx.send(ev).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+
+        // Secondary sockets: auction flips only.
+        for url in config.multisocket_urls.clone() {
+            let url_trim = url.trim().to_string();
+            if url_trim.is_empty() || url_trim == config.websocket_url {
+                continue;
+            }
+            match CoflWebSocket::connect(
+                url_trim.clone(),
+                ingame_name.clone(),
+                VERSION.to_string(),
+                session_id.clone(),
+            )
+            .await
+            {
+                Ok((_extra_client, mut rx)) => {
+                    info!("[Multisocket] Connected extra COFL socket: {}", url_trim);
+                    let agg_tx = agg_tx.clone();
+                    let seen = seen.clone();
+                    let url_log = url_trim.clone();
+                    tokio::spawn(async move {
+                        while let Some(ev) = rx.recv().await {
+                            if let CoflEvent::AuctionFlip(ref f) = ev {
+                                if let Some(u) = f.uuid.as_deref() {
+                                    if flip_already_seen(&seen, u) {
+                                        debug!("[Multisocket] Duplicate flip {} ({}) — dropped", u, url_log);
+                                        continue;
+                                    }
+                                }
+                                info!("[Multisocket] Flip won by {}", url_log);
+                                if agg_tx.send(ev).is_err() {
+                                    break;
+                                }
+                            }
+                            // Everything else from secondary sockets is dropped.
+                        }
+                    });
+                }
+                Err(e) => {
+                    warn!("[Multisocket] Failed to connect extra socket {}: {} — continuing without it", url_trim, e);
+                }
+            }
+        }
+
+        agg_rx
+    };
 
     // Send "initialized" webhook notification
     if let Some(webhook_url) = config.active_webhook_url() {
@@ -1269,26 +1372,32 @@ async fn main() -> Result<()> {
                     // Look up stored flip data and update with real buy price + purchase time.
                     // Also grab the color-coded item name from the flip for colorful output.
                     // Buy speed comes from the event (flip received → escrow message).
-                    let (opt_target, opt_profit, colored_name, opt_auction_uuid, opt_finder) = {
+                    // Exact pipeline timestamps (epoch ms): when the flip arrived over
+                    // the COFL socket and when the purchase completed (this event).
+                    let purchased_at_ms = chrono::Utc::now().timestamp_millis();
+                    let (opt_target, opt_profit, colored_name, opt_auction_uuid, opt_finder, opt_received_at_ms) = {
                         let key = frikadellen_baf::utils::remove_minecraft_colors(&item_name).to_lowercase();
                         match flip_tracker_events.lock() {
                             Ok(mut tracker) => {
                                 if let Some(entry) = tracker.get_mut(&key) {
                                     entry.1 = price; // actual buy price
+                                    // Receive time: entry.3 is the never-updated receive
+                                    // Instant; convert to epoch by subtracting its age.
+                                    let received_at_ms = purchased_at_ms - entry.3.elapsed().as_millis() as i64;
                                     entry.2 = Instant::now(); // purchase time
                                     let target = entry.0.target;
                                     let ah_fee = calculate_ah_fee(target);
                                     let expected_profit = target as i64 - price as i64 - ah_fee as i64;
                                     let uuid = entry.0.uuid.clone();
                                     let finder = entry.0.finder.clone();
-                                    (Some(target), Some(expected_profit), entry.0.item_name.clone(), uuid, finder)
+                                    (Some(target), Some(expected_profit), entry.0.item_name.clone(), uuid, finder, Some(received_at_ms))
                                 } else {
-                                    (None, None, item_name.clone(), None, None)
+                                    (None, None, item_name.clone(), None, None, None)
                                 }
                             }
                             Err(e) => {
                                 warn!("Flip tracker lock failed at ItemPurchased: {}", e);
-                                (None, None, item_name.clone(), None, None)
+                                (None, None, item_name.clone(), None, None, None)
                             }
                         }
                     };
@@ -1305,6 +1414,8 @@ async fn main() -> Result<()> {
                         bot_client_clone.get_purse(),
                         opt_auction_uuid.as_deref(),
                         event_via_bed,
+                        opt_received_at_ms,
+                        Some(purchased_at_ms),
                     );
                     // Accumulate THEORETICAL AH profit at purchase time (target −
                     // price − AH fee), i.e. what you'd net if it sold at the COFL
@@ -1352,7 +1463,7 @@ async fn main() -> Result<()> {
                                         frikadellen_baf::webhook::send_webhook_divine_flip(
                                             &name, &item, price, opt_target, profit, purse,
                                             event_buy_speed_ms, event_via_bed, uuid_str.as_deref(), finder.as_deref(),
-                                            did.as_deref(), &url,
+                                            did.as_deref(), opt_received_at_ms, Some(purchased_at_ms), &url,
                                         ).await;
                                     });
                                 } else {
@@ -1360,7 +1471,7 @@ async fn main() -> Result<()> {
                                         frikadellen_baf::webhook::send_webhook_legendary_flip(
                                             &name, &item, price, opt_target, profit, purse,
                                             event_buy_speed_ms, event_via_bed, uuid_str.as_deref(), finder.as_deref(),
-                                            did.as_deref(), &url,
+                                            did.as_deref(), opt_received_at_ms, Some(purchased_at_ms), &url,
                                         ).await;
                                     });
                                 }
@@ -1390,7 +1501,8 @@ async fn main() -> Result<()> {
                             tokio::spawn(async move {
                                 frikadellen_baf::webhook::send_webhook_item_purchased(
                                     &name, &item, price, opt_target, opt_profit, purse,
-                                    event_buy_speed_ms, event_via_bed, uuid_str.as_deref(), opt_finder.as_deref(), &url,
+                                    event_buy_speed_ms, event_via_bed, uuid_str.as_deref(), opt_finder.as_deref(),
+                                    opt_received_at_ms, Some(purchased_at_ms), &url,
                                 ).await;
                             });
                         }
@@ -3887,16 +3999,22 @@ async fn main() -> Result<()> {
 
     // Periodic session-time persistence — save the accumulated running time for
     // this account every 60 seconds so a crash or kill preserves most of the data.
+    // Profit totals are saved in the same tick: previously they were only written
+    // on humanization rest breaks, so any other restart reset profit to 0 while
+    // uptime survived.
     {
         let session_times_path_save = session_times_path.clone();
         let ign_save = ingame_name.clone();
         let started_save = std::time::Instant::now();
         let prev_secs_save = previous_session_secs;
+        let profit_tracker_save = profit_tracker.clone();
+        let profit_path_save = profit_path.clone();
         tokio::spawn(async move {
             loop {
                 sleep(Duration::from_secs(60)).await;
                 let total_secs = prev_secs_save + started_save.elapsed().as_secs();
                 save_session_time(&session_times_path_save, &ign_save, total_secs);
+                save_profit_stats(&profit_path_save, &ign_save, &profit_tracker_save);
             }
         });
     }
@@ -4052,9 +4170,10 @@ async fn main() -> Result<()> {
     // Wait until Ctrl+C (SIGINT) is received
     tokio::signal::ctrl_c().await?;
     info!("Received Ctrl+C — shutting down BAF...");
-    // Save final session time before exit.
+    // Save final session time and profit before exit.
     let total_secs = previous_session_secs + session_start.elapsed().as_secs();
     save_session_time(&session_times_path, &ingame_name, total_secs);
+    save_profit_stats(&profit_path, &ingame_name, &profit_tracker);
     info!("[SessionTime] Saved final session time for {}: {}s ({:.2}h)", ingame_name, total_secs, total_secs as f64 / 3600.0);
     std::process::exit(0);
 }

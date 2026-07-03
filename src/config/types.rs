@@ -62,7 +62,18 @@ pub struct Config {
     
     #[serde(default = "default_websocket_url")]
     pub websocket_url: String,
-    
+
+    /// Multisocket: extra Coflnet modsocket URLs to connect in parallel with
+    /// `websocket_url` (e.g. regional servers like "us-sky.coflnet.com/modsocket").
+    /// Each extra socket uses the same player/session; auction flips from all
+    /// sockets are merged and deduped by UUID, so whichever socket delivers a
+    /// flip first wins. Secondary sockets only contribute auction flips — chat,
+    /// commands and bazaar flips still come from the primary socket alone.
+    /// Empty (the default) = classic single-socket behaviour.
+    #[serde(default)]
+    pub multisocket_urls: Vec<String>,
+
+
     #[serde(default = "default_web_gui_port")]
     pub web_gui_port: u16,
 
@@ -340,6 +351,7 @@ impl Default for Config {
             ingame_name: None,
             multi_switch_time: None,
             websocket_url: default_websocket_url(),
+            multisocket_urls: Vec::new(),
             web_gui_port: default_web_gui_port(),
             command_delay_ms: default_command_delay_ms(),
             bed_spam_click_delay: default_bed_spam_click_delay(),

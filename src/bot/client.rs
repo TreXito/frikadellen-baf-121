@@ -838,7 +838,22 @@ impl BotClient {
     }
 
     /// Returns the number of items currently tracked as active auction listings.
+    ///
+    /// Prefers the cached "Manage Auctions" GUI data (the same source the web
+    /// panel uses — ground truth from Hypixel) and falls back to the in-memory
+    /// chat-tracked set only when no GUI snapshot exists yet. The chat-tracked
+    /// set alone under-counts (lost on restart, misses manual and /cofl sell
+    /// listings) and over-counts (never sees expirations), which made webhook
+    /// counts diverge from the web panel.
     pub fn active_auction_count(&self) -> usize {
+        if let Some(cached) = self.get_cached_my_auctions_json() {
+            if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(&cached) {
+                return arr
+                    .iter()
+                    .filter(|a| a.get("status").and_then(|s| s.as_str()) == Some("active"))
+                    .count();
+            }
+        }
         self.active_auction_listings.read().len()
     }
 
@@ -3807,8 +3822,29 @@ async fn handle_window_interaction(
         build_cached_my_auctions_json(&slots, state);
     }
 
-    let bot_state = *state.bot_state.read();
-    
+    let mut bot_state = *state.bot_state.read();
+
+    // Auto-buy: if a BIN Auction View opens while the bot is idle — e.g. the
+    // operator manually ran `/viewauction <uuid>` from the panel chat — promote to
+    // Purchasing so the standard buy flow below runs on it. Gated to Idle/GracePeriod
+    // so it never hijacks windows opened for claiming sold/purchased items (those run
+    // in ClaimingSold/ClaimingPurchased) or any other active workflow.
+    if matches!(bot_state, BotState::Idle | BotState::GracePeriod)
+        && (window_title.contains("BIN Auction View") || window_title.contains("Auction View"))
+        && !is_my_auctions_window_title(window_title)
+    {
+        info!("[AH] Auto-buy: '{}' opened while {:?} — running buy flow on manually-opened auction", window_title, bot_state);
+        *state.bot_state.write() = BotState::Purchasing;
+        // No flip context for a manual open: clear stale timing/purchaseAt so the
+        // buy flow treats it as a fresh, untimed purchase (bed timing falls back to
+        // the bed's own displayed grace time).
+        *state.purchase_start_time.write() = None;
+        *state.pending_purchase_at_ms.write() = None;
+        *state.last_buy_via_bed.write() = None;
+        state.fast_buy_clicked.store(false, Ordering::Relaxed);
+        bot_state = BotState::Purchasing;
+    }
+
     match bot_state {
         BotState::Purchasing => {
             if window_title.contains("BIN Auction View") || window_title.contains("Auction View") {
@@ -3951,6 +3987,19 @@ async fn handle_window_interaction(
                                     .map(|d| d.as_millis() as i64)?;
                                 let diff = purchase_at_ms - now_ms;
                                 if diff <= 0 { None } else { Some(diff as u64) }
+                            })
+                            // Fallback: COFL's `flip` message almost never carries a
+                            // `purchaseAt`, so without this the bed branch has NO timing
+                            // signal and degrades to reactive clicking (which loses the
+                            // grace-end race by ~1 RTT). Read the countdown straight off
+                            // the bed item Hypixel placed in slot 31 — it renders the
+                            // remaining grace as "M:SS" in the item name/lore.
+                            .or_else(|| {
+                                let menu = bot.menu();
+                                let slots = menu.slots();
+                                let secs = slots.get(31).and_then(parse_bed_remaining_secs)?;
+                                info!("[AH] Bed timing: no COFL purchaseAt — using bed's own countdown ({}s remaining)", secs);
+                                Some(secs.saturating_mul(1000))
                             });
 
                         if let Some(remaining_ms) = remaining_ms_from_purchase_at {

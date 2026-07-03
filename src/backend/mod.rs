@@ -96,6 +96,8 @@ impl BackendHandle {
         purse: Option<u64>,
         auction_uuid: Option<&str>,
         via_bed: Option<bool>,
+        received_at_ms: Option<i64>,
+        purchased_at_ms: Option<i64>,
     ) {
         if self.tx.is_none() {
             return;
@@ -115,6 +117,8 @@ impl BackendHandle {
                 "purse": purse,
                 "auctionUuid": auction_uuid,
                 "viaBed": via_bed,
+                "receivedAt": received_at_ms,
+                "purchasedAt": purchased_at_ms,
             },
         }));
     }
