@@ -1372,26 +1372,32 @@ async fn main() -> Result<()> {
                     // Look up stored flip data and update with real buy price + purchase time.
                     // Also grab the color-coded item name from the flip for colorful output.
                     // Buy speed comes from the event (flip received → escrow message).
-                    let (opt_target, opt_profit, colored_name, opt_auction_uuid, opt_finder) = {
+                    // Exact pipeline timestamps (epoch ms): when the flip arrived over
+                    // the COFL socket and when the purchase completed (this event).
+                    let purchased_at_ms = chrono::Utc::now().timestamp_millis();
+                    let (opt_target, opt_profit, colored_name, opt_auction_uuid, opt_finder, opt_received_at_ms) = {
                         let key = frikadellen_baf::utils::remove_minecraft_colors(&item_name).to_lowercase();
                         match flip_tracker_events.lock() {
                             Ok(mut tracker) => {
                                 if let Some(entry) = tracker.get_mut(&key) {
                                     entry.1 = price; // actual buy price
+                                    // Receive time: entry.3 is the never-updated receive
+                                    // Instant; convert to epoch by subtracting its age.
+                                    let received_at_ms = purchased_at_ms - entry.3.elapsed().as_millis() as i64;
                                     entry.2 = Instant::now(); // purchase time
                                     let target = entry.0.target;
                                     let ah_fee = calculate_ah_fee(target);
                                     let expected_profit = target as i64 - price as i64 - ah_fee as i64;
                                     let uuid = entry.0.uuid.clone();
                                     let finder = entry.0.finder.clone();
-                                    (Some(target), Some(expected_profit), entry.0.item_name.clone(), uuid, finder)
+                                    (Some(target), Some(expected_profit), entry.0.item_name.clone(), uuid, finder, Some(received_at_ms))
                                 } else {
-                                    (None, None, item_name.clone(), None, None)
+                                    (None, None, item_name.clone(), None, None, None)
                                 }
                             }
                             Err(e) => {
                                 warn!("Flip tracker lock failed at ItemPurchased: {}", e);
-                                (None, None, item_name.clone(), None, None)
+                                (None, None, item_name.clone(), None, None, None)
                             }
                         }
                     };
@@ -1408,6 +1414,8 @@ async fn main() -> Result<()> {
                         bot_client_clone.get_purse(),
                         opt_auction_uuid.as_deref(),
                         event_via_bed,
+                        opt_received_at_ms,
+                        Some(purchased_at_ms),
                     );
                     // Accumulate THEORETICAL AH profit at purchase time (target −
                     // price − AH fee), i.e. what you'd net if it sold at the COFL
@@ -1455,7 +1463,7 @@ async fn main() -> Result<()> {
                                         frikadellen_baf::webhook::send_webhook_divine_flip(
                                             &name, &item, price, opt_target, profit, purse,
                                             event_buy_speed_ms, event_via_bed, uuid_str.as_deref(), finder.as_deref(),
-                                            did.as_deref(), &url,
+                                            did.as_deref(), opt_received_at_ms, Some(purchased_at_ms), &url,
                                         ).await;
                                     });
                                 } else {
@@ -1463,7 +1471,7 @@ async fn main() -> Result<()> {
                                         frikadellen_baf::webhook::send_webhook_legendary_flip(
                                             &name, &item, price, opt_target, profit, purse,
                                             event_buy_speed_ms, event_via_bed, uuid_str.as_deref(), finder.as_deref(),
-                                            did.as_deref(), &url,
+                                            did.as_deref(), opt_received_at_ms, Some(purchased_at_ms), &url,
                                         ).await;
                                     });
                                 }
@@ -1493,7 +1501,8 @@ async fn main() -> Result<()> {
                             tokio::spawn(async move {
                                 frikadellen_baf::webhook::send_webhook_item_purchased(
                                     &name, &item, price, opt_target, opt_profit, purse,
-                                    event_buy_speed_ms, event_via_bed, uuid_str.as_deref(), opt_finder.as_deref(), &url,
+                                    event_buy_speed_ms, event_via_bed, uuid_str.as_deref(), opt_finder.as_deref(),
+                                    opt_received_at_ms, Some(purchased_at_ms), &url,
                                 ).await;
                             });
                         }
