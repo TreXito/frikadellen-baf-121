@@ -705,7 +705,7 @@ async fn main() -> Result<()> {
     info!("Connecting to Coflnet WebSocket...");
     
     // Connect to Coflnet WebSocket
-    let (ws_client, mut ws_rx) = CoflWebSocket::connect(
+    let (ws_client, ws_rx_primary) = CoflWebSocket::connect(
         config.websocket_url.clone(),
         ingame_name.clone(),
         VERSION.to_string(),
@@ -713,6 +713,109 @@ async fn main() -> Result<()> {
     ).await?;
 
     info!("WebSocket connected successfully");
+
+    // ── Multisocket ─────────────────────────────────────────────────────────
+    // Merge the primary socket with any extra modsocket connections from
+    // `multisocket_urls`. Auction flips from ALL sockets are deduped by UUID so
+    // the first socket to deliver wins; later duplicates are dropped before
+    // they reach the flip handler. Secondary sockets contribute ONLY auction
+    // flips — chat, commands, auth and bazaar flips stay primary-only so
+    // nothing else doubles up. With an empty `multisocket_urls` this is a
+    // plain pass-through of the primary socket.
+    let mut ws_rx = {
+        use frikadellen_baf::websocket::CoflEvent;
+
+        // Bounded FIFO of recently-seen flip UUIDs shared by all forwarders.
+        type SeenFlips = std::sync::Mutex<(std::collections::HashSet<String>, std::collections::VecDeque<String>)>;
+        const SEEN_FLIPS_CAP: usize = 512;
+        fn flip_already_seen(seen: &SeenFlips, uuid: &str) -> bool {
+            let Ok(mut g) = seen.lock() else { return false };
+            let (set, order) = &mut *g;
+            if !set.insert(uuid.to_string()) {
+                return true;
+            }
+            order.push_back(uuid.to_string());
+            if order.len() > SEEN_FLIPS_CAP {
+                if let Some(old) = order.pop_front() {
+                    set.remove(&old);
+                }
+            }
+            false
+        }
+
+        let (agg_tx, agg_rx) = tokio::sync::mpsc::unbounded_channel::<CoflEvent>();
+        let seen: Arc<SeenFlips> = Arc::new(std::sync::Mutex::new((
+            std::collections::HashSet::new(),
+            std::collections::VecDeque::new(),
+        )));
+
+        // Primary: forward everything, deduping auction flips.
+        {
+            let agg_tx = agg_tx.clone();
+            let seen = seen.clone();
+            let mut rx = ws_rx_primary;
+            tokio::spawn(async move {
+                while let Some(ev) = rx.recv().await {
+                    if let CoflEvent::AuctionFlip(ref f) = ev {
+                        if let Some(u) = f.uuid.as_deref() {
+                            if flip_already_seen(&seen, u) {
+                                debug!("[Multisocket] Duplicate flip {} (primary) — dropped", u);
+                                continue;
+                            }
+                        }
+                    }
+                    if agg_tx.send(ev).is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+
+        // Secondary sockets: auction flips only.
+        for url in config.multisocket_urls.clone() {
+            let url_trim = url.trim().to_string();
+            if url_trim.is_empty() || url_trim == config.websocket_url {
+                continue;
+            }
+            match CoflWebSocket::connect(
+                url_trim.clone(),
+                ingame_name.clone(),
+                VERSION.to_string(),
+                session_id.clone(),
+            )
+            .await
+            {
+                Ok((_extra_client, mut rx)) => {
+                    info!("[Multisocket] Connected extra COFL socket: {}", url_trim);
+                    let agg_tx = agg_tx.clone();
+                    let seen = seen.clone();
+                    let url_log = url_trim.clone();
+                    tokio::spawn(async move {
+                        while let Some(ev) = rx.recv().await {
+                            if let CoflEvent::AuctionFlip(ref f) = ev {
+                                if let Some(u) = f.uuid.as_deref() {
+                                    if flip_already_seen(&seen, u) {
+                                        debug!("[Multisocket] Duplicate flip {} ({}) — dropped", u, url_log);
+                                        continue;
+                                    }
+                                }
+                                info!("[Multisocket] Flip won by {}", url_log);
+                                if agg_tx.send(ev).is_err() {
+                                    break;
+                                }
+                            }
+                            // Everything else from secondary sockets is dropped.
+                        }
+                    });
+                }
+                Err(e) => {
+                    warn!("[Multisocket] Failed to connect extra socket {}: {} — continuing without it", url_trim, e);
+                }
+            }
+        }
+
+        agg_rx
+    };
 
     // Send "initialized" webhook notification
     if let Some(webhook_url) = config.active_webhook_url() {
@@ -3887,16 +3990,22 @@ async fn main() -> Result<()> {
 
     // Periodic session-time persistence — save the accumulated running time for
     // this account every 60 seconds so a crash or kill preserves most of the data.
+    // Profit totals are saved in the same tick: previously they were only written
+    // on humanization rest breaks, so any other restart reset profit to 0 while
+    // uptime survived.
     {
         let session_times_path_save = session_times_path.clone();
         let ign_save = ingame_name.clone();
         let started_save = std::time::Instant::now();
         let prev_secs_save = previous_session_secs;
+        let profit_tracker_save = profit_tracker.clone();
+        let profit_path_save = profit_path.clone();
         tokio::spawn(async move {
             loop {
                 sleep(Duration::from_secs(60)).await;
                 let total_secs = prev_secs_save + started_save.elapsed().as_secs();
                 save_session_time(&session_times_path_save, &ign_save, total_secs);
+                save_profit_stats(&profit_path_save, &ign_save, &profit_tracker_save);
             }
         });
     }
@@ -4052,9 +4161,10 @@ async fn main() -> Result<()> {
     // Wait until Ctrl+C (SIGINT) is received
     tokio::signal::ctrl_c().await?;
     info!("Received Ctrl+C — shutting down BAF...");
-    // Save final session time before exit.
+    // Save final session time and profit before exit.
     let total_secs = previous_session_secs + session_start.elapsed().as_secs();
     save_session_time(&session_times_path, &ingame_name, total_secs);
+    save_profit_stats(&profit_path, &ingame_name, &profit_tracker);
     info!("[SessionTime] Saved final session time for {}: {}s ({:.2}h)", ingame_name, total_secs, total_secs as f64 / 3600.0);
     std::process::exit(0);
 }
