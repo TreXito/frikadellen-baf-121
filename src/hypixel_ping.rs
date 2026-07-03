@@ -39,13 +39,6 @@ pub static LATEST_LIVE_PING_MS: AtomicU64 = AtomicU64::new(0);
 pub static ADAPTIVE_BED_TIMING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
-/// Operator opt-in for the tick-safe skip pre-click: delay the confirm click
-/// one server tick after the buy click so the two are never processed in the
-/// same tick (see `SKIP_CLICK_DELAY_MS` in `bot::client`). Off by default;
-/// backend-controlled only, same as [`ADAPTIVE_BED_TIMING`].
-pub static TICK_SAFE_SKIP: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
 /// Returns the latest SLP-measured ping in ms, or `None` if never measured.
 pub fn latest_ping_ms() -> Option<u64> {
     match LATEST_PING_MS.load(Ordering::Relaxed) {
@@ -71,11 +64,6 @@ pub fn best_ping_ms() -> Option<u64> {
 /// Whether ping-adaptive bed timing is currently enabled (backend-controlled).
 pub fn adaptive_bed_enabled() -> bool {
     ADAPTIVE_BED_TIMING.load(Ordering::Relaxed)
-}
-
-/// Whether the tick-safe skip pre-click is currently enabled (backend-controlled).
-pub fn tick_safe_skip_enabled() -> bool {
-    TICK_SAFE_SKIP.load(Ordering::Relaxed)
 }
 
 // ── live-connection RTT correlation (F3+3 ping) ──────────────────────────────

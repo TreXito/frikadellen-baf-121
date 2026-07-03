@@ -3563,25 +3563,14 @@ async fn execute_command(
                     send_raw_click(&fast_bot, window_id, 31);
 
                     if fast_state.skip {
+                        // Same-burst pre-click. The gold_nugget is confirmed present,
+                        // so the buy click deterministically opens the confirm window;
+                        // if it isn't open in time the Confirm Purchase handler clicks
+                        // when it actually opens.
                         let next_wid = if window_id == 255 { 1u8 } else { window_id + 1 };
-                        if crate::hypixel_ping::tick_safe_skip_enabled() {
-                            // Tick-safe skip: never let the confirm click be
-                            // processed in the same server tick as the buy click
-                            // (see SKIP_CLICK_DELAY_MS).  Flat one-tick delay, not
-                            // RTT-based — with low ping an RTT delay can still put
-                            // both clicks in the same tick.  Aborts if the purchase
-                            // terminally fails during the wait.
-                            info!("[AH] Fast-path skip (tick-safe): confirm slot 11 on window {} in ≤{}ms", next_wid, SKIP_CLICK_DELAY_MS);
-                            spawn_delayed_skip_click(&fast_bot, &fast_state, window_id);
-                        } else {
-                            // Legacy same-burst pre-click (default). The gold_nugget
-                            // is confirmed present, so the buy click deterministically
-                            // opens the confirm window; if it isn't open in time the
-                            // Confirm Purchase handler clicks when it actually opens.
-                            fast_state.skip_click_sent.store(true, Ordering::Relaxed);
-                            info!("[AH] Fast-path skip: pre-clicking confirm slot 11 on window {} (same burst)", next_wid);
-                            send_raw_click(&fast_bot, next_wid, 11);
-                        }
+                        fast_state.skip_click_sent.store(true, Ordering::Relaxed);
+                        info!("[AH] Fast-path skip: pre-clicking confirm slot 11 on window {} (same burst)", next_wid);
+                        send_raw_click(&fast_bot, next_wid, 11);
                     } else {
                         info!("[AH] Fast-path: gold_nugget confirmed — buy click sent");
                     }
@@ -4114,21 +4103,14 @@ async fn handle_window_interaction(
                         send_raw_click(bot, window_id, 31);
 
                         if state.skip {
+                            // Same-burst click-ahead (gold_nugget present ⇒ the buy
+                            // click opens the confirm window). Lands an RTT early when
+                            // the server opens the window in time; otherwise the
+                            // Confirm Purchase handler clicks on window-open.
                             let next_wid = if window_id == 255 { 1u8 } else { window_id + 1 };
-                            if crate::hypixel_ping::tick_safe_skip_enabled() {
-                                // Tick-safe skip (see SKIP_CLICK_DELAY_MS).
-                                info!("[AH] Skip (tick-safe, fallback): confirm slot 11 on window {} in ≤{}ms", next_wid, SKIP_CLICK_DELAY_MS);
-                                spawn_delayed_skip_click(bot, state, window_id);
-                            } else {
-                                // Legacy same-burst click-ahead (gold_nugget present ⇒
-                                // the buy click opens the confirm window). Lands an RTT
-                                // early when the server opens the window in time;
-                                // otherwise the Confirm Purchase handler clicks on
-                                // window-open.
-                                info!("[AH] Skip: pre-clicking confirm slot 11 on window {} (same burst, fallback)", next_wid);
-                                state.skip_click_sent.store(true, Ordering::Relaxed);
-                                send_raw_click(bot, next_wid, 11);
-                            }
+                            info!("[AH] Skip: pre-clicking confirm slot 11 on window {} (same burst, fallback)", next_wid);
+                            state.skip_click_sent.store(true, Ordering::Relaxed);
+                            send_raw_click(bot, next_wid, 11);
                         } else {
                             info!("[AH] gold_nugget confirmed — buy click sent (fallback)");
                         }
@@ -6839,79 +6821,6 @@ fn send_raw_chat_command(bot: &Client, content: &str) {
         if let Err(e) = raw_conn.write(cmd_packet) {
             error!("raw chat command write failed: {e}");
         }
-    });
-}
-
-/// Delay between the buy click (slot 31) and the skip pre-click (slot 11 on
-/// the predicted Confirm Purchase window) when the tick-safe skip is enabled.
-///
-/// Watchdog's full-skip detection works tick-by-tick: window ids are iterated
-/// server-side when a GUI opens, and clicks are validated against the ids
-/// that exist in the tick that processes them.  If the confirm click is
-/// processed in the SAME tick as the buy click, window N+1 has not been
-/// iterated yet — the click targets a window that does not exist and gets
-/// flagged.  Processed one tick later, the id HAS been iterated (the window
-/// is sent to the client at the start of that tick), so the click is valid
-/// even though the client hasn't received the window yet.  One server tick is
-/// 50ms; 60ms guarantees the two clicks are processed in different ticks
-/// regardless of tick phase.  An RTT-based delay is NOT sufficient here: with
-/// low ping both clicks can still land in the same tick.
-///
-/// Residual risk: if the server opens the confirm window 2+ ticks after
-/// processing the buy click (server lag), the id is still un-iterated at
-/// 60ms.  That case needs a window-existence guarantee (e.g. a /menu decoy
-/// window) and is intentionally not handled here.
-const SKIP_CLICK_DELAY_MS: u64 = 60;
-
-/// Schedule the skip pre-click `SKIP_CLICK_DELAY_MS` after the buy click
-/// (see const doc above).  During the wait it:
-/// - clicks early if the Confirm Purchase window arrives client-side (the
-///   window provably exists at that point — no reason to keep waiting);
-/// - aborts if the purchase terminally fails (sniped/expired: the chat
-///   handler resets `bot_state` within ~one RTT, usually inside the wait),
-///   so the click never targets a window that will never exist;
-/// - aborts if window N+1 opens but is not the Confirm Purchase window.
-///
-/// Sets `skip_click_sent` up front so the reactive Confirm Purchase handler
-/// defers to this task; its bounded retry still backstops a missed click.
-fn spawn_delayed_skip_click(bot: &Client, state: &BotClientState, buy_window_id: u8) {
-    let next_wid = if buy_window_id == 255 { 1u8 } else { buy_window_id + 1 };
-    state.skip_click_sent.store(true, Ordering::Relaxed);
-    let bot = bot.clone();
-    let state = state.clone();
-    tokio::spawn(async move {
-        let started = tokio::time::Instant::now();
-        let deadline = started + tokio::time::Duration::from_millis(SKIP_CLICK_DELAY_MS);
-        loop {
-            if *state.bot_state.read() != BotState::Purchasing {
-                info!("[AH] Skip: purchase aborted during confirm delay — pre-click NOT sent");
-                state.skip_click_sent.store(false, Ordering::Relaxed);
-                return;
-            }
-            if *state.last_window_id.read() == next_wid {
-                let is_confirm = state.handlers.current_window_title()
-                    .as_deref()
-                    .map(|t| t.contains("Confirm Purchase"))
-                    .unwrap_or(false);
-                if !is_confirm {
-                    info!("[AH] Skip: window {} is not Confirm Purchase — pre-click NOT sent", next_wid);
-                    state.skip_click_sent.store(false, Ordering::Relaxed);
-                    return;
-                }
-                break;
-            }
-            let now = tokio::time::Instant::now();
-            if now >= deadline {
-                break;
-            }
-            tokio::time::sleep((deadline - now).min(tokio::time::Duration::from_millis(5))).await;
-        }
-        info!(
-            "[AH] Skip: confirm slot 11 on window {} ({:.0}ms after buy click)",
-            next_wid,
-            started.elapsed().as_secs_f64() * 1000.0
-        );
-        send_raw_click(&bot, next_wid, 11);
     });
 }
 
