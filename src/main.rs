@@ -771,10 +771,18 @@ async fn main() -> Result<()> {
             });
         }
 
-        // Secondary sockets: auction flips only.
+        // Secondary sockets: auction flips only. Entries that are NOT Coflnet
+        // modsockets (no "coflnet"/"/modsocket" in the URL) are treated as
+        // baf-flip-finder feeds — so the private finder can simply be added to
+        // `multisocket_urls` next to COFL (e.g. "ws://127.0.0.1:15101").
+        let mut finder_feed_urls: Vec<String> = Vec::new();
         for url in config.multisocket_urls.clone() {
             let url_trim = url.trim().to_string();
             if url_trim.is_empty() || url_trim == config.websocket_url {
+                continue;
+            }
+            if !url_trim.contains("coflnet") && !url_trim.contains("/modsocket") {
+                finder_feed_urls.push(url_trim);
                 continue;
             }
             match CoflWebSocket::connect(
@@ -814,13 +822,19 @@ async fn main() -> Result<()> {
             }
         }
 
-        // ── baf-flip-finder feed ─────────────────────────────────────────
+        // ── baf-flip-finder feeds ────────────────────────────────────────
         // Our own finder pushes flips over a plain websocket the instant it
         // finds them. They enter the same pipeline as COFL flips (identical
         // Flip struct, same UUID dedupe — whichever source is first wins),
         // so purchasing, tracking, target-based listing and webhooks all
-        // work unchanged. Auto-reconnects with backoff.
-        if let Some(finder_url) = config.finder_ws_url.clone().filter(|u| !u.trim().is_empty()) {
+        // work unchanged. Auto-reconnects with backoff. Sources: non-COFL
+        // `multisocket_urls` entries and/or the explicit `finder_ws_url`.
+        if let Some(u) = config.finder_ws_url.clone().filter(|u| !u.trim().is_empty()) {
+            if !finder_feed_urls.contains(&u) {
+                finder_feed_urls.push(u);
+            }
+        }
+        for finder_url in finder_feed_urls {
             let agg_tx = agg_tx.clone();
             let seen = seen.clone();
             let token = config.finder_ws_token.clone().unwrap_or_default();
