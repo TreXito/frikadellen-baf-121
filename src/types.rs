@@ -29,6 +29,12 @@ pub struct Flip {
     
     #[serde(default, alias = "auctionUuid", alias = "auction_uuid", alias = "auctionId", alias = "id")]
     pub uuid: Option<String>,
+
+    /// Listing recommendation from the private finder ("this item is really
+    /// worth X") — used to auto-list finder-bought items when COFL doesn't
+    /// list them first. Never present on COFL flips.
+    #[serde(default, rename = "listAt")]
+    pub list_at: Option<u64>,
 }
 
 fn deserialize_optional_timestamp_millis<'de, D>(

@@ -771,10 +771,18 @@ async fn main() -> Result<()> {
             });
         }
 
-        // Secondary sockets: auction flips only.
+        // Secondary sockets: auction flips only. Entries that are NOT Coflnet
+        // modsockets (no "coflnet"/"/modsocket" in the URL) are treated as
+        // baf-flip-finder feeds — so the private finder can simply be added to
+        // `multisocket_urls` next to COFL (e.g. "ws://127.0.0.1:15101").
+        let mut finder_feed_urls: Vec<String> = Vec::new();
         for url in config.multisocket_urls.clone() {
             let url_trim = url.trim().to_string();
             if url_trim.is_empty() || url_trim == config.websocket_url {
+                continue;
+            }
+            if !url_trim.contains("coflnet") && !url_trim.contains("/modsocket") {
+                finder_feed_urls.push(url_trim);
                 continue;
             }
             match CoflWebSocket::connect(
@@ -812,6 +820,88 @@ async fn main() -> Result<()> {
                     warn!("[Multisocket] Failed to connect extra socket {}: {} — continuing without it", url_trim, e);
                 }
             }
+        }
+
+        // ── baf-flip-finder feeds ────────────────────────────────────────
+        // Our own finder pushes flips over a plain websocket the instant it
+        // finds them. They enter the same pipeline as COFL flips (identical
+        // Flip struct, same UUID dedupe — whichever source is first wins),
+        // so purchasing, tracking, target-based listing and webhooks all
+        // work unchanged. Auto-reconnects with backoff. Sources: non-COFL
+        // `multisocket_urls` entries and/or the explicit `finder_ws_url`.
+        if let Some(u) = config.finder_ws_url.clone().filter(|u| !u.trim().is_empty()) {
+            if !finder_feed_urls.contains(&u) {
+                finder_feed_urls.push(u);
+            }
+        }
+        for finder_url in finder_feed_urls {
+            let agg_tx = agg_tx.clone();
+            let seen = seen.clone();
+            let token = config.finder_ws_token.clone().unwrap_or_default();
+            tokio::spawn(async move {
+                use futures::StreamExt;
+                let mut backoff = 5u64;
+                loop {
+                    let full_url = if token.is_empty() {
+                        finder_url.clone()
+                    } else {
+                        format!("{}?token={}", finder_url.trim_end_matches('/'), token)
+                    };
+                    match tokio_tungstenite::connect_async(&full_url).await {
+                        Ok((mut stream, _)) => {
+                            info!("[FinderWS] Connected to flip finder: {}", finder_url);
+                            backoff = 5;
+                            while let Some(msg) = stream.next().await {
+                                let txt = match msg {
+                                    Ok(tokio_tungstenite::tungstenite::Message::Text(t)) => t,
+                                    Ok(tokio_tungstenite::tungstenite::Message::Close(_)) | Err(_) => break,
+                                    _ => continue,
+                                };
+                                let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) else { continue };
+                                if v.get("type").and_then(|t| t.as_str()) != Some("flip") {
+                                    continue;
+                                }
+                                let Some(f) = v.get("flip") else { continue };
+                                let uuid = f.get("uuid").and_then(|u| u.as_str()).map(String::from);
+                                let Some(u) = uuid.as_deref() else { continue };
+                                if flip_already_seen(&seen, u) {
+                                    debug!("[FinderWS] Duplicate flip {} — dropped (COFL was first)", u);
+                                    continue;
+                                }
+                                let flip = frikadellen_baf::types::Flip {
+                                    item_name: f.get("itemName").and_then(|x| x.as_str()).unwrap_or("?").to_string(),
+                                    starting_bid: f.get("price").and_then(|x| x.as_u64()).unwrap_or(0),
+                                    target: f.get("target").and_then(|x| x.as_u64()).unwrap_or(0),
+                                    finder: Some("BAF_FINDER".to_string()),
+                                    profit_perc: f.get("roiPct").and_then(|x| x.as_f64()),
+                                    purchase_at_ms: None,
+                                    uuid,
+                                    list_at: f.get("listAt").and_then(|x| x.as_u64()),
+                                };
+                                if flip.starting_bid == 0 || flip.target == 0 {
+                                    continue;
+                                }
+                                info!(
+                                    "[FinderWS] Flip: {} for {} (target {}, conf {})",
+                                    flip.item_name,
+                                    flip.starting_bid,
+                                    flip.target,
+                                    f.get("confidence").and_then(|x| x.as_f64()).unwrap_or(0.0)
+                                );
+                                if agg_tx.send(CoflEvent::AuctionFlip(flip)).is_err() {
+                                    return;
+                                }
+                            }
+                            warn!("[FinderWS] Disconnected — reconnecting...");
+                        }
+                        Err(e) => {
+                            warn!("[FinderWS] Connect failed: {} (retry in {}s)", e, backoff);
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
+                    backoff = (backoff * 2).min(60);
+                }
+            });
         }
 
         agg_rx
@@ -1375,7 +1465,7 @@ async fn main() -> Result<()> {
                     // Exact pipeline timestamps (epoch ms): when the flip arrived over
                     // the COFL socket and when the purchase completed (this event).
                     let purchased_at_ms = chrono::Utc::now().timestamp_millis();
-                    let (opt_target, opt_profit, colored_name, opt_auction_uuid, opt_finder, opt_received_at_ms) = {
+                    let (opt_target, opt_profit, colored_name, opt_auction_uuid, opt_finder, opt_received_at_ms, opt_list_at) = {
                         let key = frikadellen_baf::utils::remove_minecraft_colors(&item_name).to_lowercase();
                         match flip_tracker_events.lock() {
                             Ok(mut tracker) => {
@@ -1390,17 +1480,75 @@ async fn main() -> Result<()> {
                                     let expected_profit = target as i64 - price as i64 - ah_fee as i64;
                                     let uuid = entry.0.uuid.clone();
                                     let finder = entry.0.finder.clone();
-                                    (Some(target), Some(expected_profit), entry.0.item_name.clone(), uuid, finder, Some(received_at_ms))
+                                    (Some(target), Some(expected_profit), entry.0.item_name.clone(), uuid, finder, Some(received_at_ms), entry.0.list_at)
                                 } else {
-                                    (None, None, item_name.clone(), None, None, None)
+                                    (None, None, item_name.clone(), None, None, None, None)
                                 }
                             }
                             Err(e) => {
                                 warn!("Flip tracker lock failed at ItemPurchased: {}", e);
-                                (None, None, item_name.clone(), None, None, None)
+                                (None, None, item_name.clone(), None, None, None, None)
                             }
                         }
                     };
+                    // Finder-bought items: if COFL doesn't list the item itself (e.g.
+                    // running finder-only, or COFL has no data for it), fall back to
+                    // listing at the finder's recommendation ("this item is really
+                    // worth X"). COFL's createAuction stays authoritative when it
+                    // fires — this only acts if the item is STILL in inventory after
+                    // the grace window. Toggled finder-side via ws-config.json
+                    // `listingRecommendations` (off → flips carry no listAt → no auto-list).
+                    if opt_finder.as_deref() == Some("BAF_FINDER") {
+                        if let Some(list_at) = opt_list_at.filter(|&v| v > 0) {
+                            const COFL_LISTING_GRACE_SECS: u64 = 150;
+                            let queue = command_queue_clone.clone();
+                            let bc = bot_client_clone.clone();
+                            let item = item_name.clone();
+                            let dur = config_for_events.auction_duration_hours;
+                            let chat = chat_tx_events.clone();
+                            tokio::spawn(async move {
+                                sleep(Duration::from_secs(COFL_LISTING_GRACE_SECS)).await;
+                                // Listed already (by COFL or manually) → gone from inventory.
+                                let needle = frikadellen_baf::utils::remove_minecraft_colors(&item).to_lowercase();
+                                let still_held = bc
+                                    .get_cached_inventory_json()
+                                    .and_then(|j| serde_json::from_str::<serde_json::Value>(&j).ok())
+                                    .and_then(|inv| {
+                                        inv.get("slots").and_then(|s| s.as_array()).map(|slots| {
+                                            slots.iter().any(|it| {
+                                                it.get("displayName")
+                                                    .and_then(|v| v.as_str())
+                                                    .map(|n| frikadellen_baf::utils::remove_minecraft_colors(n).to_lowercase().contains(&needle))
+                                                    .unwrap_or(false)
+                                            })
+                                        })
+                                    })
+                                    .unwrap_or(false);
+                                if !still_held {
+                                    return;
+                                }
+                                info!("[FinderListing] \"{}\" still in inventory after {}s — listing at finder recommendation {}", item, COFL_LISTING_GRACE_SECS, list_at);
+                                let msg = format!(
+                                    "§f[§4BAF§f]: §b📋 Listing §r{}§r §7at finder estimate §6{}§7 coins",
+                                    item,
+                                    format_coins(list_at as i64)
+                                );
+                                print_mc_chat(&msg);
+                                let _ = chat.send(msg);
+                                queue.enqueue(
+                                    frikadellen_baf::types::CommandType::SellToAuction {
+                                        item_name: item,
+                                        starting_bid: list_at,
+                                        duration_hours: dur,
+                                        item_slot: None,
+                                        item_id: None,
+                                    },
+                                    frikadellen_baf::types::CommandPriority::Normal,
+                                    false,
+                                );
+                            });
+                        }
+                    }
                     // Report the buy to the backend with full purchase detail (the
                     // all-flips channel renders it as a normal purchase webhook).
                     backend_handle_events.report_purchase(
