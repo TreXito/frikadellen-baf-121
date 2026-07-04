@@ -814,6 +814,81 @@ async fn main() -> Result<()> {
             }
         }
 
+        // ── baf-flip-finder feed ─────────────────────────────────────────
+        // Our own finder pushes flips over a plain websocket the instant it
+        // finds them. They enter the same pipeline as COFL flips (identical
+        // Flip struct, same UUID dedupe — whichever source is first wins),
+        // so purchasing, tracking, target-based listing and webhooks all
+        // work unchanged. Auto-reconnects with backoff.
+        if let Some(finder_url) = config.finder_ws_url.clone().filter(|u| !u.trim().is_empty()) {
+            let agg_tx = agg_tx.clone();
+            let seen = seen.clone();
+            let token = config.finder_ws_token.clone().unwrap_or_default();
+            tokio::spawn(async move {
+                use futures::StreamExt;
+                let mut backoff = 5u64;
+                loop {
+                    let full_url = if token.is_empty() {
+                        finder_url.clone()
+                    } else {
+                        format!("{}?token={}", finder_url.trim_end_matches('/'), token)
+                    };
+                    match tokio_tungstenite::connect_async(&full_url).await {
+                        Ok((mut stream, _)) => {
+                            info!("[FinderWS] Connected to flip finder: {}", finder_url);
+                            backoff = 5;
+                            while let Some(msg) = stream.next().await {
+                                let txt = match msg {
+                                    Ok(tokio_tungstenite::tungstenite::Message::Text(t)) => t,
+                                    Ok(tokio_tungstenite::tungstenite::Message::Close(_)) | Err(_) => break,
+                                    _ => continue,
+                                };
+                                let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) else { continue };
+                                if v.get("type").and_then(|t| t.as_str()) != Some("flip") {
+                                    continue;
+                                }
+                                let Some(f) = v.get("flip") else { continue };
+                                let uuid = f.get("uuid").and_then(|u| u.as_str()).map(String::from);
+                                let Some(u) = uuid.as_deref() else { continue };
+                                if flip_already_seen(&seen, u) {
+                                    debug!("[FinderWS] Duplicate flip {} — dropped (COFL was first)", u);
+                                    continue;
+                                }
+                                let flip = frikadellen_baf::types::Flip {
+                                    item_name: f.get("itemName").and_then(|x| x.as_str()).unwrap_or("?").to_string(),
+                                    starting_bid: f.get("price").and_then(|x| x.as_u64()).unwrap_or(0),
+                                    target: f.get("target").and_then(|x| x.as_u64()).unwrap_or(0),
+                                    finder: Some("BAF_FINDER".to_string()),
+                                    profit_perc: f.get("roiPct").and_then(|x| x.as_f64()),
+                                    purchase_at_ms: None,
+                                    uuid,
+                                };
+                                if flip.starting_bid == 0 || flip.target == 0 {
+                                    continue;
+                                }
+                                info!(
+                                    "[FinderWS] Flip: {} for {} (target {}, conf {})",
+                                    flip.item_name,
+                                    flip.starting_bid,
+                                    flip.target,
+                                    f.get("confidence").and_then(|x| x.as_f64()).unwrap_or(0.0)
+                                );
+                                if agg_tx.send(CoflEvent::AuctionFlip(flip)).is_err() {
+                                    return;
+                                }
+                            }
+                            warn!("[FinderWS] Disconnected — reconnecting...");
+                        }
+                        Err(e) => {
+                            warn!("[FinderWS] Connect failed: {} (retry in {}s)", e, backoff);
+                        }
+                    }
+                    tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
+                    backoff = (backoff * 2).min(60);
+                }
+            });
+        }
+
         agg_rx
     };
 

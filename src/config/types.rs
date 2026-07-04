@@ -73,6 +73,16 @@ pub struct Config {
     #[serde(default)]
     pub multisocket_urls: Vec<String>,
 
+    /// baf-flip-finder websocket feed (e.g. "ws://192.168.0.250:15101").
+    /// When set, flips found by the private finder are bought through the
+    /// same pipeline as COFL flips (deduped by auction UUID, first source
+    /// wins). The flip's `target` is used for listing, like COFL targets.
+    #[serde(default)]
+    pub finder_ws_url: Option<String>,
+
+    /// Token from the finder's data/ws-config.json.
+    #[serde(default)]
+    pub finder_ws_token: Option<String>,
 
     #[serde(default = "default_web_gui_port")]
     pub web_gui_port: u16,
@@ -352,6 +362,8 @@ impl Default for Config {
             multi_switch_time: None,
             websocket_url: default_websocket_url(),
             multisocket_urls: Vec::new(),
+            finder_ws_url: None,
+            finder_ws_token: None,
             web_gui_port: default_web_gui_port(),
             command_delay_ms: default_command_delay_ms(),
             bed_spam_click_delay: default_bed_spam_click_delay(),
