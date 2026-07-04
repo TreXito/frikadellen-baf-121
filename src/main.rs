@@ -4315,6 +4315,102 @@ async fn main() -> Result<()> {
         });
     }
 
+    // ── Finder auto-lister ───────────────────────────────────────────────────
+    // Finder-only mode: COFL never sends createAuction, so upload our inventory
+    // to the finder every minute and list whatever it prices (its listing
+    // recommendation). Covers freshly-bought items AND reclaimed expired
+    // auctions (both land back in inventory). Own role=lister connection so the
+    // finder never routes flips here.
+    {
+        let finder_list_url = config.finder_ws_url.clone().filter(|u| !u.trim().is_empty()).or_else(|| {
+            config
+                .multisocket_urls
+                .iter()
+                .map(|u| u.trim().to_string())
+                .find(|u| !u.is_empty() && !u.contains("coflnet") && !u.contains("/modsocket"))
+        });
+        if config.finder_auto_list {
+            if let Some(url) = finder_list_url {
+                let token = config.finder_ws_token.clone().unwrap_or_default();
+                let bc = bot_client.clone();
+                let queue = command_queue.clone();
+                let dur = config.auction_duration_hours;
+                tokio::spawn(async move {
+                    use futures::{SinkExt, StreamExt};
+                    // Per item-name cooldown so we don't re-instruct while a
+                    // listing is still in flight (item leaves inventory once listed).
+                    let mut listed_recently: std::collections::HashMap<String, std::time::Instant> = std::collections::HashMap::new();
+                    let mut backoff = 5u64;
+                    loop {
+                        let full = if token.is_empty() {
+                            format!("{}?role=lister", url.trim_end_matches('/'))
+                        } else {
+                            format!("{}?role=lister&token={}", url.trim_end_matches('/'), token)
+                        };
+                        match tokio_tungstenite::connect_async(&full).await {
+                            Ok((mut stream, _)) => {
+                                info!("[FinderList] Connected to finder for auto-listing: {}", url);
+                                backoff = 5;
+                                let mut upload = tokio::time::interval(std::time::Duration::from_secs(60));
+                                loop {
+                                    tokio::select! {
+                                        _ = upload.tick() => {
+                                            // Upload inventory (slots array from cached JSON).
+                                            if let Some(inv) = bc.get_cached_inventory_json() {
+                                                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&inv) {
+                                                    let items = v.get("slots").cloned().unwrap_or(serde_json::json!([]));
+                                                    let msg = serde_json::json!({ "type": "inventory", "items": items }).to_string();
+                                                    if stream.send(tokio_tungstenite::tungstenite::Message::Text(msg)).await.is_err() {
+                                                        break;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        m = stream.next() => {
+                                            let txt = match m {
+                                                Some(Ok(tokio_tungstenite::tungstenite::Message::Text(t))) => t,
+                                                Some(Ok(tokio_tungstenite::tungstenite::Message::Close(_))) | Some(Err(_)) | None => break,
+                                                _ => continue,
+                                            };
+                                            let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) else { continue };
+                                            if v.get("type").and_then(|t| t.as_str()) != Some("listInstructions") { continue; }
+                                            let Some(items) = v.get("items").and_then(|i| i.as_array()) else { continue };
+                                            listed_recently.retain(|_, t| t.elapsed() < std::time::Duration::from_secs(300));
+                                            for it in items {
+                                                let name = match it.get("name").and_then(|x| x.as_str()) { Some(n) => n.to_string(), None => continue };
+                                                let list_at = it.get("listAt").and_then(|x| x.as_u64()).unwrap_or(0);
+                                                if list_at == 0 { continue; }
+                                                let clean = frikadellen_baf::utils::remove_minecraft_colors(&name);
+                                                if listed_recently.contains_key(&clean) { continue; }
+                                                listed_recently.insert(clean.clone(), std::time::Instant::now());
+                                                info!("[FinderList] Listing \"{}\" at finder price {}", clean, list_at);
+                                                queue.enqueue(
+                                                    frikadellen_baf::types::CommandType::SellToAuction {
+                                                        item_name: clean,
+                                                        starting_bid: list_at,
+                                                        duration_hours: dur,
+                                                        item_slot: None,
+                                                        item_id: None,
+                                                    },
+                                                    frikadellen_baf::types::CommandPriority::Normal,
+                                                    false,
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                                warn!("[FinderList] Disconnected — reconnecting...");
+                            }
+                            Err(e) => warn!("[FinderList] Connect failed: {} (retry {}s)", e, backoff),
+                        }
+                        tokio::time::sleep(std::time::Duration::from_secs(backoff)).await;
+                        backoff = (backoff * 2).min(60);
+                    }
+                });
+            }
+        }
+    }
+
     // Keep the application running
     info!("BAF is now running. Type commands below or press Ctrl+C to exit.");
     
