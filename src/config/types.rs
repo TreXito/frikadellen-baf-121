@@ -84,6 +84,15 @@ pub struct Config {
     #[serde(default)]
     pub finder_ws_token: Option<String>,
 
+    /// In finder-only mode COFL never sends createAuction, so nothing lists the
+    /// items the bot buys or reclaims from expired auctions. When enabled the
+    /// bot uploads its inventory to the finder every minute and lists what the
+    /// finder prices (its listing recommendation). Safe: only items the finder
+    /// can value as sellable AH items are listed; blacklist ids in the finder
+    /// config to exclude any. Default on.
+    #[serde(default = "default_true")]
+    pub finder_auto_list: bool,
+
     #[serde(default = "default_web_gui_port")]
     pub web_gui_port: u16,
 
@@ -364,6 +373,7 @@ impl Default for Config {
             multisocket_urls: Vec::new(),
             finder_ws_url: None,
             finder_ws_token: None,
+            finder_auto_list: true,
             web_gui_port: default_web_gui_port(),
             command_delay_ms: default_command_delay_ms(),
             bed_spam_click_delay: default_bed_spam_click_delay(),
