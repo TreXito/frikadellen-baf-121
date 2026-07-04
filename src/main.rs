@@ -2224,8 +2224,11 @@ async fn main() -> Result<()> {
                         continue;
                     }
 
-                    // Block flips until Coflnet auth is confirmed
-                    if !cofl_authenticated_ws.load(Ordering::Relaxed) {
+                    // Block COFL flips until Coflnet auth is confirmed. Flips from our
+                    // OWN finder don't depend on COFL at all — they must buy fine in
+                    // finder-only mode (no COFL license/auth), so they bypass this gate.
+                    let from_own_finder = flip.finder.as_deref() == Some("BAF_FINDER");
+                    if !from_own_finder && !cofl_authenticated_ws.load(Ordering::Relaxed) {
                         debug!("Skipping flip — Coflnet not yet authenticated: {}", flip.item_name);
                         continue;
                     }
