@@ -318,6 +318,7 @@ mod tests {
                 profit_perc: None,
                 purchase_at_ms: None,
                 uuid: Some("abc".into()),
+                list_at: None,
             },
         }
     }
