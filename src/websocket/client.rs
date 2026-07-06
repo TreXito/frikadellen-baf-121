@@ -15,14 +15,21 @@ use tracing::{debug, error, info, warn};
 /// is used ONLY for the Coflnet websocket (which the bot already authenticates
 /// to), so the relaxed verification is scoped to that single endpoint. `ws://`
 /// (non-TLS) URLs ignore the connector entirely.
-/// Force the secure `wss://` scheme on a Coflnet modsocket URL. Accepts a
-/// scheme-less host, a plaintext `ws://` URL, or an already-secure `wss://` URL
-/// and always returns a `wss://` URL.
+/// Normalize a websocket URL. Coflnet hosts are force-upgraded to `wss://`
+/// (their regional servers are TLS-only; old configs may still say `ws://`).
+/// NON-Coflnet endpoints — e.g. the local baf-flip-finder on
+/// `ws://127.0.0.1:15101`, which speaks plaintext on loopback — keep their
+/// explicit scheme: forcing TLS there produced
+/// "ssl3_get_record:wrong version number" and killed startup.
 fn normalize_ws_url(url: &str) -> String {
     let host = url
         .strip_prefix("wss://")
         .or_else(|| url.strip_prefix("ws://"))
         .unwrap_or(url);
+    let is_cofl = host.contains("coflnet") || host.contains("/modsocket");
+    if !is_cofl && url.starts_with("ws://") {
+        return url.to_string();
+    }
     format!("wss://{}", host)
 }
 
@@ -184,6 +191,38 @@ impl CoflWebSocket {
 
     fn handle_message(text: &str, tx: &mpsc::UnboundedSender<CoflEvent>) -> Result<()> {
         info!("[COFL <-] {}", text);
+
+        // baf-flip-finder protocol: when this socket points at the private
+        // finder instead of Coflnet (finder-only mode), its messages are
+        // {type:'flip', flip:{…}} / welcome / filters / pong — translate flips
+        // into the normal pipeline and ignore the rest quietly.
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(text) {
+            match v.get("type").and_then(|t| t.as_str()) {
+                Some("flip") if v.get("flip").is_some() => {
+                    let f = &v["flip"];
+                    let flip = Flip {
+                        item_name: f.get("itemName").and_then(|x| x.as_str()).unwrap_or("?").to_string(),
+                        starting_bid: f.get("price").and_then(|x| x.as_u64()).unwrap_or(0),
+                        target: f.get("target").and_then(|x| x.as_u64()).unwrap_or(0),
+                        finder: Some("BAF_FINDER".to_string()),
+                        profit_perc: f.get("roiPct").and_then(|x| x.as_f64()),
+                        purchase_at_ms: None,
+                        uuid: f.get("uuid").and_then(|x| x.as_str()).map(String::from),
+                        list_at: f.get("listAt").and_then(|x| x.as_u64()),
+                    };
+                    if flip.starting_bid > 0 && flip.target > 0 && flip.uuid.is_some() {
+                        debug!("Parsed finder flip: {}", flip.item_name);
+                        let _ = tx.send(CoflEvent::AuctionFlip(flip));
+                    }
+                    return Ok(());
+                }
+                Some("welcome") | Some("filters") | Some("pong") | Some("listInstructions") => {
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+
         let msg: WebSocketMessage = serde_json::from_str(text)
             .context("Failed to parse WebSocket message")?;
 
