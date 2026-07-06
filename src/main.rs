@@ -4342,27 +4342,60 @@ async fn main() -> Result<()> {
                     let mut listed_recently: std::collections::HashMap<String, std::time::Instant> = std::collections::HashMap::new();
                     let mut backoff = 5u64;
                     loop {
+                        // Explicit "/" path: a bare-authority ws URL makes the
+                        // handshake line "GET ?role=… HTTP/1.1", which strict
+                        // HTTP parsers (the finder's Node server) reject as 400.
                         let full = if token.is_empty() {
-                            format!("{}?role=lister", url.trim_end_matches('/'))
+                            format!("{}/?role=lister", url.trim_end_matches('/'))
                         } else {
-                            format!("{}?role=lister&token={}", url.trim_end_matches('/'), token)
+                            format!("{}/?role=lister&token={}", url.trim_end_matches('/'), token)
                         };
                         match tokio_tungstenite::connect_async(&full).await {
                             Ok((mut stream, _)) => {
                                 info!("[FinderList] Connected to finder for auto-listing: {}", url);
                                 backoff = 5;
-                                let mut upload = tokio::time::interval(std::time::Duration::from_secs(60));
+                                // Event-driven: upload the moment an AH slot frees
+                                // (sold auction claimed / expired reclaim) or the
+                                // inventory content changes (new buy landed), with a
+                                // 60s fallback. 10s tick keeps reactions prompt
+                                // without hammering the finder.
+                                let mut upload = tokio::time::interval(std::time::Duration::from_secs(10));
+                                let mut last_auction_count = usize::MAX;
+                                let mut last_inv_hash = 0u64;
+                                let mut last_upload = std::time::Instant::now() - std::time::Duration::from_secs(3600);
                                 loop {
                                     tokio::select! {
                                         _ = upload.tick() => {
-                                            // Upload inventory (slots array from cached JSON).
-                                            if let Some(inv) = bc.get_cached_inventory_json() {
-                                                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&inv) {
-                                                    let items = v.get("slots").cloned().unwrap_or(serde_json::json!([]));
-                                                    let msg = serde_json::json!({ "type": "inventory", "items": items }).to_string();
-                                                    if stream.send(tokio_tungstenite::tungstenite::Message::Text(msg)).await.is_err() {
-                                                        break;
-                                                    }
+                                            // No point pricing when nothing can be listed.
+                                            if bc.is_auction_at_limit() || bc.is_auction_slot_blocked() { continue; }
+                                            let Some(inv) = bc.get_cached_inventory_json() else { continue };
+                                            let count = bc.active_auction_count();
+                                            let slot_freed = count < last_auction_count;
+                                            last_auction_count = count;
+                                            let inv_hash = {
+                                                use std::hash::{Hash, Hasher};
+                                                let mut h = std::collections::hash_map::DefaultHasher::new();
+                                                inv.hash(&mut h);
+                                                h.finish()
+                                            };
+                                            let inv_changed = inv_hash != last_inv_hash;
+                                            let stale = last_upload.elapsed() >= std::time::Duration::from_secs(60);
+                                            // Debounce content-only changes a little.
+                                            if !(slot_freed || stale || (inv_changed && last_upload.elapsed() >= std::time::Duration::from_secs(15))) {
+                                                continue;
+                                            }
+                                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&inv) {
+                                                let items = v.get("slots").cloned().unwrap_or(serde_json::json!([]));
+                                                let msg = serde_json::json!({ "type": "inventory", "items": items }).to_string();
+                                                if stream.send(tokio_tungstenite::tungstenite::Message::Text(msg)).await.is_err() {
+                                                    break;
+                                                }
+                                                last_inv_hash = inv_hash;
+                                                last_upload = std::time::Instant::now();
+                                                if slot_freed && !stale {
+                                                    info!("[FinderList] AH slot freed ({} active) — asking finder for listing suggestions", count);
+                                                } else if inv_changed && !stale {
+                                                    info!("[FinderList] Inventory changed — asking finder for listing suggestions");
                                                 }
                                             }
                                         }
