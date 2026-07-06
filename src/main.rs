@@ -366,6 +366,11 @@ struct ProfitStatsEntry {
     ah_total: i64,
     /// Cumulative Bazaar profit in coins.
     bz_total: i64,
+    /// Unix seconds when this entry was last saved — profit follows the same
+    /// session rule as uptime: a quick restart resumes it, a long pause (>
+    /// MAX_SESSION_GAP_SECS) starts a fresh session at 0.
+    #[serde(default)]
+    saved_at: u64,
 }
 
 /// Load per-account profit stats from disk.
@@ -385,7 +390,7 @@ fn save_profit_stats(
 ) {
     let (ah, bz) = tracker.totals();
     let mut map = load_profit_stats(path);
-    map.insert(ign.to_string(), ProfitStatsEntry { ah_total: ah, bz_total: bz });
+    map.insert(ign.to_string(), ProfitStatsEntry { ah_total: ah, bz_total: bz, saved_at: unix_now() });
     if let Ok(json) = serde_json::to_string_pretty(&map) {
         if let Err(e) = std::fs::write(path, json) {
             tracing::warn!("[Profit] Failed to save profit stats: {}", e);
@@ -967,13 +972,21 @@ async fn main() -> Result<()> {
         let tracker = Arc::new(frikadellen_baf::profit::ProfitTracker::new());
         let saved = load_profit_stats(&profit_path);
         if let Some(entry) = saved.get(&ingame_name) {
-            if entry.ah_total != 0 {
-                tracker.set_ah_total(entry.ah_total);
-                info!("[Profit] Restored AH profit from disk: {} coins", entry.ah_total);
-            }
-            if entry.bz_total != 0 {
-                tracker.set_bz_total(entry.bz_total);
-                info!("[Profit] Restored BZ profit from disk: {} coins", entry.bz_total);
+            // Same rule as session time: only a QUICK restart resumes the
+            // totals. A long pause starts the session profit at 0 — this was
+            // previously unconditional, so profit never reset at all.
+            let gap = unix_now().saturating_sub(entry.saved_at);
+            if gap <= MAX_SESSION_GAP_SECS {
+                if entry.ah_total != 0 {
+                    tracker.set_ah_total(entry.ah_total);
+                    info!("[Profit] Restored AH profit from disk: {} coins", entry.ah_total);
+                }
+                if entry.bz_total != 0 {
+                    tracker.set_bz_total(entry.bz_total);
+                    info!("[Profit] Restored BZ profit from disk: {} coins", entry.bz_total);
+                }
+            } else {
+                info!("[Profit] Session gap {}s (> {}s) — profit starts fresh at 0", gap, MAX_SESSION_GAP_SECS);
             }
         }
         tracker
@@ -3496,10 +3509,16 @@ async fn main() -> Result<()> {
     info!("  /<command> - Send command to Minecraft");
     info!("  <text> - Send chat message to COFL websocket");
     
+    // `/trex sellinv` → wake the finder auto-lister for an immediate FORCED
+    // inventory upload (finder ignores its confidence filter, still refuses
+    // items without enough sold samples and reports those back).
+    let force_list_notify = std::sync::Arc::new(tokio::sync::Notify::new());
+
     // Spawn console input handler (only when enabled in config).  When disabled,
     // stdin is left untouched — useful when running headless / as a service.
     let ws_client_for_console = ws_client.clone();
     let command_queue_for_console = command_queue.clone();
+    let force_list_for_console = force_list_notify.clone();
     let console_input_enabled = config.enable_console_input;
 
     tokio::spawn(async move {
@@ -3589,6 +3608,13 @@ async fn main() -> Result<()> {
                         Err(e) => print_mc_chat(&format!("§f[§4BAF§f]: §7edge/SLP probe failed: {}", e)),
                     }
                 });
+                continue;
+            }
+
+            // `/trex sellinv` — force-list the whole inventory at finder prices.
+            if lowercase_input == "/trex sellinv" || lowercase_input == "trex sellinv" {
+                print_mc_chat("§f[§4BAF§f]: §bForce-selling inventory via finder — items without enough samples will be skipped");
+                force_list_for_console.notify_one();
                 continue;
             }
 
@@ -4335,6 +4361,7 @@ async fn main() -> Result<()> {
                 let bc = bot_client.clone();
                 let queue = command_queue.clone();
                 let dur = config.auction_duration_hours;
+                let force_notify = force_list_notify.clone();
                 tokio::spawn(async move {
                     use futures::{SinkExt, StreamExt};
                     // Per item-name cooldown so we don't re-instruct while a
@@ -4342,28 +4369,79 @@ async fn main() -> Result<()> {
                     let mut listed_recently: std::collections::HashMap<String, std::time::Instant> = std::collections::HashMap::new();
                     let mut backoff = 5u64;
                     loop {
+                        // Explicit "/" path: a bare-authority ws URL makes the
+                        // handshake line "GET ?role=… HTTP/1.1", which strict
+                        // HTTP parsers (the finder's Node server) reject as 400.
                         let full = if token.is_empty() {
-                            format!("{}?role=lister", url.trim_end_matches('/'))
+                            format!("{}/?role=lister", url.trim_end_matches('/'))
                         } else {
-                            format!("{}?role=lister&token={}", url.trim_end_matches('/'), token)
+                            format!("{}/?role=lister&token={}", url.trim_end_matches('/'), token)
                         };
                         match tokio_tungstenite::connect_async(&full).await {
                             Ok((mut stream, _)) => {
                                 info!("[FinderList] Connected to finder for auto-listing: {}", url);
                                 backoff = 5;
-                                let mut upload = tokio::time::interval(std::time::Duration::from_secs(60));
+                                // Event-driven: upload the moment an AH slot frees
+                                // (sold auction claimed / expired reclaim) or the
+                                // inventory content changes (new buy landed), with a
+                                // 60s fallback. 10s tick keeps reactions prompt
+                                // without hammering the finder.
+                                let mut upload = tokio::time::interval(std::time::Duration::from_secs(10));
+                                let mut last_auction_count = usize::MAX;
+                                let mut last_inv_hash = 0u64;
+                                let mut last_upload = std::time::Instant::now() - std::time::Duration::from_secs(3600);
                                 loop {
                                     tokio::select! {
                                         _ = upload.tick() => {
-                                            // Upload inventory (slots array from cached JSON).
+                                            // No point pricing when nothing can be listed.
+                                            if bc.is_auction_at_limit() || bc.is_auction_slot_blocked() { continue; }
+                                            let Some(inv) = bc.get_cached_inventory_json() else { continue };
+                                            let count = bc.active_auction_count();
+                                            let slot_freed = count < last_auction_count;
+                                            last_auction_count = count;
+                                            let inv_hash = {
+                                                use std::hash::{Hash, Hasher};
+                                                let mut h = std::collections::hash_map::DefaultHasher::new();
+                                                inv.hash(&mut h);
+                                                h.finish()
+                                            };
+                                            let inv_changed = inv_hash != last_inv_hash;
+                                            let stale = last_upload.elapsed() >= std::time::Duration::from_secs(60);
+                                            // Debounce content-only changes a little.
+                                            if !(slot_freed || stale || (inv_changed && last_upload.elapsed() >= std::time::Duration::from_secs(15))) {
+                                                continue;
+                                            }
+                                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&inv) {
+                                                let items = v.get("slots").cloned().unwrap_or(serde_json::json!([]));
+                                                let msg = serde_json::json!({ "type": "inventory", "items": items }).to_string();
+                                                if stream.send(tokio_tungstenite::tungstenite::Message::Text(msg)).await.is_err() {
+                                                    break;
+                                                }
+                                                last_inv_hash = inv_hash;
+                                                last_upload = std::time::Instant::now();
+                                                if slot_freed && !stale {
+                                                    info!("[FinderList] AH slot freed ({} active) — asking finder for listing suggestions", count);
+                                                } else if inv_changed && !stale {
+                                                    info!("[FinderList] Inventory changed — asking finder for listing suggestions");
+                                                }
+                                            }
+                                        }
+                                        _ = force_notify.notified() => {
+                                            // `/trex sellinv`: immediate forced upload — the finder
+                                            // drops its confidence gate and reports unlistable items.
                                             if let Some(inv) = bc.get_cached_inventory_json() {
                                                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&inv) {
                                                     let items = v.get("slots").cloned().unwrap_or(serde_json::json!([]));
-                                                    let msg = serde_json::json!({ "type": "inventory", "items": items }).to_string();
+                                                    let msg = serde_json::json!({ "type": "inventory", "items": items, "force": true }).to_string();
+                                                    info!("[FinderList] Force-sell: uploading inventory to finder");
+                                                    listed_recently.clear(); // force = re-instruct everything
                                                     if stream.send(tokio_tungstenite::tungstenite::Message::Text(msg)).await.is_err() {
                                                         break;
                                                     }
+                                                    last_upload = std::time::Instant::now();
                                                 }
+                                            } else {
+                                                warn!("[FinderList] Force-sell requested but no cached inventory yet");
                                             }
                                         }
                                         m = stream.next() => {
@@ -4374,6 +4452,16 @@ async fn main() -> Result<()> {
                                             };
                                             let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) else { continue };
                                             if v.get("type").and_then(|t| t.as_str()) != Some("listInstructions") { continue; }
+                                            // Force responses explain every skipped item — surface that.
+                                            if let Some(sk) = v.get("skipped").and_then(|s| s.as_array()) {
+                                                for s in sk {
+                                                    let name = s.get("name").and_then(|x| x.as_str()).unwrap_or("?");
+                                                    let reason = s.get("reason").and_then(|x| x.as_str()).unwrap_or("unpriceable");
+                                                    let clean = frikadellen_baf::utils::remove_minecraft_colors(name);
+                                                    frikadellen_baf::logging::print_mc_chat(&format!("§f[§4BAF§f]: §eWon't list §f{}§e — {}", clean, reason));
+                                                    info!("[FinderList] Won't list \"{}\" — {}", clean, reason);
+                                                }
+                                            }
                                             let Some(items) = v.get("items").and_then(|i| i.as_array()) else { continue };
                                             listed_recently.retain(|_, t| t.elapsed() < std::time::Duration::from_secs(300));
                                             for it in items {
