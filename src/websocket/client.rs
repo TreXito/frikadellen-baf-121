@@ -28,6 +28,12 @@ fn normalize_ws_url(url: &str) -> String {
         .unwrap_or(url);
     let is_cofl = host.contains("coflnet") || host.contains("/modsocket");
     if !is_cofl && url.starts_with("ws://") {
+        // Bare-authority URLs ("ws://127.0.0.1:15101") need an explicit "/":
+        // tungstenite passes the empty path through and the handshake becomes
+        // "GET ?player=… HTTP/1.1", which strict HTTP parsers (Node) 400.
+        if !host.contains('/') {
+            return format!("{}/", url);
+        }
         return url.to_string();
     }
     format!("wss://{}", host)
