@@ -4354,6 +4354,12 @@ async fn main() -> Result<()> {
                 .iter()
                 .map(|u| u.trim().to_string())
                 .find(|u| !u.is_empty() && !u.contains("coflnet") && !u.contains("/modsocket"))
+        }).or_else(|| {
+            // Finder-only mode: the finder IS the primary websocket_url — the
+            // lister must still spawn (it never did, so /trex sellinv and
+            // auto-listing silently no-opped).
+            let u = config.websocket_url.trim().to_string();
+            (!u.is_empty() && !u.contains("coflnet") && !u.contains("/modsocket")).then_some(u)
         });
         if config.finder_auto_list {
             if let Some(url) = finder_list_url {

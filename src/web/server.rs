@@ -1331,6 +1331,23 @@ async fn save_config(
     let enable_bz = s.enable_bazaar_flips.clone();
     let toml_str = payload.config_toml;
     match tokio::task::spawn_blocking(move || -> Result<(), String> {
+        // The panel's form serializes array fields as quoted strings
+        // (`multisocket_urls = "[]"`), which TOML rejects. Unquote any value
+        // that is a stringified array before validating.
+        let toml_str: String = toml_str
+            .lines()
+            .map(|line| {
+                if let Some((k, v)) = line.split_once('=') {
+                    let vt = v.trim();
+                    if vt.len() >= 4 && vt.starts_with("\"[") && vt.ends_with("]\"") {
+                        let inner = &vt[1..vt.len() - 1];
+                        return format!("{}= {}", k, inner.replace("\\\"", "\""));
+                    }
+                }
+                line.to_string()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
         // Parse the TOML to validate it first
         let mut config: crate::config::Config = toml::from_str(&toml_str)
             .map_err(|e| format!("Invalid config TOML: {}", e))?;
