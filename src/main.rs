@@ -4362,6 +4362,7 @@ async fn main() -> Result<()> {
                 let queue = command_queue.clone();
                 let dur = config.auction_duration_hours;
                 let force_notify = force_list_notify.clone();
+                let flip_tracker_list = flip_tracker.clone();
                 tokio::spawn(async move {
                     use futures::{SinkExt, StreamExt};
                     // Per item-name cooldown so we don't re-instruct while a
@@ -4483,6 +4484,24 @@ async fn main() -> Result<()> {
                                                     frikadellen_baf::types::CommandPriority::Normal,
                                                     false,
                                                 );
+                                                // -- Report listing to finder ---------------------
+                                                // Send itemUuid and flipUuid so the finder can
+                                                // update its self-listing guard and listing UUIDs.
+                                                let item_uuid = it.get("uuid").and_then(|x| x.as_str()).map(String::from);
+                                                let flip_uuid = {
+                                                    let needle = clean.to_lowercase();
+                                                    flip_tracker_list.lock().ok()
+                                                        .and_then(|ft| ft.get(&needle))
+                                                        .and_then(|entry| entry.0.uuid.clone())
+                                                };
+                                                let listed_msg = serde_json::json!({
+                                                    "type": "listed",
+                                                    "auctionUuid": null,
+                                                    "itemUuid": item_uuid,
+                                                    "flipUuid": flip_uuid,
+                                                    "itemName": &clean,
+                                                }).to_string();
+                                                let _ = stream.send(tokio_tungstenite::tungstenite::Message::Text(listed_msg)).await;
                                             }
                                         }
                                     }
