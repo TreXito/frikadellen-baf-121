@@ -2500,6 +2500,46 @@ async fn event_handler(
                         let _ = state.event_tx.send(BotEvent::NoCookieDetected);
                     }
                 }
+            } else if matches!(*state.bot_state.read(), BotState::ClaimingSold | BotState::ClaimingPurchased)
+                && (clean_message.contains("This auction wasn't found!")
+                    || clean_message.contains("The auction wasn't found!"))
+            {
+                // "auction wasn't found" during a claim means the auction is already
+                // gone — it was ALREADY claimed/collected (e.g. via Claim All or the
+                // chat CLICK link). No window opens in this case, so the window
+                // handlers never fire and the claim would otherwise hang until the
+                // 60s queue timeout. Treat it as a completed claim, go idle now.
+                let was_claiming = {
+                    let mut bs = state.bot_state.write();
+                    if matches!(*bs, BotState::ClaimingSold | BotState::ClaimingPurchased) {
+                        *bs = BotState::Idle;
+                        true
+                    } else {
+                        false
+                    }
+                };
+                if was_claiming {
+                    info!("[Claim] Auction not found (already claimed) — treating as done, going idle");
+                    let window_id = *state.last_window_id.read();
+                    if window_id > 0 {
+                        send_raw_close(&bot, window_id, &state.handlers);
+                    }
+                    state.auction_slot_blocked.store(false, Ordering::Relaxed);
+                }
+            } else if clean_message.contains("canceled your auction for")
+                || clean_message.contains("cancelled your auction for")
+            {
+                // An auction was cancelled (bot command, manual, or web panel) — a
+                // listing slot just freed. Clear the sticky auction-limit flag so
+                // queued SellToAuction commands (e.g. /trex sellinv) stop being
+                // dropped, and clear any slot-blocked state for good measure. The
+                // flag is otherwise only cleared on a SALE, so a cancel left it
+                // stuck true and the bot silently refused to list anything.
+                if state.auction_at_limit.load(Ordering::Relaxed) {
+                    info!("[Auction] Auction cancelled — clearing auction-limit flag (slot freed)");
+                    state.auction_at_limit.store(false, Ordering::Relaxed);
+                }
+                state.auction_slot_blocked.store(false, Ordering::Relaxed);
             } else if clean_message.contains("[Auction]") && clean_message.contains("bought") && clean_message.contains("for") && clean_message.contains("coins") {
                 // "[Auction] <buyer> bought <item> for <price> coins"
                 // Always claim sold auctions. The active_auction_listings filter was
