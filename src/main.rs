@@ -1505,19 +1505,21 @@ async fn main() -> Result<()> {
                         }
                     };
                     // Finder-bought items: if COFL doesn't list the item itself (e.g.
-                    // running finder-only, or COFL has no data for it), fall back to
-                    // listing at the finder's recommendation ("this item is really
-                    // worth X"). COFL's createAuction stays authoritative when it
-                    // fires — this only acts if the item is STILL in inventory after
-                    // the grace window. Toggled finder-side via ws-config.json
-                    // `listingRecommendations` (off → flips carry no listAt → no auto-list).
+                    // running finder-only, or COFL has no data for it), request FRESH
+                    // pricing from the finder's inventory RPC and list from those
+                    // instructions — the flip's target-scaled listAt is deliberately
+                    // NOT used (the buy target is a conservative estimate; the sell
+                    // price is decided at listing time with live references, real
+                    // competition and the cost-basis floor — the single listing
+                    // logic). Only acts if the item is STILL in inventory after the
+                    // grace window; `opt_list_at` presence is just the "finder
+                    // listing enabled" signal (ws-config listingRecommendations).
                     if opt_finder.as_deref() == Some("BAF_FINDER") {
-                        if let Some(list_at) = opt_list_at.filter(|&v| v > 0) {
+                        if opt_list_at.filter(|&v| v > 0).is_some() {
                             const COFL_LISTING_GRACE_SECS: u64 = 150;
-                            let queue = command_queue_clone.clone();
                             let bc = bot_client_clone.clone();
                             let item = item_name.clone();
-                            let dur = config_for_events.auction_duration_hours;
+                            let ws = ws_client_for_events.clone();
                             let chat = chat_tx_events.clone();
                             tokio::spawn(async move {
                                 sleep(Duration::from_secs(COFL_LISTING_GRACE_SECS)).await;
@@ -1540,25 +1542,21 @@ async fn main() -> Result<()> {
                                 if !still_held {
                                     return;
                                 }
-                                info!("[FinderListing] \"{}\" still in inventory after {}s — listing at finder recommendation {}", item, COFL_LISTING_GRACE_SECS, list_at);
+                                info!("[FinderListing] \"{}\" still in inventory after {}s — requesting fresh finder pricing (inventory RPC)", item, COFL_LISTING_GRACE_SECS);
                                 let msg = format!(
-                                    "§f[§4BAF§f]: §b📋 Listing §r{}§r §7at finder estimate §6{}§7 coins",
-                                    item,
-                                    format_coins(list_at as i64)
+                                    "§f[§4BAF§f]: §b📋 §r{}§r §7still held — asking finder for a fresh listing price",
+                                    item
                                 );
                                 print_mc_chat(&msg);
                                 let _ = chat.send(msg);
-                                queue.enqueue(
-                                    frikadellen_baf::types::CommandType::SellToAuction {
-                                        item_name: item,
-                                        starting_bid: list_at,
-                                        duration_hours: dur,
-                                        item_slot: None,
-                                        item_id: None,
-                                    },
-                                    frikadellen_baf::types::CommandPriority::Normal,
-                                    false,
-                                );
+                                if let Some(inv) = bc.get_cached_inventory_json() {
+                                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&inv) {
+                                        let items = v.get("slots").cloned().unwrap_or(serde_json::json!([]));
+                                        if let Err(e) = ws.send_inventory(&items, true).await {
+                                            warn!("[FinderListing] inventory upload for pricing failed: {}", e);
+                                        }
+                                    }
+                                }
                             });
                         }
                     }
