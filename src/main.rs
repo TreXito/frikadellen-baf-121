@@ -3560,7 +3560,6 @@ async fn main() -> Result<()> {
     let ws_client_for_console = ws_client.clone();
     let command_queue_for_console = command_queue.clone();
     let bot_client_for_console = bot_client.clone();
-    let force_list_for_console = force_list_notify.clone();
     let console_input_enabled = config.enable_console_input;
 
     tokio::spawn(async move {
@@ -4546,7 +4545,7 @@ async fn main() -> Result<()> {
                                                 info!("[FinderList] Listing \"{}\" at finder price {}", clean, list_at);
                                                 queue.enqueue(
                                                     frikadellen_baf::types::CommandType::SellToAuction {
-                                                        item_name: clean,
+                                                        item_name: clean.clone(),
                                                         starting_bid: list_at,
                                                         duration_hours: dur,
                                                         item_slot: None,
@@ -4561,9 +4560,10 @@ async fn main() -> Result<()> {
                                                 let item_uuid = it.get("uuid").and_then(|x| x.as_str()).map(String::from);
                                                 let flip_uuid = {
                                                     let needle = clean.to_lowercase();
+                                                    // Access the entry while the guard is alive and clone the
+                                                    // uuid out — a reference into the map can't outlive the lock.
                                                     flip_tracker_list.lock().ok()
-                                                        .and_then(|ft| ft.get(&needle))
-                                                        .and_then(|entry| entry.0.uuid.clone())
+                                                        .and_then(|ft| ft.get(&needle).and_then(|entry| entry.0.uuid.clone()))
                                                 };
                                                 let listed_msg = serde_json::json!({
                                                     "type": "listed",
