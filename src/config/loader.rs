@@ -46,7 +46,8 @@ impl ConfigLoader {
         let contents = fs::read_to_string(&self.config_path)
             .context("Failed to read config file")?;
         
-        let config = Self::parse_config(&contents)?;
+        let mut config = Self::parse_config(&contents)?;
+        config.normalize_do_not_relist_ids();
         
         // Re-save after every load so that newly added config fields
         // appear in the file with their default values (matches TypeScript

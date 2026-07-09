@@ -98,12 +98,28 @@ const MIN_FREE_SLOTS_FOR_BUY: u8 = 2;
 /// at or below this value, the bot stops claiming purchased items (bids) to
 /// keep space available for selling.
 const NEAR_FULL_SLOT_THRESHOLD: u8 = 4;
+/// Hypixel sends this as soon as the SkyBlock profile is active. Matching it
+/// starts the cookie/startup workflow without waiting for the generic timeout.
+static SKYBLOCK_PROFILE_STATUS_RE: Lazy<regex::Regex> = Lazy::new(|| {
+    regex::Regex::new(r"(?i)^\s*you are playing on profile:\s*.+$")
+        .expect("valid SkyBlock profile-status regex")
+});
 #[cfg(test)]
 static SOLD_FOR_PRICE_RE: Lazy<regex::Regex> =
     Lazy::new(|| regex::Regex::new(r"(?i)sold\s*for[: ]+\s*([0-9,]+)\s*coins").expect("valid sold-for regex"));
 #[cfg(test)]
 static SOLD_BUYER_RE: Lazy<regex::Regex> =
     Lazy::new(|| regex::Regex::new(r"(?i)buyer[: ]+\s*([^\n]+)").expect("valid sold-buyer regex"));
+
+fn is_skyblock_join_message(clean_message: &str) -> bool {
+    clean_message.starts_with("Welcome to Hypixel SkyBlock")
+        || SKYBLOCK_PROFILE_STATUS_RE.is_match(clean_message)
+        || (clean_message.starts_with("[Profile]") && clean_message.contains("currently"))
+        || (clean_message.starts_with("[") && {
+            let upper = clean_message.to_uppercase();
+            upper.contains("SKYBLOCK") && upper.contains("PROFILE")
+        })
+}
 
 // ---------------------------------------------------------------------------
 // Bevy Plugin: PacketAcceleratorPlugin
@@ -2856,20 +2872,7 @@ async fn event_handler(
                     let should_timeout = join_time.elapsed() > tokio::time::Duration::from_secs(SKYBLOCK_JOIN_TIMEOUT_SECS);
                     
                     // Check if message is a SkyBlock join confirmation
-                    let skyblock_detected = {
-                        if clean_message.starts_with("Welcome to Hypixel SkyBlock") {
-                            true
-                        }
-                        else if clean_message.starts_with("[Profile]") && clean_message.contains("currently") {
-                            true
-                        }
-                        else if clean_message.starts_with("[") {
-                            let upper = clean_message.to_uppercase();
-                            upper.contains("SKYBLOCK") && upper.contains("PROFILE")
-                        } else {
-                            false
-                        }
-                    };
+                    let skyblock_detected = is_skyblock_join_message(&clean_message);
                     
                     if skyblock_detected || should_timeout {
                         // Mark as joined now that we've confirmed
@@ -7846,6 +7849,14 @@ mod tests {
         assert_eq!(parse_cookie_duration_secs("Duration: 23h 45m"), 23 * 3600 + 45 * 60);
         assert_eq!(parse_cookie_duration_secs("Duration: 1h 30m"), 1 * 3600 + 30 * 60);
         assert_eq!(parse_cookie_duration_secs("Duration: 0d 0h 0m"), 0);
+    }
+
+    #[test]
+    fn profile_status_message_starts_skyblock_workflow() {
+        assert!(is_skyblock_join_message("You are playing on profile: Apple"));
+        assert!(is_skyblock_join_message("you are playing on profile: Pear"));
+        assert!(is_skyblock_join_message("Welcome to Hypixel SkyBlock"));
+        assert!(!is_skyblock_join_message("You are playing SkyBlock"));
     }
 
     #[test]

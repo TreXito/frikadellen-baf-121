@@ -93,6 +93,13 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub finder_auto_list: bool,
 
+    /// SkyBlock item IDs which the private finder must never automatically
+    /// relist (for example, `JUJU_SHORTBOW`). This only affects finder-driven
+    /// listing instructions; manual and ordinary COFL listings still work.
+    /// Values are normalized to uppercase, sorted, and deduplicated on load.
+    #[serde(default)]
+    pub do_not_relist_ids: Vec<String>,
+
     #[serde(default = "default_web_gui_port")]
     pub web_gui_port: u16,
 
@@ -374,6 +381,7 @@ impl Default for Config {
             finder_ws_url: None,
             finder_ws_token: None,
             finder_auto_list: true,
+            do_not_relist_ids: Vec::new(),
             web_gui_port: default_web_gui_port(),
             command_delay_ms: default_command_delay_ms(),
             bed_spam_click_delay: default_bed_spam_click_delay(),
@@ -418,6 +426,28 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Normalize the finder relist blocklist before it is persisted so the
+    /// generated config stays easy to read and comparisons are reliable.
+    pub fn normalize_do_not_relist_ids(&mut self) {
+        self.do_not_relist_ids = self
+            .do_not_relist_ids
+            .iter()
+            .map(|id| id.trim().to_ascii_uppercase())
+            .filter(|id| !id.is_empty())
+            .collect();
+        self.do_not_relist_ids.sort();
+        self.do_not_relist_ids.dedup();
+    }
+
+    /// True when this SkyBlock item ID is excluded from automatic finder
+    /// relisting. Input is intentionally normalized here too, so callers do
+    /// not depend on where the id came from (NBT, JSON, or UI).
+    pub fn should_not_relist_id(&self, item_id: &str) -> bool {
+        self.do_not_relist_ids
+            .binary_search(&item_id.trim().to_ascii_uppercase())
+            .is_ok()
+    }
+
     pub fn bedtiming_enabled(&self) -> bool {
         self.bedtiming
     }
@@ -620,6 +650,20 @@ mod tests {
         assert!(toml.contains("proxy_credentials"), "proxy_credentials should appear in default config");
         assert!(toml.contains("multi_switch_time"), "multi_switch_time should appear in default config");
         assert!(toml.contains("discord_id"), "discord_id should appear in default config");
+        assert!(toml.contains("do_not_relist_ids"), "do_not_relist_ids should appear in default config");
+    }
+
+    #[test]
+    fn do_not_relist_ids_are_normalized_sorted_and_matched() {
+        let mut config: Config = toml::from_str(
+            "do_not_relist_ids = [\" juju_shortbow \", \"HYPERION\", \"JUJU_SHORTBOW\", \"\"]",
+        )
+        .expect("config should parse");
+        config.normalize_do_not_relist_ids();
+        assert_eq!(config.do_not_relist_ids, vec!["HYPERION", "JUJU_SHORTBOW"]);
+        assert!(config.should_not_relist_id("juju_shortbow"));
+        assert!(config.should_not_relist_id(" JUJU_SHORTBOW "));
+        assert!(!config.should_not_relist_id("TERMINATOR"));
     }
 
     #[test]

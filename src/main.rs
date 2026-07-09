@@ -3175,6 +3175,12 @@ async fn main() -> Result<()> {
                             print_mc_chat("§f[§4BAF§f]: §a--- Items to list ---");
                             for it in items {
                                 let name = it.get("name").and_then(|x| x.as_str()).unwrap_or("?");
+                                let item_id = it.get("id").and_then(|x| x.as_str()).unwrap_or("");
+                                if !item_id.is_empty() && config_clone.should_not_relist_id(item_id) {
+                                    let clean = frikadellen_baf::utils::remove_minecraft_colors(name);
+                                    print_mc_chat(&format!("§f[§4BAF§f]: §eWon't list §f{}§e — item id {} is in do_not_relist_ids", clean, item_id));
+                                    continue;
+                                }
                                 let list_at = it.get("listAt").and_then(|x| x.as_u64()).unwrap_or(0);
                                 let clean = frikadellen_baf::utils::remove_minecraft_colors(name);
                                 print_mc_chat(&format!("§f[§4BAF§f]: §e{} §7→ §a{} coins", clean, list_at));
@@ -3185,6 +3191,11 @@ async fn main() -> Result<()> {
                         let dur = config_clone.auction_duration_hours;
                         for it in items {
                             let name = match it.get("name").and_then(|x| x.as_str()) { Some(n) => n.to_string(), None => continue };
+                            let item_id = it.get("id").and_then(|x| x.as_str()).unwrap_or("");
+                            if !item_id.is_empty() && config_clone.should_not_relist_id(item_id) {
+                                info!("[FinderList] Skipping \"{}\" — item id {} is in do_not_relist_ids", name, item_id);
+                                continue;
+                            }
                             let list_at = it.get("listAt").and_then(|x| x.as_u64()).unwrap_or(0);
                             if list_at == 0 { continue; }
                             let clean = frikadellen_baf::utils::remove_minecraft_colors(&name);
@@ -4429,6 +4440,7 @@ async fn main() -> Result<()> {
                 let bc = bot_client.clone();
                 let queue = command_queue.clone();
                 let dur = config.auction_duration_hours;
+                let do_not_relist_ids = config.do_not_relist_ids.clone();
                 let force_notify = force_list_notify.clone();
                 let flip_tracker_list = flip_tracker.clone();
                 tokio::spawn(async move {
@@ -4535,6 +4547,18 @@ async fn main() -> Result<()> {
                                             listed_recently.retain(|_, t| t.elapsed() < std::time::Duration::from_secs(300));
                                             for it in items {
                                                 let name = match it.get("name").and_then(|x| x.as_str()) { Some(n) => n.to_string(), None => continue };
+                                                let item_id = it.get("id").and_then(|x| x.as_str()).unwrap_or("");
+                                                if !item_id.is_empty()
+                                                    && do_not_relist_ids.binary_search(&item_id.trim().to_ascii_uppercase()).is_ok()
+                                                {
+                                                    let clean = frikadellen_baf::utils::remove_minecraft_colors(&name);
+                                                    info!("[FinderList] Won't list \"{}\" — item id {} is in do_not_relist_ids", clean, item_id);
+                                                    frikadellen_baf::logging::print_mc_chat(&format!(
+                                                        "§f[§4BAF§f]: §eWon't list §f{}§e — item id {} is in do_not_relist_ids",
+                                                        clean, item_id
+                                                    ));
+                                                    continue;
+                                                }
                                                 let list_at = it.get("listAt").and_then(|x| x.as_u64()).unwrap_or(0);
                                                 if list_at == 0 { continue; }
                                                 let clean = frikadellen_baf::utils::remove_minecraft_colors(&name);
