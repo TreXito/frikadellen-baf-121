@@ -79,6 +79,9 @@ pub enum CoflEvent {
         entries: Vec<(String, u32, String)>,
         page: u32,
     },
+    /// Finder listInstructions: items the finder priced for listing.
+    /// Contains an array of {name, listAt, volumePerDay, confidence, slot} objects.
+    ListInstructions(serde_json::Value),
 }
 
 #[derive(Clone)]
@@ -222,7 +225,11 @@ impl CoflWebSocket {
                     }
                     return Ok(());
                 }
-                Some("welcome") | Some("filters") | Some("pong") | Some("listInstructions") => {
+                Some("welcome") | Some("filters") | Some("pong") => {
+                    return Ok(());
+                }
+                Some("listInstructions") => {
+                    let _ = tx.send(CoflEvent::ListInstructions(v));
                     return Ok(());
                 }
                 _ => {}
@@ -417,6 +424,17 @@ impl CoflWebSocket {
         info!("[COFL ->] {}", message);
         debug!("Sent WS message ({} bytes)", message.len());
         Ok(())
+    }
+
+    /// Send inventory to the finder for pricing/listing via the primary WS.
+    /// `force: true` skips the finder's confidence gate so all items get priced.
+    pub async fn send_inventory(&self, items: &serde_json::Value, force: bool) -> Result<()> {
+        let msg = serde_json::json!({
+            "type": "inventory",
+            "items": items,
+            "force": force,
+        }).to_string();
+        self.send_message(&msg).await
     }
 
     /// Transfer a COFL license to a different IGN.
