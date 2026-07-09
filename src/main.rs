@@ -3171,6 +3171,47 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
+                CoflEvent::ListInstructions(v) => {
+                    if let Some(items) = v.get("items").and_then(|i| i.as_array()) {
+                        if !items.is_empty() {
+                            print_mc_chat("§f[§4BAF§f]: §a--- Items to list ---");
+                            for it in items {
+                                let name = it.get("name").and_then(|x| x.as_str()).unwrap_or("?");
+                                let list_at = it.get("listAt").and_then(|x| x.as_u64()).unwrap_or(0);
+                                let clean = frikadellen_baf::utils::remove_minecraft_colors(name);
+                                print_mc_chat(&format!("§f[§4BAF§f]: §e{} §7→ §a{} coins", clean, list_at));
+                            }
+                            print_mc_chat("§f[§4BAF§f]: §a--- Listing now ---");
+                        }
+                        let queue_clone = command_queue_clone.clone();
+                        let dur = config_clone.auction_duration_hours;
+                        for it in items {
+                            let name = match it.get("name").and_then(|x| x.as_str()) { Some(n) => n.to_string(), None => continue };
+                            let list_at = it.get("listAt").and_then(|x| x.as_u64()).unwrap_or(0);
+                            if list_at == 0 { continue; }
+                            let clean = frikadellen_baf::utils::remove_minecraft_colors(&name);
+                            queue_clone.enqueue(
+                                frikadellen_baf::types::CommandType::SellToAuction {
+                                    item_name: clean,
+                                    starting_bid: list_at,
+                                    duration_hours: dur,
+                                    item_slot: None,
+                                    item_id: None,
+                                },
+                                frikadellen_baf::types::CommandPriority::Normal,
+                                false,
+                            );
+                        }
+                    }
+                    if let Some(skipped) = v.get("skipped").and_then(|s| s.as_array()) {
+                        for s in skipped {
+                            let name = s.get("name").and_then(|x| x.as_str()).unwrap_or("?");
+                            let reason = s.get("reason").and_then(|x| x.as_str()).unwrap_or("unpriceable");
+                            let clean = frikadellen_baf::utils::remove_minecraft_colors(name);
+                            print_mc_chat(&format!("§f[§4BAF§f]: §cWon't list §f{}§c — {}", clean, reason));
+                        }
+                    }
+                }
             }
         }
 
@@ -3518,6 +3559,7 @@ async fn main() -> Result<()> {
     // stdin is left untouched — useful when running headless / as a service.
     let ws_client_for_console = ws_client.clone();
     let command_queue_for_console = command_queue.clone();
+    let bot_client_for_console = bot_client.clone();
     let force_list_for_console = force_list_notify.clone();
     let console_input_enabled = config.enable_console_input;
 
@@ -3613,8 +3655,17 @@ async fn main() -> Result<()> {
 
             // `/trex sellinv` — force-list the whole inventory at finder prices.
             if lowercase_input == "/trex sellinv" || lowercase_input == "trex sellinv" {
-                print_mc_chat("§f[§4BAF§f]: §bForce-selling inventory via finder — items without enough samples will be skipped");
-                force_list_for_console.notify_one();
+                print_mc_chat("§f[§4BAF§f]: §bForce-selling inventory via finder...");
+                if let Some(inv) = bot_client_for_console.get_cached_inventory_json() {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&inv) {
+                        let items = v.get("slots").cloned().unwrap_or(serde_json::json!([]));
+                        if let Err(e) = ws_client_for_console.send_inventory(&items, true).await {
+                            print_mc_chat(&format!("§f[§4BAF§f]: §cFailed to upload inventory: {}", e));
+                        }
+                    }
+                } else {
+                    print_mc_chat("§f[§4BAF§f]: §cNo cached inventory yet");
+                }
                 continue;
             }
 
@@ -3737,6 +3788,26 @@ async fn main() -> Result<()> {
                         } else {
                             debug!("[Scoreboard] Uploaded to COFL: {:?}", scoreboard_lines);
                         }
+                    }
+                }
+            }
+        });
+    }
+
+    // Periodic inventory upload to finder (every 60s)
+    {
+        let bc = bot_client.clone();
+        let ws = ws_client.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(60));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                if bc.is_auction_at_limit() { continue; }
+                if let Some(inv) = bc.get_cached_inventory_json() {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&inv) {
+                        let items = v.get("slots").cloned().unwrap_or(serde_json::json!([]));
+                        let _ = ws.send_inventory(&items, false).await;
                     }
                 }
             }
