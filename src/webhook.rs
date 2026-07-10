@@ -441,6 +441,124 @@ pub async fn send_webhook_item_sold(
     post_embed(webhook_url, payload).await;
 }
 
+// ── Bazaar webhook digest ───────────────────────────────────────────────────
+// Individual bazaar orders (placed / collected / cancelled) used to post one
+// rich embed each, which is very spammy across many orders. Instead we
+// accumulate activity here and a background flusher posts ONE consolidated
+// digest embed per window. In-game chat still shows every order individually;
+// only the Discord side is batched.
+
+#[derive(Default)]
+struct BazaarDigest {
+    placed: u32,
+    buy_placed: u32,
+    sell_placed: u32,
+    collected: u32,
+    cancelled: u32,
+    net_profit: i64,
+    has_profit: bool,
+    latest_purse: Option<u64>,
+}
+
+impl BazaarDigest {
+    fn is_empty(&self) -> bool {
+        self.placed == 0 && self.collected == 0 && self.cancelled == 0
+    }
+}
+
+static BAZAAR_DIGEST: Lazy<std::sync::Mutex<BazaarDigest>> =
+    Lazy::new(|| std::sync::Mutex::new(BazaarDigest::default()));
+
+/// Record a placed bazaar order for the next digest.
+pub fn digest_order_placed(is_buy_order: bool, purse: Option<u64>) {
+    if let Ok(mut d) = BAZAAR_DIGEST.lock() {
+        d.placed += 1;
+        if is_buy_order { d.buy_placed += 1; } else { d.sell_placed += 1; }
+        if purse.is_some() { d.latest_purse = purse; }
+    }
+}
+
+/// Record a collected bazaar order (with its realized profit, if known).
+pub fn digest_order_collected(profit: Option<i64>, purse: Option<u64>) {
+    if let Ok(mut d) = BAZAAR_DIGEST.lock() {
+        d.collected += 1;
+        if let Some(p) = profit {
+            d.net_profit += p;
+            d.has_profit = true;
+        }
+        if purse.is_some() { d.latest_purse = purse; }
+    }
+}
+
+/// Record a cancelled bazaar order for the next digest.
+pub fn digest_order_cancelled(purse: Option<u64>) {
+    if let Ok(mut d) = BAZAAR_DIGEST.lock() {
+        d.cancelled += 1;
+        if purse.is_some() { d.latest_purse = purse; }
+    }
+}
+
+/// Spawn the bazaar digest flusher: every `interval_secs`, if any bazaar order
+/// activity accumulated, post ONE consolidated embed and reset the accumulator.
+pub fn spawn_bazaar_digest_flusher(webhook_url: String, ingame_name: String, interval_secs: u64) {
+    let interval = interval_secs.max(10);
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(interval)).await;
+            // Snapshot + reset under the lock; never hold it across the await.
+            let snapshot = {
+                match BAZAAR_DIGEST.lock() {
+                    Ok(mut d) if !d.is_empty() => std::mem::take(&mut *d),
+                    _ => continue,
+                }
+            };
+            post_bazaar_digest(&webhook_url, &ingame_name, &snapshot, interval).await;
+        }
+    });
+}
+
+async fn post_bazaar_digest(webhook_url: &str, ingame_name: &str, d: &BazaarDigest, window_secs: u64) {
+    let net = d.net_profit;
+    let color: u32 = if !d.has_profit {
+        0x3498db // neutral blue when nothing collected with a profit figure
+    } else if net >= 0 {
+        0x2ecc71
+    } else {
+        0xe74c3c
+    };
+    let mut fields = vec![
+        serde_json::json!({"name": "🛒 Placed", "value": format!("```fix\n{}  (BUY {} / SELL {})\n```", d.placed, d.buy_placed, d.sell_placed), "inline": true}),
+        serde_json::json!({"name": "✅ Collected", "value": format!("```fix\n{}\n```", d.collected), "inline": true}),
+        serde_json::json!({"name": "🚫 Cancelled", "value": format!("```fix\n{}\n```", d.cancelled), "inline": true}),
+    ];
+    if d.has_profit {
+        let sign = if net >= 0 { "+" } else { "-" };
+        fields.push(serde_json::json!({
+            "name": "💰 Net Profit",
+            "value": format!("```diff\n{}{} coins\n```", sign, format_number(net.unsigned_abs() as f64)),
+            "inline": false
+        }));
+    }
+    let payload = serde_json::json!({
+        "embeds": [{
+            "title": "📦 Bazaar Activity",
+            "description": format!("Summary of the last {}s • <t:{}:R>", window_secs, now_unix()),
+            "color": color,
+            "fields": fields,
+            "footer": {
+                "text": format!("BAF • {}{}", ingame_name,
+                    d.latest_purse.map(|p| format!(" • Purse: {} coins", format_purse(p))).unwrap_or_default()),
+                "icon_url": format!("https://mc-heads.net/avatar/{}/32.png", ingame_name)
+            }
+        }]
+    });
+    post_embed(webhook_url, payload).await;
+}
+
+/// Per-order bazaar embed. Superseded by the batched digest
+/// ([`digest_order_placed`] + [`spawn_bazaar_digest_flusher`]); retained for
+/// callers that want a single detailed embed.
+#[allow(dead_code)]
 pub async fn send_webhook_bazaar_order_placed(
     ingame_name: &str,
     item_name: &str,
@@ -479,6 +597,9 @@ pub async fn send_webhook_bazaar_order_placed(
     post_embed(webhook_url, payload).await;
 }
 
+/// Per-order bazaar embed. Superseded by the batched digest
+/// ([`digest_order_collected`] + [`spawn_bazaar_digest_flusher`]).
+#[allow(dead_code)]
 pub async fn send_webhook_bazaar_order_collected(
     ingame_name: &str,
     item_name: &str,
@@ -555,6 +676,9 @@ pub async fn send_webhook_bazaar_order_collected(
     post_embed(webhook_url, payload).await;
 }
 
+/// Per-order bazaar embed. Superseded by the batched digest
+/// ([`digest_order_cancelled`] + [`spawn_bazaar_digest_flusher`]).
+#[allow(dead_code)]
 pub async fn send_webhook_bazaar_order_cancelled(
     ingame_name: &str,
     item_name: &str,

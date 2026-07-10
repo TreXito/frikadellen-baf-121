@@ -180,6 +180,17 @@ async fn run(
                 let (mut write, mut read) = ws.split();
 
                 // First frame: hello (auth + identity + link code).
+                //
+                // `instanceId` is the stable per-install identity the backend should
+                // upsert on. `linkCode` is sent as `null` for an already-linked
+                // instance (empty string here) so the backend never spins up a fresh
+                // pending/unlinked row on every reconnect — the source of duplicate
+                // IGN rows.
+                let link_code = if deps.link_code.is_empty() {
+                    Value::Null
+                } else {
+                    json!(deps.link_code)
+                };
                 let hello = json!({
                     "type": "hello",
                     "token": token,
@@ -189,7 +200,7 @@ async fn run(
                     "version": deps.version,
                     "discordId": deps.discord_id,
                     "allowedIds": deps.allowed_ids,
-                    "linkCode": deps.link_code,
+                    "linkCode": link_code,
                 })
                 .to_string();
                 if write.send(Message::Text(hello)).await.is_err() {

@@ -58,6 +58,9 @@ parking_lot = "0.12"
 regex = "1.10"
 rand = "0.9"
 dirs = "5.0"
+# Resolve the same .minecraft dir azalea caches auth into, so `/trex logout`
+# can clear exactly the cache file azalea uses.
+minecraft_folder_path = "0.1"
 
 # CLI interaction
 dialoguer = "0.11"

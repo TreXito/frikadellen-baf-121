@@ -89,6 +89,13 @@ pub struct CoflWebSocket {
     #[allow(dead_code)]
     tx: mpsc::UnboundedSender<CoflEvent>,
     write: Arc<Mutex<SplitSink<WebSocketStream<MaybeTlsStream<tokio::net::TcpStream>>, Message>>>,
+    /// True when this socket points at the private baf-flip-finder rather than
+    /// Coflnet. Only the finder speaks the `{type:"inventory"}` pricing/listing
+    /// protocol; Coflnet can't parse it, so sending inventory there just spams
+    /// the modsocket with a message it drops. `send_inventory` is a no-op unless
+    /// this is set — on a COFL-primary deployment the finder is reached through
+    /// its own dedicated feed/lister sockets instead.
+    is_finder: bool,
 }
 
 impl CoflWebSocket {
@@ -102,6 +109,11 @@ impl CoflWebSocket {
         // an older persisted config to `wss://` so the bot never tries (and fails)
         // a plaintext connection to a regional server that only speaks TLS.
         let url = normalize_ws_url(&url);
+        // Coflnet endpoints are identified the same way normalize_ws_url does:
+        // by "coflnet" in the host or a "/modsocket" path. Anything else is the
+        // private finder (e.g. ws://127.0.0.1:15101), which is the only endpoint
+        // that understands inventory-pricing messages.
+        let is_finder = !(url.contains("coflnet") || url.contains("/modsocket"));
         let full_url = format!(
             "{}?player={}&version={}&SId={}",
             url, username, version, session_id
@@ -182,7 +194,7 @@ impl CoflWebSocket {
             }
         });
 
-        Ok((Self { tx, write }, rx))
+        Ok((Self { tx, write, is_finder }, rx))
     }
 
     /// Format and send an authentication prompt to the user
@@ -428,7 +440,16 @@ impl CoflWebSocket {
 
     /// Send inventory to the finder for pricing/listing via the primary WS.
     /// `force: true` skips the finder's confidence gate so all items get priced.
+    ///
+    /// No-op when this socket is Coflnet rather than the finder: COFL doesn't
+    /// understand the `{type:"inventory"}` pricing protocol and just drops it,
+    /// so pushing it there is pure modsocket spam. On a COFL-primary deployment
+    /// the finder is fed through its own dedicated feed/lister sockets instead.
     pub async fn send_inventory(&self, items: &serde_json::Value, force: bool) -> Result<()> {
+        if !self.is_finder {
+            debug!("[Inventory] Skipping inventory upload — primary socket is COFL, not the finder (force={})", force);
+            return Ok(());
+        }
         let msg = serde_json::json!({
             "type": "inventory",
             "items": items,
