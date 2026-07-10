@@ -265,6 +265,61 @@ fn should_enqueue_periodic_auction_claim(
     bot_state.allows_commands() && queue_empty
 }
 
+/// Path to azalea's Microsoft-auth cache — the SAME file `Account::microsoft`
+/// writes to (`<.minecraft>/azalea-auth.json`). This is where the "it still
+/// remembers my previous login" tokens live; the file sits under `~/.minecraft`,
+/// NOT the app directory, which is why deleting program logs / redownloading the
+/// bot never clears it.
+fn azalea_auth_cache_path() -> Option<std::path::PathBuf> {
+    minecraft_folder_path::minecraft_dir().map(|d| d.join("azalea-auth.json"))
+}
+
+/// Remove cached Microsoft auth entries from azalea's auth cache so the next
+/// start prompts a fresh device-code sign-in (letting the user switch accounts).
+///
+/// `keys` are the account cache-keys to drop (the IGNs the bot logs in with).
+/// An empty `keys` slice clears the ENTIRE cache. Returns the number of entries
+/// removed (0 if the file is absent or nothing matched).
+fn clear_azalea_auth_cache(keys: &[String]) -> std::io::Result<usize> {
+    let Some(path) = azalea_auth_cache_path() else { return Ok(0) };
+    if !path.exists() {
+        return Ok(0);
+    }
+    // Wipe-all: drop the whole file.
+    if keys.is_empty() {
+        let count = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|c| serde_json::from_str::<Vec<serde_json::Value>>(&c).ok())
+            .map(|a| a.len())
+            .unwrap_or(0);
+        std::fs::remove_file(&path)?;
+        return Ok(count);
+    }
+    let contents = std::fs::read_to_string(&path)?;
+    let mut arr: Vec<serde_json::Value> = serde_json::from_str(&contents).unwrap_or_default();
+    let before = arr.len();
+    let key_set: std::collections::HashSet<String> =
+        keys.iter().map(|k| k.trim().to_lowercase()).collect();
+    // azalea serialises the key as `cache_key` (older caches used `email`).
+    arr.retain(|entry| {
+        let ck = entry
+            .get("cache_key")
+            .or_else(|| entry.get("email"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        !key_set.contains(&ck.trim().to_lowercase())
+    });
+    let removed = before - arr.len();
+    if removed > 0 {
+        if arr.is_empty() {
+            std::fs::remove_file(&path)?;
+        } else {
+            std::fs::write(&path, serde_json::to_string_pretty(&arr)?)?;
+        }
+    }
+    Ok(removed)
+}
+
 fn should_drop_bazaar_command_during_ah_pause(
     command_type: &frikadellen_baf::types::CommandType,
     bazaar_flips_paused: bool,
@@ -471,6 +526,47 @@ fn save_session_time(path: &std::path::Path, ign: &str, total_secs: u64) {
     }
 }
 
+/// Path to the rest-break marker sidecar (next to the executable).
+fn rest_break_marker_path() -> std::path::PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("rest_break.json")))
+        .unwrap_or_else(|| std::path::PathBuf::from("rest_break.json"))
+}
+
+/// Persist a "resting until this UNIX time" marker so a humanization rest break
+/// is honored across the process restart that starts it. The bot stays FULLY
+/// offline (no Hypixel, no COFL) until the deadline instead of lingering
+/// in-process, where the ECS client / AFK handler / reconnect loop could drift
+/// it back into the lobby.
+fn write_rest_break_marker(ign: &str, until_unix: u64) {
+    let v = serde_json::json!({ "ign": ign, "until": until_unix });
+    if let Err(e) = std::fs::write(rest_break_marker_path(), v.to_string()) {
+        tracing::warn!("[Humanization] Failed to write rest-break marker: {}", e);
+    }
+}
+
+/// Remaining seconds to stay offline for a pending rest break for `ign`, if any.
+/// Returns `None` when there is no marker, it belongs to a different account, or
+/// the break has already elapsed.
+fn pending_rest_break_secs(ign: &str) -> Option<u64> {
+    let contents = std::fs::read_to_string(rest_break_marker_path()).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&contents).ok()?;
+    // Only honor a marker for THIS account — a different configured account must
+    // not inherit a leftover break.
+    if v.get("ign").and_then(|x| x.as_str()) != Some(ign) {
+        return None;
+    }
+    let until = v.get("until").and_then(|x| x.as_u64())?;
+    let now = unix_now();
+    (until > now).then(|| until - now)
+}
+
+/// Delete the rest-break marker (break finished or no longer applicable).
+fn clear_rest_break_marker() {
+    let _ = std::fs::remove_file(rest_break_marker_path());
+}
+
 /// Clear the session time for a given IGN (reset to 0).
 /// Used on account switch so the outgoing account starts fresh next time.
 fn clear_session_time(path: &std::path::Path, ign: &str) {
@@ -628,6 +724,24 @@ async fn main() -> Result<()> {
         info!("Resumed session for {} — previous accumulated time: {}s ({:.2}h)",
             ingame_name, previous_session_secs, previous_session_secs as f64 / 3600.0);
     }
+
+    // ── Honor a pending humanization rest break ─────────────────────────────
+    // A rest break restarts the process with a break-until marker; here, on the
+    // fresh start, we wait out the remaining break BEFORE connecting to Hypixel
+    // or COFL so the account is genuinely offline for the whole duration (rather
+    // than lingering in-process where it could drift back into the lobby).
+    if let Some(remaining) = pending_rest_break_secs(&ingame_name) {
+        info!(
+            "[Humanization] Resuming rest break — staying offline for {:.1}m before connecting",
+            remaining as f64 / 60.0
+        );
+        tokio::time::sleep(Duration::from_secs(remaining)).await;
+        info!("[Humanization] Rest break over — connecting");
+        if let Some(url) = config.active_webhook_url() {
+            frikadellen_baf::webhook::send_webhook_rest_break_end(&ingame_name, url).await;
+        }
+    }
+    clear_rest_break_marker();
 
     info!("Configuration loaded for player: {} (account {}/{})", ingame_name, current_account_index + 1, ingame_names.len());
     info!("AH Flips: {}", if config.enable_ah_flips { "ENABLED" } else { "DISABLED" });
@@ -1025,13 +1139,21 @@ async fn main() -> Result<()> {
     // Dial out to the shared backend for remote control + profit tracking and
     // show the one-time Discord link code. A no-op when disabled/unconfigured.
     let backend_handle = if config.backend_enabled {
-        let link_code = {
-            let raw = uuid::Uuid::new_v4().simple().to_string();
-            raw[..6].to_uppercase()
-        };
         // Already-owned (discord_id set in config) → no link needed; otherwise the
         // terminal re-prints the code so it isn't lost in the startup scroll.
         let already_linked = config.active_discord_id().is_some();
+        // Only mint a link code when this instance is NOT yet linked. Sending a
+        // fresh code on every startup of an already-linked bot makes the backend
+        // register a brand-new pending/unlinked row per reconnect — that's what
+        // produces the pile of duplicate `unlinked` rows for the same IGN. The
+        // stable `instance_id` already identifies the bot across reconnects, so a
+        // linked instance announces no code at all (`linkCode: null`).
+        let link_code = if already_linked {
+            String::new()
+        } else {
+            let raw = uuid::Uuid::new_v4().simple().to_string();
+            raw[..6].to_uppercase()
+        };
         let linked = Arc::new(AtomicBool::new(already_linked));
         let handle = frikadellen_baf::backend::spawn(frikadellen_baf::backend::BackendDeps {
             url: config.backend_url.clone(),
@@ -1834,18 +1956,10 @@ async fn main() -> Result<()> {
                     );
                     print_mc_chat(&baf_msg);
                     let _ = chat_tx_events.send(baf_msg);
-                    if let Some(webhook_url) = config_for_events.active_bazaar_webhook_url() {
-                        let url = webhook_url.to_string();
-                        let name = ingame_name_for_events.clone();
-                        let item = item_name.clone();
-                        let total = price_per_unit * amount as f64;
-                        let purse = bot_client_clone.get_purse();
-                        let active_orders = bazaar_tracker_events.order_count();
-                        tokio::spawn(async move {
-                            frikadellen_baf::webhook::send_webhook_bazaar_order_placed(
-                                &name, &item, amount, price_per_unit, total, is_buy_order, purse, active_orders, &url,
-                            ).await;
-                        });
+                    if config_for_events.active_bazaar_webhook_url().is_some() {
+                        // Batched into the periodic bazaar digest (see
+                        // spawn_bazaar_digest_flusher) instead of one embed per order.
+                        frikadellen_baf::webhook::digest_order_placed(is_buy_order, bot_client_clone.get_purse());
                     }
                 }
                 frikadellen_baf::bot::BotEvent::AuctionListed { item_name, starting_bid, duration_hours } => {
@@ -2022,27 +2136,10 @@ async fn main() -> Result<()> {
                             }
                         }
                     }
-                    if let Some(webhook_url) = config_for_events.active_bazaar_webhook_url() {
-                        let url = webhook_url.to_string();
-                        let name = ingame_name_for_events.clone();
-                        let item = item_name.clone();
-                        let purse = bot_client_clone.get_purse();
-                        // Use actual_amount (from lore) so the webhook reflects
-                        // the real claimed quantity, not the original order size.
-                        // actual_amount is 0 only when both claimed_amount (lore
-                        // parsing) and the tracker had no data — fall back to the
-                        // tracker's original order amount so the webhook still
-                        // shows *something* rather than "0x".
-                        let webhook_amount = if actual_amount > 0 { Some(actual_amount) } else { order_data.as_ref().map(|o| o.amount) };
-                        let opt_ppu = order_data.as_ref().map(|o| o.price_per_unit);
-                        let remaining_orders = bazaar_tracker_events.order_count();
-                        tokio::spawn(async move {
-                            frikadellen_baf::webhook::send_webhook_bazaar_order_collected(
-                                &name, &item, is_buy_order,
-                                webhook_amount, opt_ppu,
-                                opt_profit, purse, remaining_orders, &url,
-                            ).await;
-                        });
+                    if config_for_events.active_bazaar_webhook_url().is_some() {
+                        // Batched into the periodic bazaar digest (net profit is
+                        // summed there) instead of one embed per collected order.
+                        frikadellen_baf::webhook::digest_order_collected(opt_profit, bot_client_clone.get_purse());
                     }
                     // After collecting a SELL order, request `/cofl bz h` for
                     // authoritative BZ session profit.  A few seconds' delay gives
@@ -2101,19 +2198,10 @@ async fn main() -> Result<()> {
                     );
                     print_mc_chat(&baf_msg);
                     let _ = chat_tx_events.send(baf_msg);
-                    if let Some(webhook_url) = config_for_events.active_bazaar_webhook_url() {
-                        let url = webhook_url.to_string();
-                        let name = ingame_name_for_events.clone();
-                        let item = item_name.clone();
-                        let purse = bot_client_clone.get_purse();
-                        let opt_amount = order_data.as_ref().map(|o| o.amount);
-                        let opt_ppu = order_data.as_ref().map(|o| o.price_per_unit);
-                        let remaining_orders = bazaar_tracker_events.order_count();
-                        tokio::spawn(async move {
-                            frikadellen_baf::webhook::send_webhook_bazaar_order_cancelled(
-                                &name, &item, is_buy_order, opt_amount, opt_ppu, purse, remaining_orders, &url,
-                            ).await;
-                        });
+                    if config_for_events.active_bazaar_webhook_url().is_some() {
+                        // Batched into the periodic bazaar digest instead of one
+                        // embed per cancelled order.
+                        frikadellen_baf::webhook::digest_order_cancelled(bot_client_clone.get_purse());
                     }
                 }
                 frikadellen_baf::bot::BotEvent::BazaarOrderFilled { item_name, is_buy_order } => {
@@ -3611,6 +3699,8 @@ async fn main() -> Result<()> {
     info!("Console interface ready - type commands and press Enter:");
     info!("  /cofl <command> - Send command to COFL websocket");
     info!("  /<command> - Send command to Minecraft");
+    info!("  /trex sellinv - Force-list the whole inventory at finder prices");
+    info!("  /trex logout [all] - Clear cached Microsoft login (restart to switch account)");
     info!("  <text> - Send chat message to COFL websocket");
     
     // `/trex sellinv` → wake the finder auto-lister for an immediate FORCED
@@ -3623,6 +3713,8 @@ async fn main() -> Result<()> {
     let ws_client_for_console = ws_client.clone();
     let command_queue_for_console = command_queue.clone();
     let bot_client_for_console = bot_client.clone();
+    let force_list_notify_console = force_list_notify.clone();
+    let ingame_names_for_console = ingame_names.clone();
     let console_input_enabled = config.enable_console_input;
 
     tokio::spawn(async move {
@@ -3716,8 +3808,19 @@ async fn main() -> Result<()> {
             }
 
             // `/trex sellinv` — force-list the whole inventory at finder prices.
+            //
+            // The finder is reached one of two ways depending on the deployment:
+            //   • COFL-primary (websocket_url = coflnet): the dedicated finder
+            //     lister socket (role=lister) does the forced upload — poke it
+            //     via force_list_notify. Sending inventory over the primary
+            //     socket here would just spam COFL, which can't price it, so
+            //     send_inventory() is a no-op in that mode.
+            //   • finder-only (websocket_url = finder): send_inventory() uploads
+            //     directly over the primary socket.
+            // We do both; each is inert in the mode it doesn't apply to.
             if lowercase_input == "/trex sellinv" || lowercase_input == "trex sellinv" {
                 print_mc_chat("§f[§4BAF§f]: §bForce-selling inventory via finder...");
+                force_list_notify_console.notify_one();
                 if let Some(inv) = bot_client_for_console.get_cached_inventory_json() {
                     if let Ok(v) = serde_json::from_str::<serde_json::Value>(&inv) {
                         let items = v.get("slots").cloned().unwrap_or(serde_json::json!([]));
@@ -3727,6 +3830,28 @@ async fn main() -> Result<()> {
                     }
                 } else {
                     print_mc_chat("§f[§4BAF§f]: §cNo cached inventory yet");
+                }
+                continue;
+            }
+
+            // `/trex logout [all]` — clear azalea's cached Microsoft login so the
+            // next start prompts a fresh sign-in. Without this, tokens cached in
+            // ~/.minecraft/azalea-auth.json survive log-deletion and redownload,
+            // so the bot keeps reusing the previous account and never offers a
+            // sign-in for a different one. `/trex logout all` wipes every cached
+            // account; plain `/trex logout` clears only this bot's configured IGNs.
+            if lowercase_input == "/trex logout" || lowercase_input == "trex logout"
+                || lowercase_input == "/trex logout all" || lowercase_input == "trex logout all"
+            {
+                let wipe_all = lowercase_input.ends_with("all");
+                let keys: Vec<String> = if wipe_all { Vec::new() } else { ingame_names_for_console.clone() };
+                match clear_azalea_auth_cache(&keys) {
+                    Ok(0) => print_mc_chat("§f[§4BAF§f]: §eNo cached login found to clear (already logged out)."),
+                    Ok(n) => print_mc_chat(&format!(
+                        "§f[§4BAF§f]: §aCleared {} cached login{}. §7Restart the bot to sign in with a different account.",
+                        n, if n == 1 { "" } else { "s" }
+                    )),
+                    Err(e) => print_mc_chat(&format!("§f[§4BAF§f]: §cFailed to clear cached login: {}", e)),
                 }
                 continue;
             }
@@ -4329,13 +4454,23 @@ async fn main() -> Result<()> {
         });
     }
 
+    // ── Bazaar webhook digest flusher ─────────────────────────────
+    // Consolidate placed/collected/cancelled bazaar order webhooks into ONE
+    // embed per minute instead of one embed per order action (less spammy).
+    if let Some(url) = config.active_bazaar_webhook_url() {
+        frikadellen_baf::webhook::spawn_bazaar_digest_flusher(
+            url.to_string(),
+            ingame_name.clone(),
+            60,
+        );
+    }
+
     // ── Human-like rest breaks ───────────────────────────────────
     // When enabled, periodically disconnect from the server for a randomized
     // duration, then restart the process to reconnect.
     // Session time is saved right before restart so it is preserved across
     // the break — the account-switching timer is NOT reset.
     if config.humanization_enabled {
-        let bot_client_human = bot_client.clone();
         let chat_tx_human = chat_tx.clone();
         let ign_human = ingame_name.clone();
         let webhook_url_human = config.active_webhook_url().map(|s| s.to_string());
@@ -4344,11 +4479,10 @@ async fn main() -> Result<()> {
         let started_human = std::time::Instant::now();
         let macro_paused_human = macro_paused.clone();
         // For a real break we must also stop *flips* coming in, not just drop the
-        // Minecraft connection: pause flip intake, clear the queue, and close the
-        // COFL socket so the bot truly goes idle/offline for the break.
+        // Minecraft connection: pause flip intake and clear the queue so nothing
+        // is dispatched before the process restarts into its offline break wait.
         let flip_intake_paused_human = flip_intake_paused.clone();
         let command_queue_human = command_queue.clone();
-        let ws_client_human = ws_client.clone();
         let profit_tracker_human = profit_tracker.clone();
         let profit_path_human = profit_path.clone();
         let min_interval = config.humanization_min_interval_minutes.max(5); // floor at 5 min
@@ -4415,61 +4549,32 @@ async fn main() -> Result<()> {
             print_mc_chat(&baf_msg);
             let _ = chat_tx_human.send(baf_msg);
 
-            // Stop new flips from arriving and drop anything already queued so the
-            // bot doesn't keep flipping during the break if the connection lingers
-            // or briefly re-establishes.
+            // A rest break must leave the account genuinely offline for the whole
+            // duration. Dropping the connection in-process and sleeping proved
+            // unreliable — the ECS client / AFK handler / reconnect loop could
+            // bring the bot back and leave it idling in the lobby (never actually
+            // "resting"). Instead we persist a break-until marker and restart NOW:
+            // the fresh process waits out the remaining break BEFORE connecting to
+            // Hypixel or COFL (see pending_rest_break_secs at startup), so nothing
+            // is connected for the entire break.
             flip_intake_paused_human.store(true, std::sync::atomic::Ordering::Relaxed);
-            // Pause the macro outright: the command-queue processor skips ALL work
-            // while macro_paused is set, so even if the Minecraft connection briefly
-            // re-establishes during the break, no flip/sell command is dispatched.
-            // (Reset by the post-break process restart.)
             macro_paused_human.store(true, std::sync::atomic::Ordering::Relaxed);
             command_queue_human.clear();
-            // Close the COFL websocket so no further flip recommendations are
-            // received (this is also why Discord flip notifications go quiet).
-            {
-                let ws = ws_client_human.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = ws.close().await {
-                        warn!("[Humanization] Failed to close COFL websocket: {}", e);
-                    }
-                });
-            }
 
-            // Trigger a proper TCP-level disconnect via Azalea's disconnect mechanism.
-            // This avoids trying to send a "/quit" chat command that Hypixel does not
-            // recognise, ensuring the bot actually disconnects from the server.
-            // The disconnect handler also disables Azalea's auto-reconnect so the bot
-            // stays offline for the whole break instead of rejoining ~5s later.
-            bot_client_human.request_disconnect();
-            // Give Azalea time to process the disconnect before sleeping.
-            sleep(Duration::from_secs(3)).await;
-
-            info!("[Humanization] Disconnected — sleeping for {:.1}m", break_secs as f64 / 60.0);
-
-            // Sleep for the break duration (fully disconnected)
-            sleep(Duration::from_secs(break_secs)).await;
-
-            info!("[Humanization] Rest break over — saving session time and restarting");
-
-            // Send "break over" webhook before restart
-            if let Some(ref url) = webhook_url_human {
-                frikadellen_baf::webhook::send_webhook_rest_break_end(&ign_human, url).await;
-            }
-
-            // Save profit statistics so they survive the restart
+            // Save profit + session time so both survive the restart/break. Session
+            // time is saved right before restart so the gap is near-zero.
             save_profit_stats(&profit_path_human, &ign_human, &profit_tracker_human);
-
-            // Save session time right before restart so the gap is near-zero
-            // and session time is preserved across the break.
             let total_secs = prev_secs_human + started_human.elapsed().as_secs();
             save_session_time(&session_times_path_human, &ign_human, total_secs);
-            info!(
-                "[Humanization] Saved session time: {}s ({:.2}h) — restarting process",
-                total_secs, total_secs as f64 / 3600.0
-            );
 
-            // Restart the process to reconnect
+            // Persist the break deadline, then restart. The next process start stays
+            // offline until this time and sends the "break over" webhook.
+            let until = unix_now() + break_secs;
+            write_rest_break_marker(&ign_human, until);
+            info!(
+                "[Humanization] Rest break ({:.1}m) — saved session {}s, restarting offline until break ends",
+                break_secs as f64 / 60.0, total_secs
+            );
             restart_process();
         });
     }
