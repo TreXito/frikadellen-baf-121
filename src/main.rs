@@ -3183,6 +3183,10 @@ async fn main() -> Result<()> {
                                 }
                                 let list_at = it.get("listAt").and_then(|x| x.as_u64()).unwrap_or(0);
                                 let clean = frikadellen_baf::utils::remove_minecraft_colors(name);
+                                if config_clone.should_not_relist_value(list_at) {
+                                    print_mc_chat(&format!("§f[§4BAF§f]: §eWon't list §f{}§e — {} coins is over the relist cap ({})", clean, list_at, config_clone.do_not_relist_over_coins));
+                                    continue;
+                                }
                                 print_mc_chat(&format!("§f[§4BAF§f]: §e{} §7→ §a{} coins", clean, list_at));
                             }
                             print_mc_chat("§f[§4BAF§f]: §a--- Listing now ---");
@@ -3198,6 +3202,10 @@ async fn main() -> Result<()> {
                             }
                             let list_at = it.get("listAt").and_then(|x| x.as_u64()).unwrap_or(0);
                             if list_at == 0 { continue; }
+                            if config_clone.should_not_relist_value(list_at) {
+                                info!("[FinderList] Skipping \"{}\" — {} coins ≥ do_not_relist_over_coins {}", name, list_at, config_clone.do_not_relist_over_coins);
+                                continue;
+                            }
                             let clean = frikadellen_baf::utils::remove_minecraft_colors(&name);
                             queue_clone.enqueue(
                                 frikadellen_baf::types::CommandType::SellToAuction {
@@ -4441,6 +4449,7 @@ async fn main() -> Result<()> {
                 let queue = command_queue.clone();
                 let dur = config.auction_duration_hours;
                 let do_not_relist_ids = config.do_not_relist_ids.clone();
+                let do_not_relist_over_coins = config.do_not_relist_over_coins;
                 let force_notify = force_list_notify.clone();
                 let flip_tracker_list = flip_tracker.clone();
                 tokio::spawn(async move {
@@ -4561,6 +4570,15 @@ async fn main() -> Result<()> {
                                                 }
                                                 let list_at = it.get("listAt").and_then(|x| x.as_u64()).unwrap_or(0);
                                                 if list_at == 0 { continue; }
+                                                if do_not_relist_over_coins > 0 && list_at >= do_not_relist_over_coins {
+                                                    let clean = frikadellen_baf::utils::remove_minecraft_colors(&name);
+                                                    info!("[FinderList] Won't list \"{}\" — {} coins ≥ do_not_relist_over_coins {}", clean, list_at, do_not_relist_over_coins);
+                                                    frikadellen_baf::logging::print_mc_chat(&format!(
+                                                        "§f[§4BAF§f]: §eWon't list §f{}§e — {} coins is over the relist cap ({})",
+                                                        clean, list_at, do_not_relist_over_coins
+                                                    ));
+                                                    continue;
+                                                }
                                                 let clean = frikadellen_baf::utils::remove_minecraft_colors(&name);
                                                 if listed_recently.contains_key(&clean) { continue; }
                                                 listed_recently.insert(clean.clone(), std::time::Instant::now());

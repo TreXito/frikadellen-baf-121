@@ -100,6 +100,15 @@ pub struct Config {
     #[serde(default)]
     pub do_not_relist_ids: Vec<String>,
 
+    /// Coins ceiling for finder-driven auto-relisting. When set above 0, any
+    /// finder listing instruction whose target price (`listAt`) is at or above
+    /// this value is skipped — high-value items are held for manual handling
+    /// instead of being auto-dumped by the finder. 0 (default) disables it.
+    /// Only affects finder-driven listings; manual and COFL listings are
+    /// unchanged.
+    #[serde(default)]
+    pub do_not_relist_over_coins: u64,
+
     #[serde(default = "default_web_gui_port")]
     pub web_gui_port: u16,
 
@@ -382,6 +391,7 @@ impl Default for Config {
             finder_ws_token: None,
             finder_auto_list: true,
             do_not_relist_ids: Vec::new(),
+            do_not_relist_over_coins: 0,
             web_gui_port: default_web_gui_port(),
             command_delay_ms: default_command_delay_ms(),
             bed_spam_click_delay: default_bed_spam_click_delay(),
@@ -446,6 +456,13 @@ impl Config {
         self.do_not_relist_ids
             .binary_search(&item_id.trim().to_ascii_uppercase())
             .is_ok()
+    }
+
+    /// True when a finder listing instruction priced at `list_at` coins is too
+    /// valuable to auto-relist (at or above `do_not_relist_over_coins`). A
+    /// threshold of 0 disables the check.
+    pub fn should_not_relist_value(&self, list_at: u64) -> bool {
+        self.do_not_relist_over_coins > 0 && list_at >= self.do_not_relist_over_coins
     }
 
     pub fn bedtiming_enabled(&self) -> bool {
@@ -651,6 +668,22 @@ mod tests {
         assert!(toml.contains("multi_switch_time"), "multi_switch_time should appear in default config");
         assert!(toml.contains("discord_id"), "discord_id should appear in default config");
         assert!(toml.contains("do_not_relist_ids"), "do_not_relist_ids should appear in default config");
+        assert!(toml.contains("do_not_relist_over_coins"), "do_not_relist_over_coins should appear in default config");
+    }
+
+    #[test]
+    fn do_not_relist_over_coins_gates_on_value() {
+        let config: Config = toml::from_str("do_not_relist_over_coins = 50000000")
+            .expect("config should parse");
+        assert_eq!(config.do_not_relist_over_coins, 50_000_000);
+        assert!(config.should_not_relist_value(50_000_000), "at the cap is excluded");
+        assert!(config.should_not_relist_value(75_000_000), "above the cap is excluded");
+        assert!(!config.should_not_relist_value(49_999_999), "below the cap still lists");
+
+        // Default (0) disables the check entirely.
+        let disabled = Config::default();
+        assert_eq!(disabled.do_not_relist_over_coins, 0);
+        assert!(!disabled.should_not_relist_value(u64::MAX), "0 disables the value gate");
     }
 
     #[test]
