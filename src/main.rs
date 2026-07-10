@@ -290,6 +290,32 @@ fn should_drop_bazaar_command_during_ah_pause(
 /// flip_receive_instant is set when the flip is received and never changed (used for buy-speed).
 type FlipTrackerMap = Arc<Mutex<HashMap<String, (Flip, u64, Instant, Instant)>>>;
 
+/// Recover a bought item's originating finder and expected profit (coins) from
+/// the flip tracker, for the do_not_relist blocklist. Key is the color-stripped
+/// lowercased item name (how flips are tracked). Profit = target − buy − AH fee,
+/// matching the purchase-webhook figure. Returns (None, None) when the flip is
+/// not tracked (e.g. bought in a previous session) — callers then gate on item
+/// id only. Applies to both COFL and finder flips.
+fn tracked_finder_profit(tracker: &FlipTrackerMap, item_name: &str) -> (Option<String>, Option<i64>) {
+    let key = frikadellen_baf::utils::remove_minecraft_colors(item_name).to_lowercase();
+    match tracker.lock() {
+        Ok(t) => match t.get(&key) {
+            Some(entry) => {
+                let buy = entry.1;
+                let target = entry.0.target;
+                let profit = if buy > 0 && target > 0 {
+                    Some(target as i64 - buy as i64 - calculate_ah_fee(target) as i64)
+                } else {
+                    None
+                };
+                (entry.0.finder.clone(), profit)
+            }
+            None => (None, None),
+        },
+        Err(_) => (None, None),
+    }
+}
+
 /// GitHub release response (subset of fields).
 #[derive(serde::Deserialize)]
 struct GithubRelease {
@@ -2978,6 +3004,25 @@ async fn main() -> Result<()> {
                                         continue;
                                     }
 
+                                    // do_not_relist blocklist (COFL + finder): hold the item
+                                    // instead of auto-relisting when its item id, originating
+                                    // finder, or expected profit matches the configured rules.
+                                    let (blk_finder, blk_profit) = tracked_finder_profit(&flip_tracker_ws, &item_name);
+                                    if let Some(reason) = config_clone.relist_block_reason(
+                                        item_id.as_deref(),
+                                        blk_finder.as_deref(),
+                                        blk_profit,
+                                    ) {
+                                        info!("[Relist] Won't relist \"{}\" — {}", item_name, reason);
+                                        let baf_msg = format!(
+                                            "§f[§4BAF§f]: §e🛑 Won't relist §r{}§r §7— {}",
+                                            item_name, reason
+                                        );
+                                        print_mc_chat(&baf_msg);
+                                        let _ = chat_tx_ws.send(baf_msg);
+                                        continue;
+                                    }
+
                                     let cmd = CommandType::SellToAuction {
                                         item_name,
                                         starting_bid: price,
@@ -3176,17 +3221,17 @@ async fn main() -> Result<()> {
                             for it in items {
                                 let name = it.get("name").and_then(|x| x.as_str()).unwrap_or("?");
                                 let item_id = it.get("id").and_then(|x| x.as_str()).unwrap_or("");
-                                if !item_id.is_empty() && config_clone.should_not_relist_id(item_id) {
-                                    let clean = frikadellen_baf::utils::remove_minecraft_colors(name);
-                                    print_mc_chat(&format!("§f[§4BAF§f]: §eWon't list §f{}§e — item id {} is in do_not_relist_ids", clean, item_id));
+                                let clean = frikadellen_baf::utils::remove_minecraft_colors(name);
+                                let (blk_finder, blk_profit) = tracked_finder_profit(&flip_tracker_ws, name);
+                                if let Some(reason) = config_clone.relist_block_reason(
+                                    (!item_id.is_empty()).then_some(item_id),
+                                    blk_finder.as_deref(),
+                                    blk_profit,
+                                ) {
+                                    print_mc_chat(&format!("§f[§4BAF§f]: §eWon't list §f{}§e — {}", clean, reason));
                                     continue;
                                 }
                                 let list_at = it.get("listAt").and_then(|x| x.as_u64()).unwrap_or(0);
-                                let clean = frikadellen_baf::utils::remove_minecraft_colors(name);
-                                if config_clone.should_not_relist_value(list_at) {
-                                    print_mc_chat(&format!("§f[§4BAF§f]: §eWon't list §f{}§e — {} coins is over the relist cap ({})", clean, list_at, config_clone.do_not_relist_over_coins));
-                                    continue;
-                                }
                                 print_mc_chat(&format!("§f[§4BAF§f]: §e{} §7→ §a{} coins", clean, list_at));
                             }
                             print_mc_chat("§f[§4BAF§f]: §a--- Listing now ---");
@@ -3196,16 +3241,17 @@ async fn main() -> Result<()> {
                         for it in items {
                             let name = match it.get("name").and_then(|x| x.as_str()) { Some(n) => n.to_string(), None => continue };
                             let item_id = it.get("id").and_then(|x| x.as_str()).unwrap_or("");
-                            if !item_id.is_empty() && config_clone.should_not_relist_id(item_id) {
-                                info!("[FinderList] Skipping \"{}\" — item id {} is in do_not_relist_ids", name, item_id);
+                            let (blk_finder, blk_profit) = tracked_finder_profit(&flip_tracker_ws, &name);
+                            if let Some(reason) = config_clone.relist_block_reason(
+                                (!item_id.is_empty()).then_some(item_id),
+                                blk_finder.as_deref(),
+                                blk_profit,
+                            ) {
+                                info!("[FinderList] Skipping \"{}\" — {}", name, reason);
                                 continue;
                             }
                             let list_at = it.get("listAt").and_then(|x| x.as_u64()).unwrap_or(0);
                             if list_at == 0 { continue; }
-                            if config_clone.should_not_relist_value(list_at) {
-                                info!("[FinderList] Skipping \"{}\" — {} coins ≥ do_not_relist_over_coins {}", name, list_at, config_clone.do_not_relist_over_coins);
-                                continue;
-                            }
                             let clean = frikadellen_baf::utils::remove_minecraft_colors(&name);
                             queue_clone.enqueue(
                                 frikadellen_baf::types::CommandType::SellToAuction {
@@ -4448,8 +4494,7 @@ async fn main() -> Result<()> {
                 let bc = bot_client.clone();
                 let queue = command_queue.clone();
                 let dur = config.auction_duration_hours;
-                let do_not_relist_ids = config.do_not_relist_ids.clone();
-                let do_not_relist_over_coins = config.do_not_relist_over_coins;
+                let config_relist = config.clone();
                 let force_notify = force_list_notify.clone();
                 let flip_tracker_list = flip_tracker.clone();
                 tokio::spawn(async move {
@@ -4557,29 +4602,22 @@ async fn main() -> Result<()> {
                                             for it in items {
                                                 let name = match it.get("name").and_then(|x| x.as_str()) { Some(n) => n.to_string(), None => continue };
                                                 let item_id = it.get("id").and_then(|x| x.as_str()).unwrap_or("");
-                                                if !item_id.is_empty()
-                                                    && do_not_relist_ids.binary_search(&item_id.trim().to_ascii_uppercase()).is_ok()
-                                                {
-                                                    let clean = frikadellen_baf::utils::remove_minecraft_colors(&name);
-                                                    info!("[FinderList] Won't list \"{}\" — item id {} is in do_not_relist_ids", clean, item_id);
+                                                let clean = frikadellen_baf::utils::remove_minecraft_colors(&name);
+                                                let (blk_finder, blk_profit) = tracked_finder_profit(&flip_tracker_list, &name);
+                                                if let Some(reason) = config_relist.relist_block_reason(
+                                                    (!item_id.is_empty()).then_some(item_id),
+                                                    blk_finder.as_deref(),
+                                                    blk_profit,
+                                                ) {
+                                                    info!("[FinderList] Won't list \"{}\" — {}", clean, reason);
                                                     frikadellen_baf::logging::print_mc_chat(&format!(
-                                                        "§f[§4BAF§f]: §eWon't list §f{}§e — item id {} is in do_not_relist_ids",
-                                                        clean, item_id
+                                                        "§f[§4BAF§f]: §eWon't list §f{}§e — {}",
+                                                        clean, reason
                                                     ));
                                                     continue;
                                                 }
                                                 let list_at = it.get("listAt").and_then(|x| x.as_u64()).unwrap_or(0);
                                                 if list_at == 0 { continue; }
-                                                if do_not_relist_over_coins > 0 && list_at >= do_not_relist_over_coins {
-                                                    let clean = frikadellen_baf::utils::remove_minecraft_colors(&name);
-                                                    info!("[FinderList] Won't list \"{}\" — {} coins ≥ do_not_relist_over_coins {}", clean, list_at, do_not_relist_over_coins);
-                                                    frikadellen_baf::logging::print_mc_chat(&format!(
-                                                        "§f[§4BAF§f]: §eWon't list §f{}§e — {} coins is over the relist cap ({})",
-                                                        clean, list_at, do_not_relist_over_coins
-                                                    ));
-                                                    continue;
-                                                }
-                                                let clean = frikadellen_baf::utils::remove_minecraft_colors(&name);
                                                 if listed_recently.contains_key(&clean) { continue; }
                                                 listed_recently.insert(clean.clone(), std::time::Instant::now());
                                                 info!("[FinderList] Listing \"{}\" at finder price {}", clean, list_at);
