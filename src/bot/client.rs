@@ -3008,6 +3008,29 @@ async fn event_handler(
                         let wdog_handlers = state.handlers.clone();
                         tokio::spawn(async move {
                             tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                            // ManagingOrders owns its window for a full multi-click
+                            // cancel/collect flow bounded by its OWN ~10s deadline
+                            // (check_manage_orders_deadline) plus per-action
+                            // confirmation waits. Firing the flat 5s close here yanks
+                            // the window out from under that handler mid-click, which
+                            // Hypixel reads as a desync ("Out of sync, check your
+                            // internet connection!") and answers by dropping the bot
+                            // into Limbo. So for ManagingOrders, wait out the handler's
+                            // own deadline (+2s margin) before acting as the last-resort
+                            // stuck-window net; the state is fully re-read afterwards, so
+                            // if the handler already finished we do nothing.
+                            if *wdog_state.read() == BotState::ManagingOrders {
+                                // Copy the deadline out and drop the lock guard BEFORE
+                                // awaiting — a parking_lot guard held across .await is
+                                // not Send and would make this task unspawnable.
+                                let deadline = *wdog_deadline.read();
+                                if let Some(deadline) = deadline {
+                                    let now = tokio::time::Instant::now();
+                                    if now < deadline {
+                                        tokio::time::sleep((deadline - now) + tokio::time::Duration::from_secs(2)).await;
+                                    }
+                                }
+                            }
                             let still_open  = *wdog_last.read() == wdog_wid;
                             let cur_state   = *wdog_state.read();
                             let is_bed      = wdog_bed.load(Ordering::Relaxed);

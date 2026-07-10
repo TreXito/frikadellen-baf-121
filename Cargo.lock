@@ -1646,6 +1646,7 @@ dependencies = [
  "hex",
  "hmac",
  "image",
+ "minecraft_folder_path",
  "native-tls",
  "once_cell",
  "parking_lot",
