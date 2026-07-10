@@ -93,6 +93,31 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub finder_auto_list: bool,
 
+    /// SkyBlock item IDs which the private finder must never automatically
+    /// relist (for example, `JUJU_SHORTBOW`). This only affects finder-driven
+    /// listing instructions; manual and ordinary COFL listings still work.
+    /// Values are normalized to uppercase, sorted, and deduplicated on load.
+    /// SkyBlock item IDs that must never be automatically relisted after a
+    /// buy — for either COFL or finder flips (e.g. `HYPERION`, `TERMINATOR`).
+    /// The item stays in inventory for manual handling. Values are normalized
+    /// to uppercase, sorted, and deduplicated on load.
+    #[serde(default = "default_do_not_relist_ids")]
+    pub do_not_relist_ids: Vec<String>,
+
+    /// Flip finders whose buys must never be automatically relisted. Matches
+    /// the `finder` shown on the purchase webhook (the COFL finder, e.g.
+    /// `craftcost`). Matching is punctuation/case-insensitive, so `craftcost`,
+    /// `CRAFT_COST`, and `CraftCost` are equivalent.
+    #[serde(default = "default_do_not_relist_finders")]
+    pub do_not_relist_finders: Vec<String>,
+
+    /// Profit ceiling (coins) for automatic relisting. When above 0, any flip
+    /// whose expected profit (target − buy − AH fee) is at or above this value
+    /// is NOT auto-relisted — big-ticket items are held for manual handling
+    /// instead of being auto-dumped. Applies to both COFL and finder flips.
+    #[serde(default = "default_do_not_relist_over_profit")]
+    pub do_not_relist_over_profit: u64,
+
     #[serde(default = "default_web_gui_port")]
     pub web_gui_port: u16,
 
@@ -308,6 +333,28 @@ fn default_web_gui_port() -> u16 {
     8080
 }
 
+fn default_do_not_relist_ids() -> Vec<String> {
+    vec!["HYPERION".to_string(), "TERMINATOR".to_string()]
+}
+
+fn default_do_not_relist_finders() -> Vec<String> {
+    vec!["craftcost".to_string()]
+}
+
+fn default_do_not_relist_over_profit() -> u64 {
+    200_000_000
+}
+
+/// Canonical form of a finder name for blocklist matching: keep only ASCII
+/// alphanumerics, uppercased. So `craftcost`, `CRAFT_COST`, and `CraftCost`
+/// all canonicalize to `CRAFTCOST`.
+fn canon_finder(s: &str) -> String {
+    s.chars()
+        .filter(|c| c.is_ascii_alphanumeric())
+        .map(|c| c.to_ascii_uppercase())
+        .collect()
+}
+
 fn default_command_delay_ms() -> u64 {
     500
 }
@@ -374,6 +421,9 @@ impl Default for Config {
             finder_ws_url: None,
             finder_ws_token: None,
             finder_auto_list: true,
+            do_not_relist_ids: default_do_not_relist_ids(),
+            do_not_relist_finders: default_do_not_relist_finders(),
+            do_not_relist_over_profit: default_do_not_relist_over_profit(),
             web_gui_port: default_web_gui_port(),
             command_delay_ms: default_command_delay_ms(),
             bed_spam_click_delay: default_bed_spam_click_delay(),
@@ -418,6 +468,90 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Normalize the finder relist blocklist before it is persisted so the
+    /// generated config stays easy to read and comparisons are reliable.
+    pub fn normalize_do_not_relist_ids(&mut self) {
+        self.do_not_relist_ids = self
+            .do_not_relist_ids
+            .iter()
+            .map(|id| id.trim().to_ascii_uppercase())
+            .filter(|id| !id.is_empty())
+            .collect();
+        self.do_not_relist_ids.sort();
+        self.do_not_relist_ids.dedup();
+
+        // Finders: keep the user's spelling but drop blanks/dupes (matching is
+        // punctuation/case-insensitive via canon_finder, so we don't rewrite).
+        self.do_not_relist_finders = self
+            .do_not_relist_finders
+            .iter()
+            .map(|f| f.trim().to_string())
+            .filter(|f| !canon_finder(f).is_empty())
+            .collect();
+        self.do_not_relist_finders
+            .dedup_by(|a, b| canon_finder(a) == canon_finder(b));
+    }
+
+    /// True when this SkyBlock item ID is excluded from automatic finder
+    /// relisting. Input is intentionally normalized here too, so callers do
+    /// not depend on where the id came from (NBT, JSON, or UI).
+    pub fn should_not_relist_id(&self, item_id: &str) -> bool {
+        self.do_not_relist_ids
+            .binary_search(&item_id.trim().to_ascii_uppercase())
+            .is_ok()
+    }
+
+    /// True when a flip found by `finder` must not be auto-relisted. Matching
+    /// is punctuation/case-insensitive (`craftcost` == `CRAFT_COST`).
+    pub fn should_not_relist_finder(&self, finder: &str) -> bool {
+        let target = canon_finder(finder);
+        !target.is_empty()
+            && self
+                .do_not_relist_finders
+                .iter()
+                .any(|f| canon_finder(f) == target)
+    }
+
+    /// True when a flip's expected profit (coins) is at or above the relist
+    /// ceiling. A ceiling of 0 disables the check.
+    pub fn should_not_relist_profit(&self, profit: i64) -> bool {
+        self.do_not_relist_over_profit > 0 && profit >= self.do_not_relist_over_profit as i64
+    }
+
+    /// Central relist blocklist gate for both COFL and finder flips. Returns
+    /// `Some(reason)` (for the chat/log line) when the item must be held rather
+    /// than auto-relisted, or `None` when it may be listed. Each argument is
+    /// optional so callers pass whatever they know at the relist site.
+    pub fn relist_block_reason(
+        &self,
+        item_id: Option<&str>,
+        finder: Option<&str>,
+        profit: Option<i64>,
+    ) -> Option<String> {
+        if let Some(id) = item_id {
+            if !id.is_empty() && self.should_not_relist_id(id) {
+                return Some(format!(
+                    "item id {} is in do_not_relist_ids",
+                    id.trim().to_ascii_uppercase()
+                ));
+            }
+        }
+        if let Some(f) = finder {
+            if self.should_not_relist_finder(f) {
+                return Some(format!("finder {} is in do_not_relist_finders", f));
+            }
+        }
+        if let Some(p) = profit {
+            if self.should_not_relist_profit(p) {
+                return Some(format!(
+                    "profit {} ≥ do_not_relist_over_profit {}",
+                    p, self.do_not_relist_over_profit
+                ));
+            }
+        }
+        None
+    }
+
     pub fn bedtiming_enabled(&self) -> bool {
         self.bedtiming
     }
@@ -620,6 +754,54 @@ mod tests {
         assert!(toml.contains("proxy_credentials"), "proxy_credentials should appear in default config");
         assert!(toml.contains("multi_switch_time"), "multi_switch_time should appear in default config");
         assert!(toml.contains("discord_id"), "discord_id should appear in default config");
+        assert!(toml.contains("do_not_relist_ids"), "do_not_relist_ids should appear in default config");
+        assert!(toml.contains("do_not_relist_finders"), "do_not_relist_finders should appear in default config");
+        assert!(toml.contains("do_not_relist_over_profit"), "do_not_relist_over_profit should appear in default config");
+    }
+
+    #[test]
+    fn relist_blocklist_defaults() {
+        let c = Config::default();
+        assert_eq!(c.do_not_relist_ids, vec!["HYPERION", "TERMINATOR"]);
+        assert_eq!(c.do_not_relist_finders, vec!["craftcost"]);
+        assert_eq!(c.do_not_relist_over_profit, 200_000_000);
+    }
+
+    #[test]
+    fn relist_block_reason_covers_all_three_axes() {
+        let c = Config::default();
+        // Item id (case-insensitive)
+        assert!(c.relist_block_reason(Some("hyperion"), None, None).is_some());
+        assert!(c.relist_block_reason(Some("ASPECT_OF_THE_END"), None, None).is_none());
+        // Finder (punctuation/case-insensitive)
+        assert!(c.relist_block_reason(None, Some("CRAFT_COST"), None).is_some());
+        assert!(c.relist_block_reason(None, Some("CraftCost"), None).is_some());
+        assert!(c.relist_block_reason(None, Some("SNIPER"), None).is_none());
+        // Profit ceiling (>= 200m held; below still lists)
+        assert!(c.relist_block_reason(None, None, Some(200_000_000)).is_some());
+        assert!(c.relist_block_reason(None, None, Some(250_000_000)).is_some());
+        assert!(c.relist_block_reason(None, None, Some(199_999_999)).is_none());
+        // Nothing supplied → never blocks.
+        assert!(c.relist_block_reason(None, None, None).is_none());
+    }
+
+    #[test]
+    fn relist_over_profit_zero_disables() {
+        let c: Config = toml::from_str("do_not_relist_over_profit = 0").expect("parse");
+        assert!(!c.should_not_relist_profit(i64::MAX), "0 disables the profit gate");
+    }
+
+    #[test]
+    fn do_not_relist_ids_are_normalized_sorted_and_matched() {
+        let mut config: Config = toml::from_str(
+            "do_not_relist_ids = [\" juju_shortbow \", \"HYPERION\", \"JUJU_SHORTBOW\", \"\"]",
+        )
+        .expect("config should parse");
+        config.normalize_do_not_relist_ids();
+        assert_eq!(config.do_not_relist_ids, vec!["HYPERION", "JUJU_SHORTBOW"]);
+        assert!(config.should_not_relist_id("juju_shortbow"));
+        assert!(config.should_not_relist_id(" JUJU_SHORTBOW "));
+        assert!(!config.should_not_relist_id("TERMINATOR"));
     }
 
     #[test]
