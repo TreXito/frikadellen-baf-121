@@ -15,6 +15,7 @@ pub mod logging;
 pub mod profit;
 pub mod state;
 pub mod types;
+pub mod updater;
 pub mod utils;
 pub mod vps;
 pub mod web;
