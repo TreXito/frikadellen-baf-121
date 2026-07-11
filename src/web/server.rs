@@ -362,6 +362,8 @@ pub async fn start_web_server_tls(state: WebSharedState, port: u16, tls: Option<
         .route("/api/kill_session", axum::routing::post(kill_session))
         .route("/api/disconnect", axum::routing::post(disconnect_session))
         .route("/api/connect", axum::routing::post(connect_session))
+        .route("/api/restart", axum::routing::post(restart_session))
+        .route("/api/update", axum::routing::post(update_session))
         .layer(axum::middleware::from_fn(move |req: Request, next: Next| {
             let s = auth_state.clone();
             async move { check_auth(s, req, next).await }
@@ -1021,6 +1023,60 @@ async fn connect_session(State(s): State<WebSharedState>) -> impl IntoResponse {
     });
 
     (StatusCode::OK, "Reconnecting — process will restart")
+}
+
+/// Restart the bot process in place (re-exec the same binary). Same mechanism as
+/// the post-rest-break restart — reconnects Hypixel + COFL cleanly without the
+/// user touching the console. Does NOT check for updates (see `update_session`).
+async fn restart_session(State(s): State<WebSharedState>) -> impl IntoResponse {
+    info!("[WebGUI] Restart requested — restarting process");
+
+    // Clear the flip-intake pause so a restart from a disconnected state comes
+    // back flipping. The restart re-creates the atomic fresh anyway.
+    s.flip_intake_paused.store(false, Ordering::Relaxed);
+
+    let _ = s.chat_tx.send("[BAF Web] Restarting process...".to_string());
+
+    tokio::spawn(async {
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        crate::utils::restart_process();
+    });
+
+    (StatusCode::OK, "Restarting — process will restart")
+}
+
+/// Download the latest release (if newer) and restart into it — the same update
+/// the external loader performs, but triggered from the web GUI so the user
+/// never has to drop to a console. Returns 200 with a human-readable status:
+/// "up to date" (no restart) or "updating to <version>" (process restarts).
+async fn update_session(State(s): State<WebSharedState>) -> impl IntoResponse {
+    info!("[WebGUI] Update requested — checking GitHub for a newer release");
+
+    match crate::updater::download_latest().await {
+        Ok(crate::updater::UpdateStatus::UpToDate { version }) => {
+            let msg = format!("Already up to date ({version}) — no restart needed.");
+            info!("[WebGUI] Update: {msg}");
+            (StatusCode::OK, msg)
+        }
+        Ok(crate::updater::UpdateStatus::Updated { version }) => {
+            let msg = format!("Updated to {version} — restarting...");
+            info!("[WebGUI] Update: {msg}");
+            let _ = s
+                .chat_tx
+                .send(format!("[BAF Web] Updated to {version} — restarting..."));
+            // Flush the HTTP response, then apply the staged update and restart.
+            tokio::spawn(async {
+                tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
+                crate::updater::finish_update_restart();
+            });
+            (StatusCode::OK, msg)
+        }
+        Err(e) => {
+            let msg = format!("Update failed: {e}");
+            warn!("[WebGUI] {msg}");
+            (StatusCode::INTERNAL_SERVER_ERROR, msg)
+        }
+    }
 }
 
 // ── Active auctions ───────────────────────────────────────────
