@@ -594,6 +594,21 @@ fn print_startup_banner() {
 async fn main() -> Result<()> {
     // Initialize logging
     init_logger()?;
+
+    // When this process is a managed VPS instance the backend launches it with a
+    // vps_secret plus the owning user/instance identity in the environment. In
+    // that case prefix every log line with `userId:instanceId` so a host running
+    // several users' bots produces logs that can be told apart per user.
+    if std::env::var("VPS_SECRET").ok().filter(|s| !s.is_empty()).is_some() {
+        let user_id = std::env::var("USER_ID")
+            .or_else(|_| std::env::var("OWNER_ID"))
+            .unwrap_or_default();
+        let instance_id = std::env::var("INSTANCE_ID").unwrap_or_default();
+        if !user_id.is_empty() || !instance_id.is_empty() {
+            frikadellen_baf::logging::set_vps_log_prefix(&user_id, &instance_id);
+        }
+    }
+
     print_startup_banner();
     info!("Starting Frikadellen BAF v{}", VERSION);
 
@@ -4251,6 +4266,16 @@ async fn main() -> Result<()> {
 
             loop {
                 sleep(Duration::from_secs(10)).await;
+
+                // A manual (web GUI) or rest-break disconnect wants the bot to
+                // stay OFFLINE. state() is Idle in that case, which would
+                // otherwise make us treat the bot as "free" and spam rejoin
+                // commands / "returning to island" chat every 10s. Respect the
+                // deliberate disconnect and do nothing until a restart clears it.
+                if bot_client_island.is_disconnect_requested() {
+                    consecutive_rejoin_attempts = 0;
+                    continue;
+                }
 
                 // Don't interfere while the bot is actively doing work.
                 // Any non-Idle state means the bot is in a GUI workflow (bazaar,

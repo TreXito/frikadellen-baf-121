@@ -923,12 +923,27 @@ impl BotClient {
         self.auction_at_limit.store(false, Ordering::Relaxed);
     }
 
-    /// Request the bot to disconnect from Hypixel.
-    /// Sets state to Idle and logs the disconnect — actual TCP teardown happens
-    /// in the bot runtime thread.
+    /// Request the bot to disconnect from Hypixel (web GUI "Disconnect" button).
+    /// Sets the `disconnect_requested` flag so the command processor tears down
+    /// the live TCP connection (`enforce_offline`) AND the reconnect loop stays
+    /// offline instead of rejoining ~5s later. Also parks state at Idle for the
+    /// UI. The flag is cleared only by the process restart the web "Reconnect"
+    /// button performs.
+    ///
+    /// Without setting the flag this only set state=Idle, which left the live
+    /// connection up (nothing tears it down on Idle) and told the AFK handler the
+    /// bot was free — so the bot silently rejoined Hypixel on its own.
     pub fn disconnect(&self) {
-        info!("[BotClient] Disconnect requested via web GUI");
+        info!("[BotClient] Disconnect requested via web GUI — going offline and staying offline");
+        self.disconnect_requested.store(true, Ordering::Release);
         self.set_state(BotState::Idle);
+    }
+
+    /// True once a manual/rest-break disconnect has been requested and the bot
+    /// should stay offline. Watched by the AFK-return handler so it doesn't fight
+    /// a deliberate disconnect by rejoining the island.
+    pub fn is_disconnect_requested(&self) -> bool {
+        self.disconnect_requested.load(Ordering::Acquire)
     }
 
     /// Request a clean TCP-level disconnect from the Hypixel server.
