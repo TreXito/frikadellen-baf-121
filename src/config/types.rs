@@ -87,6 +87,15 @@ pub struct Config {
     #[serde(default)]
     pub finder_ws_token: Option<String>,
 
+    /// Report this account's live purse to the FINDER sockets (finder_ws_url /
+    /// multisocket_urls) so it can size flips to the account — a low-purse
+    /// account is fed small, fast, safe flips to grind up, a grown one gets the
+    /// bigger fish. Sent ONLY to finder sockets, NEVER to the COFL websocket, so
+    /// no purse ever leaves the machine to a third party. Default OFF: enable it
+    /// only on your own accounts pointed at your own finder.
+    #[serde(default)]
+    pub finder_report_purse: bool,
+
     /// In finder-only mode COFL never sends createAuction, so nothing lists the
     /// items the bot buys or reclaims from expired auctions. When enabled the
     /// bot uploads its inventory to the finder every minute and lists what the
@@ -447,6 +456,7 @@ impl Default for Config {
             // Private finder
             finder_ws_url: None,
             finder_ws_token: None,
+            finder_report_purse: false,
             finder_auto_list: true,
             // Auto-relist blocklist
             do_not_relist_ids: default_do_not_relist_ids(),

@@ -1033,6 +1033,15 @@ async fn main() -> Result<()> {
     // flips — chat, commands, auth and bazaar flips stay primary-only so
     // nothing else doubles up. With an empty `multisocket_urls` this is a
     // plain pass-through of the primary socket.
+    // Latest account-status JSON pushed to finder feeds (never COFL) when
+    // `finder_report_purse` is on, so the finder can size flips to this account
+    // and avoid overfilling it. Populated by a task spawned once bot_client
+    // exists; each finder-feed writer relays whatever is current. Declared out
+    // here so it outlives the ws_rx setup block below and is visible when the
+    // updater task is spawned later.
+    let finder_status: std::sync::Arc<std::sync::Mutex<Option<String>>> =
+        std::sync::Arc::new(std::sync::Mutex::new(None));
+
     let mut ws_rx = {
         use frikadellen_baf::websocket::CoflEvent;
 
@@ -1149,8 +1158,10 @@ async fn main() -> Result<()> {
             let agg_tx = agg_tx.clone();
             let seen = seen.clone();
             let token = config.finder_ws_token.clone().unwrap_or_default();
+            let finder_status = finder_status.clone();
+            let report_purse = config.finder_report_purse;
             tokio::spawn(async move {
-                use futures::StreamExt;
+                use futures::{SinkExt, StreamExt};
                 let mut backoff = 5u64;
                 loop {
                     let full_url = if token.is_empty() {
@@ -1159,48 +1170,70 @@ async fn main() -> Result<()> {
                         format!("{}?token={}", finder_url.trim_end_matches('/'), token)
                     };
                     match tokio_tungstenite::connect_async(&full_url).await {
-                        Ok((mut stream, _)) => {
+                        Ok((stream, _)) => {
                             info!("[FinderWS] Connected to flip finder: {}", finder_url);
                             backoff = 5;
-                            while let Some(msg) = stream.next().await {
-                                let txt = match msg {
-                                    Ok(tokio_tungstenite::tungstenite::Message::Text(t)) => t,
-                                    Ok(tokio_tungstenite::tungstenite::Message::Close(_)) | Err(_) => break,
-                                    _ => continue,
-                                };
-                                let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) else { continue };
-                                if v.get("type").and_then(|t| t.as_str()) != Some("flip") {
-                                    continue;
-                                }
-                                let Some(f) = v.get("flip") else { continue };
-                                let uuid = f.get("uuid").and_then(|u| u.as_str()).map(String::from);
-                                let Some(u) = uuid.as_deref() else { continue };
-                                if flip_already_seen(&seen, u) {
-                                    debug!("[FinderWS] Duplicate flip {} — dropped (COFL was first)", u);
-                                    continue;
-                                }
-                                let flip = frikadellen_baf::types::Flip {
-                                    item_name: f.get("itemName").and_then(|x| x.as_str()).unwrap_or("?").to_string(),
-                                    starting_bid: f.get("price").and_then(|x| x.as_u64()).unwrap_or(0),
-                                    target: f.get("target").and_then(|x| x.as_u64()).unwrap_or(0),
-                                    finder: Some("BAF_FINDER".to_string()),
-                                    profit_perc: f.get("roiPct").and_then(|x| x.as_f64()),
-                                    purchase_at_ms: None,
-                                    uuid,
-                                    list_at: f.get("listAt").and_then(|x| x.as_u64()),
-                                };
-                                if flip.starting_bid == 0 || flip.target == 0 {
-                                    continue;
-                                }
-                                info!(
-                                    "[FinderWS] Flip: {} for {} (target {}, conf {})",
-                                    flip.item_name,
-                                    flip.starting_bid,
-                                    flip.target,
-                                    f.get("confidence").and_then(|x| x.as_f64()).unwrap_or(0.0)
-                                );
-                                if agg_tx.send(CoflEvent::AuctionFlip(flip)).is_err() {
-                                    return;
+                            let (mut write, mut read) = stream.split();
+                            // Push account status to the finder on a cadence (only
+                            // what changed) so it can size flips to this account.
+                            // Finder feeds only — this loop never runs on COFL.
+                            let mut status_tick = tokio::time::interval(std::time::Duration::from_secs(5));
+                            let mut last_status_sent: Option<String> = None;
+                            loop {
+                                tokio::select! {
+                                    _ = status_tick.tick(), if report_purse => {
+                                        let cur = finder_status.lock().ok().and_then(|g| g.clone());
+                                        if let Some(json) = cur {
+                                            if last_status_sent.as_ref() != Some(&json) {
+                                                if write.send(tokio_tungstenite::tungstenite::Message::Text(json.clone())).await.is_err() {
+                                                    break;
+                                                }
+                                                last_status_sent = Some(json);
+                                            }
+                                        }
+                                    }
+                                    msg = read.next() => {
+                                        let Some(msg) = msg else { break };
+                                        let txt = match msg {
+                                            Ok(tokio_tungstenite::tungstenite::Message::Text(t)) => t,
+                                            Ok(tokio_tungstenite::tungstenite::Message::Close(_)) | Err(_) => break,
+                                            _ => continue,
+                                        };
+                                        let Ok(v) = serde_json::from_str::<serde_json::Value>(&txt) else { continue };
+                                        if v.get("type").and_then(|t| t.as_str()) != Some("flip") {
+                                            continue;
+                                        }
+                                        let Some(f) = v.get("flip") else { continue };
+                                        let uuid = f.get("uuid").and_then(|u| u.as_str()).map(String::from);
+                                        let Some(u) = uuid.as_deref() else { continue };
+                                        if flip_already_seen(&seen, u) {
+                                            debug!("[FinderWS] Duplicate flip {} — dropped (COFL was first)", u);
+                                            continue;
+                                        }
+                                        let flip = frikadellen_baf::types::Flip {
+                                            item_name: f.get("itemName").and_then(|x| x.as_str()).unwrap_or("?").to_string(),
+                                            starting_bid: f.get("price").and_then(|x| x.as_u64()).unwrap_or(0),
+                                            target: f.get("target").and_then(|x| x.as_u64()).unwrap_or(0),
+                                            finder: Some("BAF_FINDER".to_string()),
+                                            profit_perc: f.get("roiPct").and_then(|x| x.as_f64()),
+                                            purchase_at_ms: None,
+                                            uuid,
+                                            list_at: f.get("listAt").and_then(|x| x.as_u64()),
+                                        };
+                                        if flip.starting_bid == 0 || flip.target == 0 {
+                                            continue;
+                                        }
+                                        info!(
+                                            "[FinderWS] Flip: {} for {} (target {}, conf {})",
+                                            flip.item_name,
+                                            flip.starting_bid,
+                                            flip.target,
+                                            f.get("confidence").and_then(|x| x.as_f64()).unwrap_or(0.0)
+                                        );
+                                        if agg_tx.send(CoflEvent::AuctionFlip(flip)).is_err() {
+                                            return;
+                                        }
+                                    }
                                 }
                             }
                             warn!("[FinderWS] Disconnected — reconnecting...");
@@ -1271,6 +1304,34 @@ async fn main() -> Result<()> {
     bot_client.enable_bazaar_flips = enable_bazaar_flips.clone();
     bot_client.set_command_queue(command_queue.clone());
     *bot_client.ingame_name.write() = ingame_name.clone();
+
+    // Account-status reporter for the finder feeds. Every 5s it snapshots the
+    // live purse, coins locked in active listings, free inventory slots and
+    // active-auction count into `finder_status`; the finder-feed writers relay
+    // it. Only runs when finder_report_purse is on, and it only reaches finder
+    // sockets — the purse never goes to COFL. Skips ticks where the purse can't
+    // be read yet (scoreboard not parsed) so a bogus 0 never looks "broke".
+    if config.finder_report_purse {
+        let bc = bot_client.clone();
+        let status_holder = finder_status.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
+            loop {
+                tick.tick().await;
+                let Some(purse) = bc.get_purse() else { continue };
+                let (locked, auctions) = bc.active_listing_value_and_count();
+                let inv_free = bc.empty_slot_count();
+                let worth = purse.saturating_add(locked);
+                let json = format!(
+                    "{{\"type\":\"purse\",\"purse\":{},\"locked\":{},\"worth\":{},\"invFree\":{},\"auctions\":{}}}",
+                    purse, locked, worth, inv_free, auctions
+                );
+                if let Ok(mut g) = status_holder.lock() {
+                    *g = Some(json);
+                }
+            }
+        });
+    }
 
     // Shared profit tracker for AH and Bazaar realized profits.
     // Restore persisted totals from disk so profit statistics survive rest breaks.

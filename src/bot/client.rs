@@ -873,6 +873,29 @@ impl BotClient {
         self.active_auction_listings.read().len()
     }
 
+    /// Total coins locked in ACTIVE auction listings ("waiting to sell") and
+    /// the count of them, parsed in one pass from the cached Manage Auctions
+    /// GUI. Used to report account WORTH (purse + locked) and auction-slot
+    /// usage to the finder so it can size flips to the true account size and
+    /// avoid overfilling the auction house. Returns (0, 0) when no GUI snapshot
+    /// exists yet.
+    pub fn active_listing_value_and_count(&self) -> (u64, usize) {
+        if let Some(cached) = self.get_cached_my_auctions_json() {
+            if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(&cached) {
+                let mut value: u64 = 0;
+                let mut count: usize = 0;
+                for a in &arr {
+                    if a.get("status").and_then(|s| s.as_str()) == Some("active") {
+                        count += 1;
+                        value = value.saturating_add(a.get("starting_bid").and_then(|v| v.as_u64()).unwrap_or(0));
+                    }
+                }
+                return (value, count);
+            }
+        }
+        (0, 0)
+    }
+
     /// Returns true if the bazaar order limit has been hit and not yet cleared.
     pub fn is_bazaar_at_limit(&self) -> bool {
         self.bazaar_at_limit.load(Ordering::Relaxed)
