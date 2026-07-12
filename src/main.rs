@@ -170,6 +170,144 @@ fn parse_cofl_profit_response(clean_msg: &str) -> Option<i64> {
     parse_short_number(amount_str)
 }
 
+/// Parse a SkyBlock "island visitor" chat line and return the bare visitor
+/// name. Matches Hypixel's `"[RANK] Name is visiting your island!"` (the rank
+/// tag is optional). Input must already be color-stripped.
+fn parse_island_visitor(clean: &str) -> Option<String> {
+    const MARKER: &str = "is visiting your island!";
+    // ASCII-lowercase preserves byte length, so `idx` stays aligned with `clean`.
+    let idx = clean.to_ascii_lowercase().find(MARKER)?;
+    let mut prefix = clean[..idx].trim();
+    // Strip any leading rank tag(s) like "[MVP+]".
+    while prefix.starts_with('[') {
+        match prefix.find(']') {
+            Some(close) => prefix = prefix[close + 1..].trim_start(),
+            None => break,
+        }
+    }
+    // The visitor name is the last whitespace-delimited token (drops any rank
+    // remnant). Minecraft names contain no spaces.
+    let name = prefix.split_whitespace().last()?;
+    if is_valid_minecraft_name(name) {
+        Some(name.to_string())
+    } else {
+        None
+    }
+}
+
+/// Returns true for a syntactically valid Minecraft name (1–16 chars of
+/// `[A-Za-z0-9_]`). Used to avoid treating stray chat tokens as player names.
+fn is_valid_minecraft_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 16
+        && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Extract the sender's name from a player-chat header such as
+/// `"Guild > [MVP+] Someone"`, `"From [VIP] Someone"`, `"[MVP+] Someone"`, or
+/// `"Someone"`. Returns `None` when no valid player name can be identified
+/// (i.e. the line is almost certainly a system message, not player chat).
+fn extract_chat_sender(header: &str) -> Option<String> {
+    let mut s = header.trim();
+    // Channel prefix ("Guild >", "Party >", "Co-op >", "Officer >", ...).
+    if let Some(pos) = s.rfind('>') {
+        s = s[pos + 1..].trim();
+    }
+    // Direct-message "From " prefix.
+    if let Some(rest) = s.strip_prefix("From ") {
+        s = rest.trim();
+    }
+    // Leading rank tag(s).
+    while s.starts_with('[') {
+        match s.find(']') {
+            Some(close) => s = s[close + 1..].trim_start(),
+            None => break,
+        }
+    }
+    let token = s.split_whitespace().next()?;
+    if is_valid_minecraft_name(token) {
+        Some(token.to_string())
+    } else {
+        None
+    }
+}
+
+/// Case-insensitively test whether `body` contains `name` as a whole token
+/// (bounded by non-`[A-Za-z0-9_]` on both sides), so "Bob" doesn't match
+/// "Bobby".
+fn contains_name_token(body: &str, name: &str) -> bool {
+    if name.is_empty() {
+        return false;
+    }
+    let body_l = body.to_ascii_lowercase();
+    let name_l = name.to_ascii_lowercase();
+    let bytes = body_l.as_bytes();
+    let mut start = 0;
+    while let Some(pos) = body_l[start..].find(&name_l) {
+        let i = start + pos;
+        let end = i + name_l.len();
+        let before_ok = i == 0 || {
+            let c = bytes[i - 1];
+            !(c.is_ascii_alphanumeric() || c == b'_')
+        };
+        let after_ok = end >= bytes.len() || {
+            let c = bytes[end];
+            !(c.is_ascii_alphanumeric() || c == b'_')
+        };
+        if before_ok && after_ok {
+            return true;
+        }
+        start = i + 1;
+        if start >= body_l.len() {
+            break;
+        }
+    }
+    false
+}
+
+/// Detect when another player mentions `own_name` in a player-authored chat
+/// line (guild / party / co-op / DM). Returns the cleaned line when it's a
+/// genuine mention by someone *else*; returns `None` for the bot's own
+/// messages, outgoing DMs, and system messages. Input must be color-stripped.
+fn parse_name_mention(clean: &str, own_name: &str) -> Option<String> {
+    if own_name.is_empty() {
+        return None;
+    }
+    // Player chat is "Header: body". Anything without this shape (most system
+    // messages) is ignored.
+    let (header, body) = clean.split_once(": ")?;
+    // A giant header means this is almost certainly a system line that merely
+    // happens to contain ": ".
+    if header.trim().len() > 48 {
+        return None;
+    }
+    let htrim = header.trim();
+    // Our own outgoing DMs ("To <player>: ...") are never a mention of us.
+    if htrim.starts_with("To ") {
+        return None;
+    }
+    // Require a genuine player-chat marker so system lines that merely have a
+    // "Word: body" shape (e.g. "Reward: ...") don't false-trigger:
+    //   - a channel prefix ("Guild >", "Party >", "Co-op >", "Officer >", ...)
+    //   - a direct message ("From <player>")
+    //   - a rank tag on ranked public/island chat ("[MVP+] <player>")
+    let looks_like_player_chat =
+        htrim.contains('>') || htrim.starts_with("From ") || htrim.contains('[');
+    if !looks_like_player_chat {
+        return None;
+    }
+    // Identify the sender; skip the bot's own messages and non-player lines.
+    let sender = extract_chat_sender(header)?;
+    if sender.eq_ignore_ascii_case(own_name) {
+        return None;
+    }
+    if contains_name_token(body, own_name) {
+        Some(clean.to_string())
+    } else {
+        None
+    }
+}
+
 /// Parse a human-readable short number like `82.7M`, `1.5B`, `250K`, or `500`.
 fn parse_short_number(s: &str) -> Option<i64> {
     let s = s.replace(',', "");
@@ -1392,6 +1530,14 @@ async fn main() -> Result<()> {
     let session_start = std::time::Instant::now();
     let prev_secs_events = previous_session_secs;
     tokio::spawn(async move {
+        // Rate-limiting for presence notifications so a repeated Hypixel line or
+        // a chat flood can't spam the webhook: per-visitor cooldown for island
+        // visits, and a single global cooldown between name-mention pings.
+        let mut last_visitor_ping: std::collections::HashMap<String, std::time::Instant> =
+            std::collections::HashMap::new();
+        let mut last_mention_ping: Option<std::time::Instant> = None;
+        const VISITOR_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(60);
+        const MENTION_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(10);
         while let Some(event) = bot_client_clone.next_event().await {
             match event {
                 frikadellen_baf::bot::BotEvent::Login => {
@@ -1456,6 +1602,56 @@ async fn main() -> Result<()> {
                         let baf_msg = "§f[§4BAF§f]: §c⚠ Bazaar daily sell limit reached — flips disabled until 0:00 UTC".to_string();
                         frikadellen_baf::logging::print_mc_chat(&baf_msg);
                         let _ = chat_tx_events.send(baf_msg);
+                    }
+
+                    // ── Presence notifications (island visitors / name mentions) ──
+                    // Someone visiting the bot's island: "[RANK] Name is visiting your island!"
+                    if config_for_events.notify_island_visitors {
+                        if let Some(visitor) = parse_island_visitor(&clean) {
+                            let now = std::time::Instant::now();
+                            let fresh = last_visitor_ping
+                                .get(&visitor)
+                                .map(|t| now.duration_since(*t) >= VISITOR_COOLDOWN)
+                                .unwrap_or(true);
+                            if fresh {
+                                last_visitor_ping.insert(visitor.clone(), now);
+                                info!("[Presence] {} is visiting the island", visitor);
+                                if let Some(webhook_url) = config_for_events.active_webhook_url() {
+                                    let url = webhook_url.to_string();
+                                    let name = ingame_name_for_events.clone();
+                                    let did = config_for_events.active_discord_id().map(|s| s.to_string());
+                                    tokio::spawn(async move {
+                                        frikadellen_baf::webhook::send_webhook_island_visitor(
+                                            &name, &visitor, did.as_deref(), &url,
+                                        ).await;
+                                    });
+                                }
+                            }
+                        }
+                    }
+
+                    // Bot's own Minecraft name mentioned by another player in chat.
+                    if config_for_events.notify_name_mentions {
+                        if let Some(line) = parse_name_mention(&clean, &ingame_name_for_events) {
+                            let now = std::time::Instant::now();
+                            let fresh = last_mention_ping
+                                .map(|t| now.duration_since(t) >= MENTION_COOLDOWN)
+                                .unwrap_or(true);
+                            if fresh {
+                                last_mention_ping = Some(now);
+                                info!("[Presence] Name mentioned in chat: {}", line);
+                                if let Some(webhook_url) = config_for_events.active_webhook_url() {
+                                    let url = webhook_url.to_string();
+                                    let name = ingame_name_for_events.clone();
+                                    let did = config_for_events.active_discord_id().map(|s| s.to_string());
+                                    tokio::spawn(async move {
+                                        frikadellen_baf::webhook::send_webhook_name_mention(
+                                            &name, &line, did.as_deref(), &url,
+                                        ).await;
+                                    });
+                                }
+                            }
+                        }
                     }
                 }
                 frikadellen_baf::bot::BotEvent::WindowOpen(id, window_type, title) => {
@@ -4813,8 +5009,61 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_ban_disconnect, parse_cofl_profit_response, parse_cofl_bz_h_total_profit, parse_short_number, parse_bz_list_flip_detail, should_drop_bazaar_command_during_ah_pause, should_enqueue_periodic_auction_claim};
+    use super::{is_ban_disconnect, parse_cofl_profit_response, parse_cofl_bz_h_total_profit, parse_short_number, parse_bz_list_flip_detail, should_drop_bazaar_command_during_ah_pause, should_enqueue_periodic_auction_claim, parse_island_visitor, parse_name_mention, contains_name_token};
     use frikadellen_baf::types::{BotState, CommandType};
+
+    #[test]
+    fn island_visitor_with_rank() {
+        assert_eq!(
+            parse_island_visitor("[MVP+] CoolGuy123 is visiting your island!"),
+            Some("CoolGuy123".to_string())
+        );
+    }
+
+    #[test]
+    fn island_visitor_without_rank() {
+        assert_eq!(
+            parse_island_visitor("Steve is visiting your island!"),
+            Some("Steve".to_string())
+        );
+    }
+
+    #[test]
+    fn island_visitor_ignores_unrelated_lines() {
+        assert_eq!(parse_island_visitor("You are visiting Bob's island"), None);
+        assert_eq!(parse_island_visitor("Someone joined the lobby"), None);
+    }
+
+    #[test]
+    fn name_mention_from_other_player() {
+        assert_eq!(
+            parse_name_mention("Guild > [MVP+] Someone: hey BafBot you there?", "BafBot"),
+            Some("Guild > [MVP+] Someone: hey BafBot you there?".to_string())
+        );
+        assert_eq!(
+            parse_name_mention("From [VIP] Friend: yo BafBot", "BafBot"),
+            Some("From [VIP] Friend: yo BafBot".to_string())
+        );
+    }
+
+    #[test]
+    fn name_mention_skips_own_and_outgoing_and_system() {
+        // Bot's own guild message must not ping.
+        assert_eq!(parse_name_mention("Guild > [MVP+] BafBot: BafBot online", "BafBot"), None);
+        // Outgoing DM ("To ...") must not ping even if it contains the name.
+        assert_eq!(parse_name_mention("To [VIP] Friend: this is BafBot", "BafBot"), None);
+        // System line without a valid player sender must not ping.
+        assert_eq!(parse_name_mention("Reward: BafBot got 5 coins", "BafBot"), None);
+        // Name not present in body → no mention.
+        assert_eq!(parse_name_mention("Party > Friend: hello world", "BafBot"), None);
+    }
+
+    #[test]
+    fn name_token_respects_word_boundaries() {
+        assert!(contains_name_token("hey Bob how are you", "Bob"));
+        assert!(!contains_name_token("hey Bobby", "Bob"));
+        assert!(contains_name_token("ping @Bob!", "bob")); // case-insensitive
+    }
 
     #[test]
     fn detects_temporary_ban_disconnect() {
