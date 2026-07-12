@@ -50,6 +50,11 @@ fn cofl_tls_connector() -> Option<Connector> {
 pub enum CoflEvent {
     AuctionFlip(Flip),
     BazaarFlip(BazaarFlipRecommendation),
+    /// COFL `cancelOrder` message – cancel a specific open bazaar order.
+    /// The order is identified by item name + side (isBuyOrder/isSell) and,
+    /// when multiple same-side orders exist for the item, disambiguated by
+    /// `pricePerUnit`. Reuses the same payload shape as `placeOrder`.
+    CancelBazaarOrder(BazaarFlipRecommendation),
     /// COFL confirmed the mod session is authenticated (`loggedIn` with
     /// `verified: true`). Used as a reliable signal to enable flip/order buying,
     /// independent of the textual "Hello <ign> (<email>)" chat greeting (which
@@ -288,6 +293,16 @@ impl CoflWebSocket {
                     let _ = tx.send(CoflEvent::BazaarFlip(bazaar_flip));
                 } else {
                     warn!("Failed to parse bazaar flip from '{}' message (data length: {} bytes)", msg.msg_type, msg.data.len());
+                }
+            }
+            "cancelOrder" | "cancelorder" => {
+                // COFL tells the bot to cancel a specific open bazaar order.
+                // Same payload shape as placeOrder (itemName/pricePerUnit/isBuyOrder|isSell).
+                if let Ok(order) = parse_message_data::<BazaarFlipRecommendation>(&msg.data) {
+                    debug!("Parsed cancel-order request: {:?}", order.item_name);
+                    let _ = tx.send(CoflEvent::CancelBazaarOrder(order));
+                } else {
+                    warn!("Failed to parse cancelOrder from data (length: {} bytes)", msg.data.len());
                 }
             }
             "getbazaarflips" => {
