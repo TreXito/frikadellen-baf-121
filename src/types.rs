@@ -235,6 +235,19 @@ pub struct QueuedCommand {
     pub interruptible: bool,
 }
 
+/// Identifies a specific bazaar order for targeted cancellation.
+///
+/// Used both by the web GUI's per-order cancel button and by COFL's
+/// `cancelOrder` message. `price_per_unit`, when present, disambiguates
+/// between multiple same-side orders for the same item by selecting the one
+/// whose in-game unit price is closest to this value.
+#[derive(Debug, Clone)]
+pub struct BazaarOrderTarget {
+    pub item_name: String,
+    pub is_buy: bool,
+    pub price_per_unit: Option<f64>,
+}
+
 /// Types of commands
 #[derive(Debug, Clone)]
 pub enum CommandType {
@@ -275,11 +288,11 @@ pub enum CommandType {
     /// to collecting filled ones. When false (order-fill triggered), only filled orders
     /// are collected and open orders are left untouched.
     /// When `target_item` is set, only that specific order is cancelled (used by the
-    /// web GUI's individual cancel button).
+    /// web GUI's individual cancel button and by COFL's `cancelOrder` message).
     ManageOrders {
         cancel_open: bool,
         /// When set, only the matching order is cancelled instead of all open orders.
-        target_item: Option<(String, bool)>,
+        target_item: Option<BazaarOrderTarget>,
     },
     // Advanced commands matching TypeScript BAF.ts
     ClickSlot {

@@ -922,7 +922,11 @@ async fn cancel_bz_order(
     s.command_queue.enqueue(
         CommandType::ManageOrders {
             cancel_open: true,
-            target_item: Some((payload.item_name, payload.is_buy_order)),
+            target_item: Some(crate::types::BazaarOrderTarget {
+                item_name: payload.item_name,
+                is_buy: payload.is_buy_order,
+                price_per_unit: None,
+            }),
         },
         CommandPriority::Critical,
         false,

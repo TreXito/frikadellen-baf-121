@@ -2592,6 +2592,66 @@ async fn main() -> Result<()> {
                         );
                     }
                 }
+                CoflEvent::CancelBazaarOrder(order) => {
+                    // COFL asked us to cancel a specific open bazaar order,
+                    // identified by item name + side (+ price to disambiguate
+                    // multiple same-side orders for the same item).
+                    let is_buy = order.effective_is_buy_order();
+                    let side = if is_buy { "BUY" } else { "SELL" };
+
+                    // Only act once Coflnet auth is confirmed — the order-cancel
+                    // GUI flow is gated the same way flip buying is.
+                    if !cofl_authenticated_ws.load(Ordering::Relaxed) {
+                        debug!("Skipping cancelOrder — Coflnet not yet authenticated: {}", order.item_name);
+                        continue;
+                    }
+
+                    let price = if order.price_per_unit > 0.0 {
+                        Some(order.price_per_unit)
+                    } else {
+                        None
+                    };
+
+                    let msg = match price {
+                        Some(p) => format!(
+                            "§f[§4BAF§f]: §c🚫 [BZ] COFL cancel {} order: §r{} §7@ §6{:.1}",
+                            side, order.item_name, p
+                        ),
+                        None => format!(
+                            "§f[§4BAF§f]: §c🚫 [BZ] COFL cancel {} order: §r{}",
+                            side, order.item_name
+                        ),
+                    };
+                    info!(
+                        "[COFL] cancelOrder requested: '{}' ({}){}",
+                        order.item_name,
+                        side,
+                        price.map(|p| format!(" @ {:.1}", p)).unwrap_or_default()
+                    );
+                    print_mc_chat(&msg);
+                    let _ = chat_tx_ws.send(msg);
+
+                    // Reflect the intent in the tracker immediately: mark the
+                    // order pending-cancel (so the ManageOrders reconcile pass
+                    // doesn't re-add it from the pre-cancel window snapshot) and
+                    // remove it from the panel. The in-game cancel happens
+                    // asynchronously via the targeted ManageOrders run below.
+                    bazaar_tracker_ws.mark_cancelling(&order.item_name, is_buy);
+                    bazaar_tracker_ws.remove_order(&order.item_name, is_buy);
+
+                    command_queue_clone.enqueue(
+                        CommandType::ManageOrders {
+                            cancel_open: true,
+                            target_item: Some(frikadellen_baf::types::BazaarOrderTarget {
+                                item_name: order.item_name.clone(),
+                                is_buy,
+                                price_per_unit: price,
+                            }),
+                        },
+                        CommandPriority::Critical,
+                        false,
+                    );
+                }
                 CoflEvent::ChatMessage(msg) => {
                     // Parse "Your connection id is XXXX" (from chatMessage, matches TypeScript BAF.ts)
                     if let Some(cap) = msg.find("Your connection id is ") {

@@ -346,7 +346,7 @@ pub struct BotClient {
     /// When true, the ManagingOrders handler also cancels open orders (startup mode).
     manage_orders_cancel_open: Arc<AtomicBool>,
     /// When set, the ManageOrders handler targets a specific order for cancellation.
-    manage_orders_target_item: Arc<RwLock<Option<(String, bool)>>>,
+    manage_orders_target_item: Arc<RwLock<Option<crate::types::BazaarOrderTarget>>>,
     /// Cancel open bazaar orders when they are older than this many minutes per million coins.
     /// 0 disables age-based cancellation in periodic ManageOrders runs.
     pub bazaar_order_cancel_minutes_per_million: u64,
@@ -1332,7 +1332,7 @@ pub struct BotClientState {
     /// When set, the ManageOrders handler targets a specific order for cancellation
     /// instead of processing all orders.  Format: `(item_name, is_buy_order)`.
     /// Cleared at the start of each ManageOrders command.
-    pub manage_orders_target_item: Arc<RwLock<Option<(String, bool)>>>,
+    pub manage_orders_target_item: Arc<RwLock<Option<crate::types::BazaarOrderTarget>>>,
     /// Cancel open bazaar orders when they are older than this many minutes per million coins.
     /// 0 disables age-based cancellation in periodic ManageOrders runs.
     pub bazaar_order_cancel_minutes_per_million: u64,
@@ -3815,9 +3815,18 @@ async fn execute_command(
         CommandType::ManageOrders { cancel_open, target_item } => {
             let mode = if *cancel_open { "startup (cancel+collect)" } else { "collect-only" };
             info!("[ManageOrders] Triggered ({}) — opening /bz", mode);
-            if let Some((ref name, is_buy)) = target_item {
-                let side = if *is_buy { "BUY" } else { "SELL" };
-                info!("[ManageOrders] Targeting specific order: {} ({})", name, side);
+            if let Some(target) = target_item {
+                let side = if target.is_buy { "BUY" } else { "SELL" };
+                match target.price_per_unit {
+                    Some(price) => info!(
+                        "[ManageOrders] Targeting specific order: {} ({}) @ {:.1}",
+                        target.item_name, side, price
+                    ),
+                    None => info!(
+                        "[ManageOrders] Targeting specific order: {} ({})",
+                        target.item_name, side
+                    ),
+                }
             }
             *state.manage_orders_cancelled.write() = 0;
             // NOTE: inventory_full is intentionally NOT cleared here.  Clearing
@@ -5334,18 +5343,36 @@ async fn handle_window_interaction(
                         inv_full = false;
                     }
                 }
-                let chosen_order: Option<OrderEntry> = if let Some((ref tgt_name, tgt_is_buy)) = target_item {
-                    // Targeted cancel: find the specific order matching the web GUI request.
-                    let tgt_norm = crate::bazaar_tracker::normalize_for_match_pub(tgt_name);
-                    let mut all_orders = sell_orders.iter().chain(buy_orders.iter());
-                    all_orders.find(|(_, name, identity, _, _, _, _, _)| {
-                        let order_is_buy = identity.as_ref()
-                            .map(|(b, _)| *b)
-                            .unwrap_or_else(|| is_buy_bazaar_order_name(name));
-                        if order_is_buy != tgt_is_buy { return false; }
-                        let clean = clean_order_item_name(name, identity);
-                        crate::bazaar_tracker::normalize_for_match_pub(&clean) == tgt_norm
-                    }).cloned()
+                let chosen_order: Option<OrderEntry> = if let Some(ref target) = target_item {
+                    // Targeted cancel: find the specific order matching the web GUI
+                    // request or COFL's `cancelOrder` message.
+                    let tgt_norm = crate::bazaar_tracker::normalize_for_match_pub(&target.item_name);
+                    // All same-item, same-side orders are candidates. When COFL
+                    // supplied a price, several orders may share the item+side at
+                    // different price levels — the price picks the exact one.
+                    let candidates: Vec<&OrderEntry> = sell_orders.iter().chain(buy_orders.iter())
+                        .filter(|(_, name, identity, _, _, _, _, _)| {
+                            let order_is_buy = identity.as_ref()
+                                .map(|(b, _)| *b)
+                                .unwrap_or_else(|| is_buy_bazaar_order_name(name));
+                            if order_is_buy != target.is_buy { return false; }
+                            let clean = clean_order_item_name(name, identity);
+                            crate::bazaar_tracker::normalize_for_match_pub(&clean) == tgt_norm
+                        })
+                        .collect();
+                    match target.price_per_unit {
+                        // Price given: pick the candidate whose unit price is closest.
+                        Some(tgt_price) => candidates
+                            .into_iter()
+                            .min_by(|a, b| {
+                                let da = (a.7 - tgt_price).abs();
+                                let db = (b.7 - tgt_price).abs();
+                                da.partial_cmp(&db).unwrap_or(std::cmp::Ordering::Equal)
+                            })
+                            .cloned(),
+                        // No price: first same-item, same-side order (legacy behaviour).
+                        None => candidates.into_iter().next().cloned(),
+                    }
                 } else if !cancel_open {
                     // Always try claimable sell orders first (yield coins, no
                     // inventory space needed).
