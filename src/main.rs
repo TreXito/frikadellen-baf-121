@@ -232,32 +232,36 @@ fn extract_chat_sender(header: &str) -> Option<String> {
     }
 }
 
-/// Case-insensitively test whether `body` contains `name` as a whole token
-/// (bounded by non-`[A-Za-z0-9_]` on both sides), so "Bob" doesn't match
-/// "Bobby".
-fn contains_name_token(body: &str, name: &str) -> bool {
+/// Case-insensitively test whether a chat `body` *directly addresses* `name`,
+/// rather than merely containing it somewhere. A direct address is either the
+/// name at the very start of the message (as a whole token) or written as
+/// `@name`. So "BafBot help" and "yo @BafBot" count, but "i think BafBot is
+/// afk" does not.
+fn is_direct_address(body: &str, name: &str) -> bool {
     if name.is_empty() {
         return false;
     }
-    let body_l = body.to_ascii_lowercase();
     let name_l = name.to_ascii_lowercase();
-    let bytes = body_l.as_bytes();
-    let mut start = 0;
-    while let Some(pos) = body_l[start..].find(&name_l) {
-        let i = start + pos;
-        let end = i + name_l.len();
-        let before_ok = i == 0 || {
-            let c = bytes[i - 1];
-            !(c.is_ascii_alphanumeric() || c == b'_')
-        };
-        let after_ok = end >= bytes.len() || {
-            let c = bytes[end];
-            !(c.is_ascii_alphanumeric() || c == b'_')
-        };
-        if before_ok && after_ok {
+    let body_l = body.trim_start().to_ascii_lowercase();
+    let boundary = |c: u8| !(c.is_ascii_alphanumeric() || c == b'_');
+
+    // Name at the start of the message, followed by a boundary (or end of line).
+    if let Some(rest) = body_l.strip_prefix(&name_l) {
+        if rest.as_bytes().first().map_or(true, |&c| boundary(c)) {
             return true;
         }
-        start = i + 1;
+    }
+
+    // "@name" anywhere, as a whole token. The '@' itself is a left boundary.
+    let at_name = format!("@{}", name_l);
+    let bytes = body_l.as_bytes();
+    let mut start = 0;
+    while let Some(pos) = body_l[start..].find(&at_name) {
+        let end = start + pos + at_name.len();
+        if bytes.get(end).map_or(true, |&c| boundary(c)) {
+            return true;
+        }
+        start += pos + 1;
         if start >= body_l.len() {
             break;
         }
@@ -265,10 +269,16 @@ fn contains_name_token(body: &str, name: &str) -> bool {
     false
 }
 
-/// Detect when another player mentions `own_name` in a player-authored chat
-/// line (guild / party / co-op / DM). Returns the cleaned line when it's a
-/// genuine mention by someone *else*; returns `None` for the bot's own
-/// messages, outgoing DMs, and system messages. Input must be color-stripped.
+/// Detect when another player is trying to reach the bot in chat. Returns the
+/// cleaned line for either:
+///   - an **incoming direct message / whisper** to the bot ("From <player>: …"),
+///     which always counts — someone is reaching out; or
+///   - a **public/guild/party/co-op** line that *directly addresses* the bot
+///     (name at the start of the message, or `@name`).
+///
+/// A name merely appearing mid-sentence in public chat is NOT a mention.
+/// Returns `None` for the bot's own messages, outgoing DMs, and system lines.
+/// Input must be color-stripped.
 fn parse_name_mention(clean: &str, own_name: &str) -> Option<String> {
     if own_name.is_empty() {
         return None;
@@ -286,13 +296,14 @@ fn parse_name_mention(clean: &str, own_name: &str) -> Option<String> {
     if htrim.starts_with("To ") {
         return None;
     }
+    // An incoming whisper straight to the bot.
+    let is_dm = htrim.starts_with("From ");
     // Require a genuine player-chat marker so system lines that merely have a
     // "Word: body" shape (e.g. "Reward: ...") don't false-trigger:
     //   - a channel prefix ("Guild >", "Party >", "Co-op >", "Officer >", ...)
     //   - a direct message ("From <player>")
     //   - a rank tag on ranked public/island chat ("[MVP+] <player>")
-    let looks_like_player_chat =
-        htrim.contains('>') || htrim.starts_with("From ") || htrim.contains('[');
+    let looks_like_player_chat = htrim.contains('>') || is_dm || htrim.contains('[');
     if !looks_like_player_chat {
         return None;
     }
@@ -301,7 +312,9 @@ fn parse_name_mention(clean: &str, own_name: &str) -> Option<String> {
     if sender.eq_ignore_ascii_case(own_name) {
         return None;
     }
-    if contains_name_token(body, own_name) {
+    // A whisper always counts; public/guild/party chat only when the bot is
+    // directly addressed (not just name-dropped mid-sentence).
+    if is_dm || is_direct_address(body, own_name) {
         Some(clean.to_string())
     } else {
         None
@@ -5009,7 +5022,7 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_ban_disconnect, parse_cofl_profit_response, parse_cofl_bz_h_total_profit, parse_short_number, parse_bz_list_flip_detail, should_drop_bazaar_command_during_ah_pause, should_enqueue_periodic_auction_claim, parse_island_visitor, parse_name_mention, contains_name_token};
+    use super::{is_ban_disconnect, parse_cofl_profit_response, parse_cofl_bz_h_total_profit, parse_short_number, parse_bz_list_flip_detail, should_drop_bazaar_command_during_ah_pause, should_enqueue_periodic_auction_claim, parse_island_visitor, parse_name_mention, is_direct_address};
     use frikadellen_baf::types::{BotState, CommandType};
 
     #[test]
@@ -5035,34 +5048,47 @@ mod tests {
     }
 
     #[test]
-    fn name_mention_from_other_player() {
-        assert_eq!(
-            parse_name_mention("Guild > [MVP+] Someone: hey BafBot you there?", "BafBot"),
-            Some("Guild > [MVP+] Someone: hey BafBot you there?".to_string())
-        );
+    fn name_mention_fires_on_dms_and_direct_address() {
+        // Any incoming whisper counts — someone is reaching out.
         assert_eq!(
             parse_name_mention("From [VIP] Friend: yo BafBot", "BafBot"),
             Some("From [VIP] Friend: yo BafBot".to_string())
         );
+        assert_eq!(
+            parse_name_mention("From Steve: anything at all", "BafBot"),
+            Some("From Steve: anything at all".to_string())
+        );
+        // Public/guild chat: only when directly addressed.
+        assert_eq!(
+            parse_name_mention("Guild > [MVP+] Steve: BafBot help please", "BafBot"),
+            Some("Guild > [MVP+] Steve: BafBot help please".to_string())
+        );
+        assert_eq!(
+            parse_name_mention("Party > Steve: @BafBot come here", "BafBot"),
+            Some("Party > Steve: @BafBot come here".to_string())
+        );
     }
 
     #[test]
-    fn name_mention_skips_own_and_outgoing_and_system() {
+    fn name_mention_ignores_midsentence_and_noise() {
+        // Name mid-sentence in public/guild chat is NOT a mention.
+        assert_eq!(parse_name_mention("Guild > [MVP+] Steve: i think BafBot is afk", "BafBot"), None);
+        assert_eq!(parse_name_mention("[MVP+] Steve: lol BafBot", "BafBot"), None);
         // Bot's own guild message must not ping.
         assert_eq!(parse_name_mention("Guild > [MVP+] BafBot: BafBot online", "BafBot"), None);
         // Outgoing DM ("To ...") must not ping even if it contains the name.
         assert_eq!(parse_name_mention("To [VIP] Friend: this is BafBot", "BafBot"), None);
         // System line without a valid player sender must not ping.
         assert_eq!(parse_name_mention("Reward: BafBot got 5 coins", "BafBot"), None);
-        // Name not present in body → no mention.
-        assert_eq!(parse_name_mention("Party > Friend: hello world", "BafBot"), None);
     }
 
     #[test]
-    fn name_token_respects_word_boundaries() {
-        assert!(contains_name_token("hey Bob how are you", "Bob"));
-        assert!(!contains_name_token("hey Bobby", "Bob"));
-        assert!(contains_name_token("ping @Bob!", "bob")); // case-insensitive
+    fn direct_address_only_at_start_or_at_handle() {
+        assert!(is_direct_address("BafBot help", "BafBot"));
+        assert!(is_direct_address("  BafBot, come here", "bafbot")); // leading space + case
+        assert!(is_direct_address("yo @BafBot please", "BafBot"));
+        assert!(!is_direct_address("i think BafBot is afk", "BafBot")); // mid-sentence
+        assert!(!is_direct_address("BafBotter is cool", "BafBot")); // not a whole token
     }
 
     #[test]

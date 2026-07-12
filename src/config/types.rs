@@ -281,8 +281,11 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub notify_island_visitors: bool,
 
-    /// Ping the owner (via `discord_id`) when the bot's Minecraft name is
-    /// mentioned by another player in chat (guild/party/co-op/DM). Defaults to true.
+    /// Ping the owner (via `discord_id`) when another player tries to reach the
+    /// bot in chat: an incoming whisper/DM, or a guild/party/public line that
+    /// directly addresses the bot (name at the start of the message, or
+    /// `@name`). A name merely appearing mid-sentence does NOT trigger it.
+    /// Defaults to true.
     #[serde(default = "default_true")]
     pub notify_name_mentions: bool,
 
