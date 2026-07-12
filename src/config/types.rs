@@ -48,6 +48,7 @@ mod opt_f64_as_zero {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
+    // ═══════════════════════════ Account ═══════════════════════════
     /// Ingame Minecraft username(s). Supports multiple comma-separated accounts:
     /// `ingame_name = "Account1"` for a single account, or
     /// `ingame_name = "Account1,Account2"` for automatic switching.
@@ -59,7 +60,8 @@ pub struct Config {
     /// means switch accounts every 12 hours. Set to `0` to disable automatic switching.
     #[serde(default, with = "opt_f64_as_zero")]
     pub multi_switch_time: Option<f64>,
-    
+
+    // ═══════════════════════ Coflnet connection ════════════════════
     #[serde(default = "default_websocket_url")]
     pub websocket_url: String,
 
@@ -73,6 +75,7 @@ pub struct Config {
     #[serde(default)]
     pub multisocket_urls: Vec<String>,
 
+    // ═══════════════════ Private finder (baf-flip-finder) ══════════
     /// baf-flip-finder websocket feed (e.g. "ws://192.168.0.250:15101").
     /// When set, flips found by the private finder are bought through the
     /// same pipeline as COFL flips (deduped by auction UUID, first source
@@ -93,6 +96,7 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub finder_auto_list: bool,
 
+    // ═══════════════════════ Auto-relist blocklist ═════════════════
     /// SkyBlock item IDs which the private finder must never automatically
     /// relist (for example, `JUJU_SHORTBOW`). This only affects finder-driven
     /// listing instructions; manual and ordinary COFL listings still work.
@@ -118,43 +122,7 @@ pub struct Config {
     #[serde(default = "default_do_not_relist_over_profit")]
     pub do_not_relist_over_profit: u64,
 
-    #[serde(default = "default_web_gui_port")]
-    pub web_gui_port: u16,
-
-    /// Minimum delay between consecutive queued commands in milliseconds.
-    /// Prevents back-to-back Hypixel interactions from overlapping.
-    /// Default: 500ms.
-    #[serde(default = "default_command_delay_ms")]
-    pub command_delay_ms: u64,
-    
-    #[serde(default = "default_bed_spam_click_delay")]
-    pub bed_spam_click_delay: u64,
-
-    /// How many ms before the COFL `purchaseAt` deadline to start clicking (default: 30).
-    /// Only used when `bedtiming = true`. Without bedtiming, bed spam starts immediately
-    /// using `bed_spam_click_delay` and this value is ignored.
-    #[serde(default = "default_bed_pre_click_ms")]
-    pub bed_pre_click_ms: u64,
-    
-    #[serde(default = "default_bazaar_order_check_interval_seconds")]
-    pub bazaar_order_check_interval_seconds: u64,
-    
-    #[serde(default = "default_bazaar_order_cancel_minutes_per_million", alias = "bazaar_order_cancel_minutes")]
-    pub bazaar_order_cancel_minutes_per_million: u64,
-
-    /// Bazaar sell tax rate as a percentage (e.g. 1.25 = 1.25%).
-    /// Hypixel applies 1.25% by default. The Bazaar Flipper perk from the
-    /// Community Shop reduces it by up to 0.25% (two levels × 0.125%).
-    /// Set to 1.0 if you have the max perk level.
-    #[serde(default = "default_bazaar_tax_rate")]
-    pub bazaar_tax_rate: f64,
-
-    /// Delay in milliseconds between consecutive auction listing commands
-    /// (SellToAuction). Prevents Hypixel from kicking the bot with
-    /// "Sending packets too fast!" during bulk listings. Default: 1500ms.
-    #[serde(default = "default_auction_listing_delay_ms")]
-    pub auction_listing_delay_ms: u64,
-    
+    // ═══════════════════════ Flip behaviour toggles ════════════════
     /// **Deprecated**: COFL now handles flip type selection automatically.
     /// Master switch for bazaar flipping. Defaults to true. Persisted so the web
     /// panel's Bazaar-flips toggle survives restarts (it was previously
@@ -181,17 +149,44 @@ pub struct Config {
     /// name is still accepted via the serde alias for backward compatibility.)
     #[serde(default = "default_true", alias = "freemoney")]
     pub bedtiming: bool,
-    
-    #[serde(default = "default_true")]
-    pub use_cofl_chat: bool,
-    
-    #[serde(default)]
-    pub auto_cookie: u64,
 
-    
-    #[serde(default = "default_true")]
-    pub enable_console_input: bool,
-    
+    // ═══════════════════════ Timing / delays ═══════════════════════
+    /// Minimum delay between consecutive queued commands in milliseconds.
+    /// Prevents back-to-back Hypixel interactions from overlapping.
+    /// Default: 500ms.
+    #[serde(default = "default_command_delay_ms")]
+    pub command_delay_ms: u64,
+
+    #[serde(default = "default_bed_spam_click_delay")]
+    pub bed_spam_click_delay: u64,
+
+    /// How many ms before the COFL `purchaseAt` deadline to start clicking (default: 30).
+    /// Only used when `bedtiming = true`. Without bedtiming, bed spam starts immediately
+    /// using `bed_spam_click_delay` and this value is ignored.
+    #[serde(default = "default_bed_pre_click_ms")]
+    pub bed_pre_click_ms: u64,
+
+    /// Delay in milliseconds between consecutive auction listing commands
+    /// (SellToAuction). Prevents Hypixel from kicking the bot with
+    /// "Sending packets too fast!" during bulk listings. Default: 1500ms.
+    #[serde(default = "default_auction_listing_delay_ms")]
+    pub auction_listing_delay_ms: u64,
+
+    // ═══════════════════════ Bazaar settings ═══════════════════════
+    #[serde(default = "default_bazaar_order_check_interval_seconds")]
+    pub bazaar_order_check_interval_seconds: u64,
+
+    #[serde(default = "default_bazaar_order_cancel_minutes_per_million", alias = "bazaar_order_cancel_minutes")]
+    pub bazaar_order_cancel_minutes_per_million: u64,
+
+    /// Bazaar sell tax rate as a percentage (e.g. 1.25 = 1.25%).
+    /// Hypixel applies 1.25% by default. The Bazaar Flipper perk from the
+    /// Community Shop reduces it by up to 0.25% (two levels × 0.125%).
+    /// Set to 1.0 if you have the max perk level.
+    #[serde(default = "default_bazaar_tax_rate")]
+    pub bazaar_tax_rate: f64,
+
+    // ═══════════════════ Auction / inventory / runtime ═════════════
     #[serde(default = "default_auction_duration_hours")]
     pub auction_duration_hours: u64,
 
@@ -200,39 +195,34 @@ pub struct Config {
     /// Default: 12.
     #[serde(default = "default_max_items_in_inventory")]
     pub max_items_in_inventory: u64,
-    
+
+    #[serde(default)]
+    pub auto_cookie: u64,
+
+    #[serde(default = "default_true")]
+    pub use_cofl_chat: bool,
+
+    #[serde(default = "default_true")]
+    pub enable_console_input: bool,
+
+    // ═══════════════════════════ Proxy ═════════════════════════════
     /// Enable proxy for both the Minecraft and WebSocket connections.
     #[serde(default)]
     pub proxy_enabled: bool,
-    
+
     /// Proxy server address in `host:port` format, e.g. `"121.124.241.211:3313"`.
     /// Only used when `proxy_enabled = true`. Leave empty to disable.
     #[serde(default, with = "opt_string_as_empty")]
     pub proxy_address: Option<String>,
-    
+
     /// Proxy credentials in `username:password` format, e.g. `"myuser:mypassword"`.
     /// Leave empty if the proxy requires no authentication.
     #[serde(default, with = "opt_string_as_empty")]
     pub proxy_credentials: Option<String>,
-    
-    #[serde(default)]
-    /// Discord webhook URL for notifications.
-    /// `None` = not yet configured (prompts on next startup).
-    /// `Some("")` = explicitly disabled (no further prompts).
-    /// `Some(url)` = active webhook.
-    pub webhook_url: Option<String>,
 
-    /// Separate Discord webhook URL for bazaar-specific notifications
-    /// (order placed, collected, cancelled). Leave empty to use the regular
-    /// `webhook_url` for all notifications.
-    #[serde(default, with = "opt_string_as_empty")]
-    pub bazaar_webhook_url: Option<String>,
-
-    /// Discord user ID for pinging on legendary/divine flips and bans.
-    /// Leave empty to disable pings.
-    #[serde(default, with = "opt_string_as_empty")]
-    pub discord_id: Option<String>,
-
+    // ═══════════════════════ Web control panel ═════════════════════
+    #[serde(default = "default_web_gui_port")]
+    pub web_gui_port: u16,
 
     /// Password to protect the web control panel. Leave empty to disable authentication.
     #[serde(default, with = "opt_string_as_empty")]
@@ -256,20 +246,50 @@ pub struct Config {
     #[serde(default, with = "opt_string_as_empty")]
     pub web_tls_key_path: Option<String>,
 
+    // ═══════════════════════ External API keys ═════════════════════
     /// Hypixel API key for fetching active auctions. Obtain one from https://developer.hypixel.net/
     /// Leave empty to use the Coflnet API as a fallback.
     #[serde(default, with = "opt_string_as_empty")]
     pub hypixel_api_key: Option<String>,
+
+    // ═══════════════════ Discord notifications ═════════════════════
+    #[serde(default)]
+    /// Discord webhook URL for notifications.
+    /// `None` = not yet configured (prompts on next startup).
+    /// `Some("")` = explicitly disabled (no further prompts).
+    /// `Some(url)` = active webhook.
+    pub webhook_url: Option<String>,
+
+    /// Separate Discord webhook URL for bazaar-specific notifications
+    /// (order placed, collected, cancelled). Leave empty to use the regular
+    /// `webhook_url` for all notifications.
+    #[serde(default, with = "opt_string_as_empty")]
+    pub bazaar_webhook_url: Option<String>,
+
+    /// Discord user ID for pinging on legendary/divine flips and bans.
+    /// Leave empty to disable pings.
+    #[serde(default, with = "opt_string_as_empty")]
+    pub discord_id: Option<String>,
 
     /// Whether to share legendary/divine flip purchases to the public Discord channel.
     /// Defaults to true. Set to false to opt out.
     #[serde(default = "default_true")]
     pub share_legendary_flips: bool,
 
-    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
-    pub sessions: HashMap<String, CoflSession>,
+    /// Ping the owner (via `discord_id`) when another player visits the bot's
+    /// island ("[RANK] Name is visiting your island!"). Defaults to true.
+    #[serde(default = "default_true")]
+    pub notify_island_visitors: bool,
 
-    // ── Central backend (baf-backend) ───────────────────────────
+    /// Ping the owner (via `discord_id`) when another player tries to reach the
+    /// bot in chat: an incoming whisper/DM, or a guild/party/public line that
+    /// directly addresses the bot (name at the start of the message, or
+    /// `@name`). A name merely appearing mid-sentence does NOT trigger it.
+    /// Defaults to true.
+    #[serde(default = "default_true")]
+    pub notify_name_mentions: bool,
+
+    // ═══════════════════ Central backend (baf-backend) ═════════════
     /// Stable, per-installation identifier used by the central backend to
     /// recognise this bot across reconnects. Auto-generated on first run and
     /// persisted; do not change it or the backend will treat it as a new bot.
@@ -290,7 +310,7 @@ pub struct Config {
     #[serde(default, with = "opt_string_as_empty")]
     pub backend_allowed_ids: Option<String>,
 
-    // ── Humanization / Rest Breaks ──────────────────────────────
+    // ═══════════════════ Humanization / Rest Breaks ═══════════════
     /// Enable periodic "human-like" rest breaks where the macro disconnects
     /// for a randomized period before reconnecting. Does NOT reset the
     /// account-switching session timer. Default: false.
@@ -312,6 +332,10 @@ pub struct Config {
     /// Maximum rest break duration in minutes. Default: 10.
     #[serde(default = "default_humanization_max_break_minutes")]
     pub humanization_max_break_minutes: u64,
+
+    // ═══════════════════════ Persisted session state ═══════════════
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub sessions: HashMap<String, CoflSession>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -414,55 +438,72 @@ fn default_humanization_max_break_minutes() -> u64 {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            // Account
             ingame_name: None,
             multi_switch_time: None,
+            // Coflnet connection
             websocket_url: default_websocket_url(),
             multisocket_urls: Vec::new(),
+            // Private finder
             finder_ws_url: None,
             finder_ws_token: None,
             finder_auto_list: true,
+            // Auto-relist blocklist
             do_not_relist_ids: default_do_not_relist_ids(),
             do_not_relist_finders: default_do_not_relist_finders(),
             do_not_relist_over_profit: default_do_not_relist_over_profit(),
-            web_gui_port: default_web_gui_port(),
-            command_delay_ms: default_command_delay_ms(),
-            bed_spam_click_delay: default_bed_spam_click_delay(),
-            bed_pre_click_ms: default_bed_pre_click_ms(),
-            bazaar_order_check_interval_seconds: default_bazaar_order_check_interval_seconds(),
-            bazaar_order_cancel_minutes_per_million: default_bazaar_order_cancel_minutes_per_million(),
-            bazaar_tax_rate: default_bazaar_tax_rate(),
-            auction_listing_delay_ms: default_auction_listing_delay_ms(),
+            // Flip behaviour toggles
             enable_bazaar_flips: true,
             enable_ah_flips: true,
             skip: false,
             bedtiming: true,
-            use_cofl_chat: true,
-            auto_cookie: 0,
-            enable_console_input: true,
+            // Timing / delays
+            command_delay_ms: default_command_delay_ms(),
+            bed_spam_click_delay: default_bed_spam_click_delay(),
+            bed_pre_click_ms: default_bed_pre_click_ms(),
+            auction_listing_delay_ms: default_auction_listing_delay_ms(),
+            // Bazaar settings
+            bazaar_order_check_interval_seconds: default_bazaar_order_check_interval_seconds(),
+            bazaar_order_cancel_minutes_per_million: default_bazaar_order_cancel_minutes_per_million(),
+            bazaar_tax_rate: default_bazaar_tax_rate(),
+            // Auction / inventory / runtime
             auction_duration_hours: default_auction_duration_hours(),
             max_items_in_inventory: default_max_items_in_inventory(),
+            auto_cookie: 0,
+            use_cofl_chat: true,
+            enable_console_input: true,
+            // Proxy
             proxy_enabled: false,
             proxy_address: None,
             proxy_credentials: None,
-            webhook_url: None,
-            bazaar_webhook_url: None,
-            discord_id: None,
+            // Web control panel
+            web_gui_port: default_web_gui_port(),
             web_gui_password: None,
             web_https: false,
             web_tls_cert_path: None,
             web_tls_key_path: None,
+            // External API keys
             hypixel_api_key: None,
+            // Discord notifications
+            webhook_url: None,
+            bazaar_webhook_url: None,
+            discord_id: None,
             share_legendary_flips: true,
-            sessions: HashMap::new(),
+            notify_island_visitors: true,
+            notify_name_mentions: true,
+            // Central backend
             instance_id: None,
             backend_enabled: true,
             backend_url: default_backend_url(),
             backend_allowed_ids: None,
+            // Humanization / rest breaks
             humanization_enabled: false,
             humanization_min_interval_minutes: default_humanization_min_interval_minutes(),
             humanization_max_interval_minutes: default_humanization_max_interval_minutes(),
             humanization_min_break_minutes: default_humanization_min_break_minutes(),
             humanization_max_break_minutes: default_humanization_max_break_minutes(),
+            // Persisted session state
+            sessions: HashMap::new(),
         }
     }
 }

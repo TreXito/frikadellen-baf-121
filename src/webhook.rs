@@ -210,6 +210,61 @@ pub async fn send_webhook_auth_failed(
     post_embed_with_content(webhook_url, ping.as_deref(), payload).await;
 }
 
+/// Notify (and optionally ping) the owner that a player is visiting the bot's
+/// island. `visitor` is the bare Minecraft name (rank/color stripped).
+pub async fn send_webhook_island_visitor(
+    ingame_name: &str,
+    visitor: &str,
+    discord_id: Option<&str>,
+    webhook_url: &str,
+) {
+    let payload = serde_json::json!({
+        "embeds": [{
+            "title": "🏝️ Island Visitor",
+            "description": format!("**{}** is visiting your island!", visitor),
+            "color": 0x3498dbu32,
+            "thumbnail": {
+                "url": format!("https://mc-heads.net/avatar/{}/64.png", visitor)
+            },
+            "footer": {
+                "text": format!("BAF - {}", ingame_name),
+                "icon_url": format!("https://mc-heads.net/avatar/{}/32.png", ingame_name)
+            },
+            "timestamp": chrono::Utc::now().to_rfc3339()
+        }]
+    });
+    let ping = discord_id.map(|id| format!("<@{}>", id));
+    post_embed_with_content(webhook_url, ping.as_deref(), payload).await;
+}
+
+/// Notify (and optionally ping) the owner that the bot's Minecraft name was
+/// mentioned by another player in chat. `chat_line` is the full color-stripped
+/// chat message for context.
+pub async fn send_webhook_name_mention(
+    ingame_name: &str,
+    chat_line: &str,
+    discord_id: Option<&str>,
+    webhook_url: &str,
+) {
+    // Discord code-fence the raw line so @-style text or markdown in the chat
+    // message can't trigger extra pings or formatting.
+    let safe_line = chat_line.replace('`', "'");
+    let payload = serde_json::json!({
+        "embeds": [{
+            "title": "💬 You were mentioned",
+            "description": format!("```\n{}\n```", safe_line),
+            "color": 0xf1c40fu32,
+            "footer": {
+                "text": format!("BAF - {}", ingame_name),
+                "icon_url": format!("https://mc-heads.net/avatar/{}/32.png", ingame_name)
+            },
+            "timestamp": chrono::Utc::now().to_rfc3339()
+        }]
+    });
+    let ping = discord_id.map(|id| format!("<@{}>", id));
+    post_embed_with_content(webhook_url, ping.as_deref(), payload).await;
+}
+
 
 pub async fn send_webhook_initialized(
     ingame_name: &str,

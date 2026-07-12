@@ -1,3 +1,4 @@
+use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use regex::Regex;
 use serde_json::Value as JsonValue;
@@ -5,6 +6,11 @@ use std::sync::Arc;
 use tracing::{debug, info};
 
 use crate::types::WindowType;
+
+/// Compiled once and reused: stripping Minecraft color codes runs on every
+/// chat line (and several times per line), so recompiling the regex per call
+/// was pure waste.
+static COLOR_CODE_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"§[0-9a-fk-or]").unwrap());
 
 /// Event handlers for bot events
 pub struct BotEventHandlers {
@@ -177,9 +183,9 @@ impl BotEventHandlers {
 
     /// Remove Minecraft color codes from text
     pub fn remove_color_codes(text: &str) -> String {
-        // Minecraft color codes: §[0-9a-fk-or]
-        let re = Regex::new(r"§[0-9a-fk-or]").unwrap();
-        re.replace_all(text, "").to_string()
+        // Minecraft color codes: §[0-9a-fk-or]. Uses a process-wide compiled
+        // regex (see COLOR_CODE_RE) so this hot-path call doesn't recompile.
+        COLOR_CODE_RE.replace_all(text, "").to_string()
     }
 
     /// Get current window title
