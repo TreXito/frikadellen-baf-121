@@ -14,7 +14,7 @@ use tracing::{debug, error, info, warn};
 use tokio::time::{sleep, Duration};
 use tokio::sync::broadcast;
 use serde_json;
-use std::sync::{Arc, Mutex, atomic::{AtomicBool, Ordering}};
+use std::sync::{Arc, Mutex, atomic::{AtomicBool, AtomicI64, Ordering}};
 use std::collections::HashMap;
 use std::time::Instant;
 use frikadellen_baf::utils::restart_process;
@@ -65,6 +65,85 @@ const BZ_PROFIT_QUERY_EXTRA_DELAY_SECS: u64 = 2;
 /// after the daily sell value limit reset — ensures the server-side reset
 /// has fully propagated.
 const DAILY_LIMIT_RESET_BUFFER_SECS: u64 = 5;
+
+/// How long SkyBlock is treated as down after a "maintenance" line is seen in
+/// chat. While this window is active the island guard stops sending `/play sb`
+/// (which would just bounce), and the stall guard treats inactivity as expected
+/// rather than a frozen connection. It auto-clears so the bot resumes on its own
+/// once the server is back — no manual intervention needed.
+const MAINTENANCE_COOLDOWN_SECS: i64 = 5 * 60;
+
+/// No GUI window opening for this long is treated as a suspected stall. The bot
+/// opens windows constantly in normal operation (bazaar order management, flip
+/// purchases, sell/claim), so a long silence means the connection is very likely
+/// frozen or the bot was quietly booted to limbo.
+const STALL_THRESHOLD_SECS: i64 = 15 * 60; // 15 minutes
+/// How often the stall guard re-checks the activity heartbeat.
+const STALL_CHECK_INTERVAL_SECS: u64 = 60;
+/// Startup grace before the stall guard starts watching, so the initial
+/// join/startup workflow isn't mistaken for a stall.
+const STALL_GRACE_SECS: u64 = 120;
+/// After a soft rejoin recovery, wait this long before re-checking so a live
+/// session has time to open a window and clear the stall on its own.
+const STALL_RECOVERY_GRACE_SECS: u64 = 90;
+/// Consecutive stall detections before we give up on soft recovery and restart
+/// the whole process for a clean session.
+const STALL_MAX_ATTEMPTS: u32 = 3;
+
+/// Epoch-millis until which SkyBlock is considered under maintenance / down.
+/// Set from chat when a maintenance line appears; read by the island and stall
+/// guards. 0 = not in maintenance.
+static MAINTENANCE_UNTIL_MS: AtomicI64 = AtomicI64::new(0);
+
+/// Epoch-millis of the last sign of life from the game connection (a window
+/// opening, spawn, or startup completing). Drives the stall guard. 0 = not yet
+/// seeded.
+static LAST_ACTIVITY_MS: AtomicI64 = AtomicI64::new(0);
+
+/// Current wall-clock time in epoch-millis.
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Record that SkyBlock looks down for maintenance. Returns `true` only on the
+/// transition from "up" to "down" so callers can notify exactly once per outage
+/// instead of on every repeated maintenance line.
+fn note_maintenance() -> bool {
+    let was_down = skyblock_in_maintenance();
+    MAINTENANCE_UNTIL_MS.store(now_ms() + MAINTENANCE_COOLDOWN_SECS * 1000, Ordering::Release);
+    !was_down
+}
+
+/// Whether SkyBlock is currently within a maintenance cooldown window.
+fn skyblock_in_maintenance() -> bool {
+    now_ms() < MAINTENANCE_UNTIL_MS.load(Ordering::Acquire)
+}
+
+/// Mark the game connection as alive right now (heartbeat for the stall guard).
+fn mark_activity() {
+    LAST_ACTIVITY_MS.store(now_ms(), Ordering::Release);
+}
+
+/// Seconds since the last sign of life. Returns 0 before the heartbeat is seeded
+/// so a fresh, not-yet-active bot is never flagged as stalled.
+fn secs_since_activity() -> i64 {
+    let last = LAST_ACTIVITY_MS.load(Ordering::Acquire);
+    if last == 0 { 0 } else { (now_ms() - last) / 1000 }
+}
+
+/// Best-effort current SkyBlock area from the scoreboard (the line carrying the
+/// `⏣` area glyph, glyph stripped). Used to name the location in an irregular
+/// world-change notice. Returns `None` when the area line isn't present.
+fn current_skyblock_area(lines: &[String]) -> Option<String> {
+    lines
+        .iter()
+        .find(|l| l.contains('⏣'))
+        .map(|l| l.replace('⏣', "").trim().to_string())
+        .filter(|s| !s.is_empty())
+}
 
 /// Calculate Hypixel AH fee based on price tier (matches TypeScript calculateAuctionHouseFee).
 /// - <10M  → 1%
@@ -1619,6 +1698,7 @@ async fn main() -> Result<()> {
                 }
                 frikadellen_baf::bot::BotEvent::Spawn => {
                     info!("✓ Bot spawned in world and ready");
+                    mark_activity();
                 }
                 frikadellen_baf::bot::BotEvent::ChatMessage(msg) => {
                     // Print Minecraft chat with color codes converted to ANSI
@@ -1629,6 +1709,25 @@ async fn main() -> Result<()> {
                     // Parse Coflnet profit response:
                     // "According to our data <ign> made <amount> in the last <days> days across <N> auctions"
                     let clean = frikadellen_baf::utils::remove_minecraft_colors(&msg);
+
+                    // SkyBlock maintenance / downtime. When Hypixel is restarting
+                    // SkyBlock, a join attempt is answered with a "maintenance"
+                    // line — the server is temporarily down. Note it so the island
+                    // guard stops bouncing off `/play sb` and the stall guard treats
+                    // the quiet as expected. The window auto-clears, so the bot
+                    // resumes on its own once SkyBlock is back.
+                    if clean.to_lowercase().contains("maintenance") {
+                        if note_maintenance() {
+                            warn!(
+                                "[Maintenance] SkyBlock appears to be down for maintenance — pausing rejoin for {}m",
+                                MAINTENANCE_COOLDOWN_SECS / 60
+                            );
+                            let baf_msg = "§f[§4BAF§f]: §eSkyBlock is under maintenance — pausing rejoin until it's back up".to_string();
+                            print_mc_chat(&baf_msg);
+                            let _ = chat_tx_events.send(baf_msg);
+                        }
+                    }
+
                     if let Some(profit) = parse_cofl_profit_response(&clean) {
                         // `/cofl profit` is the REALIZED total. The panel now shows
                         // THEORETICAL AH profit (accumulated at purchase), so we log
@@ -1730,6 +1829,9 @@ async fn main() -> Result<()> {
                 }
                 frikadellen_baf::bot::BotEvent::WindowOpen(id, window_type, title) => {
                     debug!("Window opened: {} (ID: {}, Type: {})", title, id, window_type);
+                    // Heartbeat for the stall guard: an opening GUI window is the
+                    // clearest proof the game connection is alive and working.
+                    mark_activity();
 
                     // When the "Bazaar Orders" or "Co-op Bazaar Orders" window
                     // opens, send the full window NBT data to COFL so bazaar
@@ -1774,6 +1876,7 @@ async fn main() -> Result<()> {
                 }
                 frikadellen_baf::bot::BotEvent::WindowClose => {
                     debug!("Window closed");
+                    mark_activity();
                 }
                 frikadellen_baf::bot::BotEvent::Disconnected(reason) => {
                     warn!("Bot disconnected: {}", reason);
@@ -1812,6 +1915,7 @@ async fn main() -> Result<()> {
                 }
                 frikadellen_baf::bot::BotEvent::StartupComplete { orders_cancelled } => {
                     info!("[Startup] Startup complete - bot is ready to flip! ({} order(s) cancelled)", orders_cancelled);
+                    mark_activity();
                     // Clear the bazaar order tracker for a clean slate ONLY when the
                     // startup ManageOrders cycle actually cancelled all in-game orders
                     // (i.e. bazaar flips are enabled).  When bazaar flips are disabled
@@ -4607,6 +4711,14 @@ async fn main() -> Result<()> {
                     continue;
                 }
 
+                // SkyBlock is down for maintenance — a `/play sb` right now would
+                // just bounce. Hold off (the flag auto-clears) instead of spamming
+                // the rejoin sequence into a closed server.
+                if skyblock_in_maintenance() {
+                    consecutive_rejoin_attempts = 0;
+                    continue;
+                }
+
                 // Don't interfere while the bot is actively doing work.
                 // Any non-Idle state means the bot is in a GUI workflow (bazaar,
                 // purchasing, selling, claiming, …) and may have navigated away
@@ -4655,11 +4767,20 @@ async fn main() -> Result<()> {
                     sleep(Duration::from_secs(backoff_secs)).await;
                 }
 
-                // Not on island — send the return sequence.
-                let baf_msg = "§f[§4BAF§f]: §eNot detected on island — returning to island...".to_string();
+                // Not on island — send the return sequence. Name the current area
+                // when we can read it (e.g. Hypixel evacuated us to the Hub on a
+                // server restart) so an irregular world change is visible rather
+                // than a bare "not on island".
+                let baf_msg = match current_skyblock_area(&lines) {
+                    Some(area) => format!(
+                        "§f[§4BAF§f]: §eIrregular world change — now in §f{}§e, returning to island...",
+                        area
+                    ),
+                    None => "§f[§4BAF§f]: §eNot detected on island — returning to island...".to_string(),
+                };
                 print_mc_chat(&baf_msg);
                 let _ = chat_tx_island.send(baf_msg);
-                info!("[AFKHandler] Not on island — sending /lobby → /play sb → /is");
+                info!("[AFKHandler] Off island — sending /lobby → /play sb → /is");
 
                 // Send commands with delays between them so each server
                 // transfer has time to complete before the next fires.
@@ -4695,6 +4816,101 @@ async fn main() -> Result<()> {
 
                 // Wait for the island teleport to finish before checking again.
                 sleep(Duration::from_secs(15)).await;
+            }
+        });
+    }
+
+    // Heartbeat / stall guard: the bot opens GUI windows constantly during
+    // normal operation (bazaar order management, flip purchases, sells, claims).
+    // If NOTHING opens a window for STALL_THRESHOLD_SECS the connection is very
+    // likely frozen or the bot was silently booted to limbo — the island guard
+    // above can't see it because the (stale) scoreboard may still show the
+    // island. First try to shake it loose with a rejoin; if the silence persists
+    // across STALL_MAX_ATTEMPTS checks, restart the process for a clean session.
+    {
+        let bot_client_hb = bot_client.clone();
+        let command_queue_hb = command_queue.clone();
+        let chat_tx_hb = chat_tx.clone();
+        tokio::spawn(async move {
+            use frikadellen_baf::types::{CommandType, CommandPriority};
+
+            // Seed the heartbeat and let the join/startup workflow finish before
+            // we start watching, so startup is never mistaken for a stall.
+            mark_activity();
+            sleep(Duration::from_secs(STALL_GRACE_SECS)).await;
+
+            let mut attempts: u32 = 0;
+            loop {
+                sleep(Duration::from_secs(STALL_CHECK_INTERVAL_SECS)).await;
+
+                // A deliberate offline state (web disconnect / rest break) is not
+                // a stall — the bot is meant to be idle.
+                if bot_client_hb.is_disconnect_requested() {
+                    attempts = 0;
+                    continue;
+                }
+
+                // SkyBlock down for maintenance explains the quiet; the island
+                // guard owns that case and it auto-clears.
+                if skyblock_in_maintenance() {
+                    attempts = 0;
+                    continue;
+                }
+
+                let idle_secs = secs_since_activity();
+                if idle_secs < STALL_THRESHOLD_SECS {
+                    attempts = 0;
+                    continue;
+                }
+
+                attempts += 1;
+                let idle_min = idle_secs / 60;
+                warn!(
+                    "[Heartbeat] No window activity for {}m — stall suspected (attempt {}/{})",
+                    idle_min, attempts, STALL_MAX_ATTEMPTS
+                );
+                let baf_msg = format!(
+                    "§f[§4BAF§f]: §cStall suspected — no activity for {}m (attempt {}/{})",
+                    idle_min, attempts, STALL_MAX_ATTEMPTS
+                );
+                print_mc_chat(&baf_msg);
+                let _ = chat_tx_hb.send(baf_msg);
+
+                // Soft recovery exhausted — restart the whole process so a fresh
+                // session takes over. restart_process() re-execs and never returns.
+                if attempts >= STALL_MAX_ATTEMPTS {
+                    let baf_msg = "§f[§4BAF§f]: §cRestarting bot — heartbeat detected a period of inactivity".to_string();
+                    print_mc_chat(&baf_msg);
+                    let _ = chat_tx_hb.send(baf_msg);
+                    error!(
+                        "[Heartbeat] Stall unrecovered after {} attempts — restarting process",
+                        STALL_MAX_ATTEMPTS
+                    );
+                    // Give the messages a moment to flush to the panel/log first.
+                    sleep(Duration::from_secs(2)).await;
+                    restart_process();
+                }
+
+                // Soft recovery: force a rejoin. If the connection is alive this
+                // reopens windows, which ticks the heartbeat and clears the stall.
+                let baf_msg = format!(
+                    "§f[§4BAF§f]: §eBot connection restarting — reason: heartbeat inactivity (attempt {}/{})",
+                    attempts, STALL_MAX_ATTEMPTS
+                );
+                print_mc_chat(&baf_msg);
+                let _ = chat_tx_hb.send(baf_msg);
+                for (cmd, delay) in [("/lobby", 5u64), ("/play sb", 10), ("/is", 15)] {
+                    command_queue_hb.enqueue(
+                        CommandType::SendChat { message: cmd.to_string() },
+                        CommandPriority::High,
+                        false,
+                    );
+                    sleep(Duration::from_secs(delay)).await;
+                }
+
+                // Give a live session time to open a window (which resets the
+                // heartbeat) before the next check, so we don't escalate too fast.
+                sleep(Duration::from_secs(STALL_RECOVERY_GRACE_SECS)).await;
             }
         });
     }
@@ -5143,8 +5359,39 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_ban_disconnect, parse_cofl_profit_response, parse_cofl_bz_h_total_profit, parse_short_number, parse_bz_list_flip_detail, should_drop_bazaar_command_during_ah_pause, should_enqueue_periodic_auction_claim, parse_island_visitor, parse_name_mention, is_direct_address};
+    use super::{is_ban_disconnect, parse_cofl_profit_response, parse_cofl_bz_h_total_profit, parse_short_number, parse_bz_list_flip_detail, should_drop_bazaar_command_during_ah_pause, should_enqueue_periodic_auction_claim, parse_island_visitor, parse_name_mention, is_direct_address, current_skyblock_area, note_maintenance, skyblock_in_maintenance, mark_activity, secs_since_activity};
     use frikadellen_baf::types::{BotState, CommandType};
+
+    #[test]
+    fn skyblock_area_from_scoreboard() {
+        let lines = vec![
+            "SKYBLOCK".to_string(),
+            " ⏣ Hub".to_string(),
+            "Purse: 1,000".to_string(),
+        ];
+        assert_eq!(current_skyblock_area(&lines), Some("Hub".to_string()));
+        // No area glyph → no area (fall back to the generic notice).
+        let no_area = vec!["SKYBLOCK".to_string(), "Purse: 1,000".to_string()];
+        assert_eq!(current_skyblock_area(&no_area), None);
+    }
+
+    #[test]
+    fn maintenance_flag_sets_and_transitions_once() {
+        // First maintenance line transitions up→down (should notify).
+        assert!(note_maintenance());
+        assert!(skyblock_in_maintenance());
+        // A repeat while still down does NOT re-transition (no duplicate notify).
+        assert!(!note_maintenance());
+        assert!(skyblock_in_maintenance());
+    }
+
+    #[test]
+    fn activity_heartbeat_seeds_and_stays_fresh() {
+        // Before seeding, 0 elapsed means "never stalled".
+        // After marking, elapsed is small (well under the stall threshold).
+        mark_activity();
+        assert!(secs_since_activity() < super::STALL_THRESHOLD_SECS);
+    }
 
     #[test]
     fn island_visitor_with_rank() {
