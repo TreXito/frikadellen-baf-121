@@ -1412,6 +1412,41 @@ async fn main() -> Result<()> {
         });
     }
 
+    // Finder-PRIMARY purse relay. When the primary `websocket_url` IS the private
+    // finder (not a COFL modsocket), the finder feed arrives through `ws_client`
+    // and the `finder_feed_urls` loop above never runs — so nothing relays the
+    // status JSON the reporter task writes into `finder_status`. Relay it over the
+    // primary socket here on the same 5s cadence, deduped like the secondary path.
+    // Without this, finder-only bots (websocket_url = ws://127.0.0.1:15101, empty
+    // multisocket_urls) never report purse, so purse-adaptive / broke-mode routing
+    // and the affordability + overflow guards get no data. Guarded on the primary
+    // being a finder URL, so COFL-primary deployments (which relay via
+    // finder_feed_urls) are unaffected and COFL never receives the purse.
+    if config.finder_report_purse
+        && !config.websocket_url.contains("coflnet")
+        && !config.websocket_url.contains("/modsocket")
+    {
+        let ws_primary = ws_client.clone();
+        let status_holder = finder_status.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
+            let mut last_sent: Option<String> = None;
+            loop {
+                tick.tick().await;
+                let cur = status_holder.lock().ok().and_then(|g| g.clone());
+                if let Some(json) = cur {
+                    if last_sent.as_ref() != Some(&json) {
+                        if let Err(e) = ws_primary.send_message(&json).await {
+                            warn!("[FinderWS] primary-socket purse relay failed: {}", e);
+                        } else {
+                            last_sent = Some(json);
+                        }
+                    }
+                }
+            }
+        });
+    }
+
     // Shared profit tracker for AH and Bazaar realized profits.
     // Restore persisted totals from disk so profit statistics survive rest breaks.
     let profit_tracker = {
