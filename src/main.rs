@@ -907,6 +907,28 @@ async fn main() -> Result<()> {
         config_loader.save(&config)?;
     }
 
+    // Prompt for auto-cookie on first run. A Booster Cookie is REQUIRED to view
+    // auctions, so without automatic re-buying the bot stops flipping the moment
+    // the cookie runs out. Ask once, then remember the choice (edit `auto_cookie`
+    // in config.toml to change the threshold later).
+    if !config.auto_cookie_prompted {
+        let wants_cookie = Confirm::new()
+            .with_prompt("Auto-buy Booster Cookies so the bot never runs out? (needed to keep flipping)")
+            .default(true)
+            .interact()?;
+        if wants_cookie {
+            let hours: u64 = Input::new()
+                .with_prompt("Re-buy when the remaining cookie time drops below this many hours")
+                .default(24u64)
+                .interact_text()?;
+            config.auto_cookie = hours;
+        } else {
+            config.auto_cookie = 0;
+        }
+        config.auto_cookie_prompted = true;
+        config_loader.save(&config)?;
+    }
+
     // Resolve the active ingame name.
     // When multiple names are configured, the account index is advanced at runtime by the
     // account-switching timer (see below) and the process restarts with exit(0) so that an
@@ -1632,6 +1654,50 @@ async fn main() -> Result<()> {
     // Minecraft connection is useless (no flips, no bazaar, nothing to do),
     // so after exhausting retries we restart the process to re-run the full
     // startup sequence (config reload, fresh WebSocket, etc.).
+    // ── Sign into COFL FIRST, then Hypixel ──────────────────────────────────
+    // The COFL sign-in link is printed the instant COFL sends it (see
+    // CoflWebSocket::send_auth_prompt). Hold the Minecraft/Microsoft login here
+    // until COFL reports the session authenticated, so the user completes COFL
+    // sign-in first and its link is never lost behind the Hypixel auth output.
+    // Returning users (cached COFL session) sail straight through — COFL sends
+    // `loggedIn` within a second or two. Skipped on managed VPS instances (no
+    // interactive user) and when console input is disabled; a generous timeout
+    // guarantees startup can never hang waiting for a sign-in that never comes.
+    {
+        let is_vps = std::env::var("VPS_SECRET").ok().filter(|s| !s.is_empty()).is_some();
+        if !is_vps && config.enable_console_input
+            && !frikadellen_baf::websocket::COFL_LOGGED_IN.load(Ordering::Relaxed)
+        {
+            info!("Waiting for COFL sign-in before starting Minecraft login...");
+            let baf_msg = "§f[§4BAF§f]: §eSign into COFL first (link above). Minecraft login starts once COFL is authenticated.".to_string();
+            print_mc_chat(&baf_msg);
+            let _ = chat_tx.send(baf_msg);
+
+            const COFL_SIGNIN_TIMEOUT: Duration = Duration::from_secs(300);
+            let started = Instant::now();
+            let mut last_reminder = Instant::now();
+            while !frikadellen_baf::websocket::COFL_LOGGED_IN.load(Ordering::Relaxed) {
+                if started.elapsed() >= COFL_SIGNIN_TIMEOUT {
+                    warn!(
+                        "COFL sign-in not confirmed within {}s — continuing to Minecraft login anyway (buying stays disabled until COFL authenticates)",
+                        COFL_SIGNIN_TIMEOUT.as_secs()
+                    );
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(500)).await;
+                if last_reminder.elapsed() >= Duration::from_secs(20) {
+                    let m = "§f[§4BAF§f]: §eStill waiting for COFL sign-in — open the link above and log in.".to_string();
+                    print_mc_chat(&m);
+                    let _ = chat_tx.send(m);
+                    last_reminder = Instant::now();
+                }
+            }
+            if frikadellen_baf::websocket::COFL_LOGGED_IN.load(Ordering::Relaxed) {
+                info!("COFL authenticated — proceeding to Minecraft login");
+            }
+        }
+    }
+
     info!("Initializing Minecraft bot...");
     info!("Authenticating with Microsoft account...");
     info!("A browser window will open for you to log in");
@@ -1925,7 +1991,7 @@ async fn main() -> Result<()> {
                                 webhook_url,
                             ).await;
                         }
-                        frikadellen_baf::webhook::send_webhook_banned_public().await;
+                        frikadellen_baf::webhook::send_webhook_banned_public(&reason).await;
                         // Terminate immediately so we don't reconnect and re-send the webhook
                         std::process::exit(1);
                     }
