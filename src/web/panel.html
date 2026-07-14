@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="en" data-theme="aurum">
+<html lang="en" data-theme="phosphor">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -12,6 +12,7 @@
 <style>
 *,*::before,*::after{margin:0;padding:0;box-sizing:border-box}
 :root,[data-theme="aurum"]{--bg:#0a0806;--bg-card:#14110b;--surface:#1b1710;--border:#2c2417;--text:#e7e0cf;--text-dim:#a99c7e;--heading:#fff8ea;--accent:#f5b942;--accent2:#ffd470;--success:#46d98c;--danger:#ff6b6b;--warn:#ffbd2e;--radius:12px;--lore-bg:#15110a;--lore-border:#2c2417;--btn-text:#241700}
+[data-theme="phosphor"]{--bg:#05080a;--bg-card:#0a1014;--surface:#0d151a;--border:#1f2c26;--text:#aebdb4;--text-dim:#6f8077;--heading:#e8f1ea;--accent:#39d353;--accent2:#6bf085;--success:#46d98c;--danger:#ff5d5d;--warn:#f0b429;--radius:12px;--lore-bg:#0c1512;--lore-border:#1f2c26;--btn-text:#04140a}
 [data-theme="midnight"]{--bg:#0b0d17;--bg-card:#111425;--surface:#171a2e;--border:#1e2240;--text:#c9cde8;--text-dim:#7b82a8;--heading:#eaedf9;--accent:#6c5ce7;--accent2:#a29bfe;--success:#00cec9;--danger:#ff5f56;--warn:#ffbd2e;--radius:10px;--lore-bg:#1a0e2e;--lore-border:#2d1b4e;--btn-text:#fff}
 [data-theme="obsidian"]{--bg:#0e0e0e;--bg-card:#181818;--surface:#222;--border:#333;--text:#d4d4d4;--text-dim:#888;--heading:#f0f0f0;--accent:#e74c3c;--accent2:#ff6b6b;--success:#2ecc71;--danger:#e74c3c;--warn:#f39c12;--lore-bg:#1a1a1a;--lore-border:#333;--btn-text:#fff}
 [data-theme="emerald"]{--bg:#0a1612;--bg-card:#0f2018;--surface:#15291f;--border:#1e3a2b;--text:#b8d8c8;--text-dim:#6b9b82;--heading:#e0f0e8;--accent:#00b894;--accent2:#55efc4;--success:#00cec9;--danger:#ff5f56;--warn:#fdcb6e;--lore-bg:#0d1f16;--lore-border:#1e3a2b;--btn-text:#fff}
@@ -266,7 +267,8 @@ a{color:var(--accent2);text-decoration:none}
         <div class="theme-picker" id="theme-picker">
             <button class="theme-btn" onclick="toggleThemeMenu(event)">🎨 Theme</button>
             <div class="theme-dropdown" id="theme-dropdown">
-                <div class="theme-opt active" data-theme="aurum" onclick="setTheme('aurum')"><span class="theme-swatch" style="background:#f5b942"></span>Aurum</div>
+                <div class="theme-opt active" data-theme="phosphor" onclick="setTheme('phosphor')"><span class="theme-swatch" style="background:#39d353"></span>Phosphor</div>
+                <div class="theme-opt" data-theme="aurum" onclick="setTheme('aurum')"><span class="theme-swatch" style="background:#f5b942"></span>Aurum</div>
                 <div class="theme-opt" data-theme="midnight" onclick="setTheme('midnight')"><span class="theme-swatch" style="background:#6c5ce7"></span>Midnight</div>
                 <div class="theme-opt" data-theme="obsidian" onclick="setTheme('obsidian')"><span class="theme-swatch" style="background:#e74c3c"></span>Obsidian</div>
                 <div class="theme-opt" data-theme="emerald" onclick="setTheme('emerald')"><span class="theme-swatch" style="background:#00b894"></span>Emerald</div>
@@ -1209,7 +1211,7 @@ function positionTooltip(tip, e) {
 }
 
 // ── Theme Switching ──────────────────────────────────────────
-const THEMES = ['aurum','midnight','obsidian','emerald','sakura','ocean'];
+const THEMES = ['phosphor','aurum','midnight','obsidian','emerald','sakura','ocean'];
 
 function setTheme(name) {
     document.documentElement.setAttribute('data-theme', name);
