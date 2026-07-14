@@ -850,6 +850,12 @@ async fn main() -> Result<()> {
     let config_loader = Arc::new(ConfigLoader::new());
     let mut config = config_loader.load()?;
 
+    // A config that already has an ingame name is an existing install — never
+    // re-run first-run onboarding prompts (e.g. auto-cookie) on it, even when a
+    // newly-added field defaults to "not yet asked". Only a genuinely fresh
+    // config (no ingame name) gets the setup wizard.
+    let is_fresh_config = config.ingame_name.is_none();
+
     // Prompt for username if not set
     if config.ingame_name.is_none() {
         let name: String = Input::new()
@@ -873,7 +879,7 @@ async fn main() -> Result<()> {
 
     // Prompt for webhook URL if not yet configured (matches TypeScript configHelper.ts pattern
     // of adding new default values to existing config on first run of newer version)
-    if config.webhook_url.is_none() {
+    if is_fresh_config && config.webhook_url.is_none() {
         let wants_webhook = Confirm::new()
             .with_prompt("Configure Discord webhook for notifications? (optional)")
             .default(false)
@@ -891,7 +897,7 @@ async fn main() -> Result<()> {
     }
 
     // Prompt for Discord ID if not yet configured (for pinging on legendary/divine flips and bans)
-    if config.discord_id.is_none() {
+    if is_fresh_config && config.discord_id.is_none() {
         let wants_discord_id = Confirm::new()
             .with_prompt("Configure Discord user ID for ping notifications? (optional)")
             .default(false)
@@ -907,11 +913,12 @@ async fn main() -> Result<()> {
         config_loader.save(&config)?;
     }
 
-    // Prompt for auto-cookie on first run. A Booster Cookie is REQUIRED to view
-    // auctions, so without automatic re-buying the bot stops flipping the moment
-    // the cookie runs out. Ask once, then remember the choice (edit `auto_cookie`
-    // in config.toml to change the threshold later).
-    if !config.auto_cookie_prompted {
+    // Prompt for auto-cookie on first run ONLY. A Booster Cookie is REQUIRED to
+    // view auctions, so without automatic re-buying the bot stops flipping the
+    // moment the cookie runs out. Existing installs are never asked (they keep
+    // their current `auto_cookie` value, editable in config.toml) — gating on
+    // `is_fresh_config` avoids re-onboarding a bot that already has a config.
+    if is_fresh_config && !config.auto_cookie_prompted {
         let wants_cookie = Confirm::new()
             .with_prompt("Auto-buy Booster Cookies so the bot never runs out? (needed to keep flipping)")
             .default(true)
@@ -1081,6 +1088,17 @@ async fn main() -> Result<()> {
     // Set once after auto-sending `/cofl license default <ign>` to prevent repeat attempts.
     // For single-account setups, skip license management entirely (not needed).
     let license_default_sent = Arc::new(AtomicBool::new(ingame_names.len() == 1));
+
+    // Whether this account already has a valid (non-expired) COFL session. A
+    // resumed/authenticated session does NOT trigger a sign-in link (and may not
+    // re-send `loggedIn`), so the "sign into COFL first" gate below must only
+    // block when there is NO valid session yet — otherwise a returning bot hangs
+    // forever waiting for a sign-in that never happens.
+    let had_valid_session = config
+        .sessions
+        .get(&ingame_name)
+        .map(|s| s.expires >= chrono::Utc::now())
+        .unwrap_or(false);
 
     // Get or generate session ID for Coflnet (matching TypeScript coflSessionManager.ts)
     let session_id = if let Some(session) = config.sessions.get(&ingame_name) {
@@ -1657,15 +1675,18 @@ async fn main() -> Result<()> {
     // ── Sign into COFL FIRST, then Hypixel ──────────────────────────────────
     // The COFL sign-in link is printed the instant COFL sends it (see
     // CoflWebSocket::send_auth_prompt). Hold the Minecraft/Microsoft login here
-    // until COFL reports the session authenticated, so the user completes COFL
-    // sign-in first and its link is never lost behind the Hypixel auth output.
-    // Returning users (cached COFL session) sail straight through — COFL sends
-    // `loggedIn` within a second or two. Skipped on managed VPS instances (no
-    // interactive user) and when console input is disabled; a generous timeout
-    // guarantees startup can never hang waiting for a sign-in that never comes.
+    // until COFL reports the session authenticated, so a first-time user completes
+    // COFL sign-in first and its link is never lost behind the Hypixel auth output.
+    //
+    // ONLY block when there is no valid session yet (`!had_valid_session`). A bot
+    // that has run before resumes an authenticated session: COFL shows no sign-in
+    // link and may never re-send `loggedIn`, so waiting on it would hang startup
+    // forever. Those bots skip the wait entirely and go straight to Minecraft.
+    // Also skipped on managed VPS instances and when console input is disabled; a
+    // generous timeout means even a first-time user can never hang startup.
     {
         let is_vps = std::env::var("VPS_SECRET").ok().filter(|s| !s.is_empty()).is_some();
-        if !is_vps && config.enable_console_input
+        if !is_vps && config.enable_console_input && !had_valid_session
             && !frikadellen_baf::websocket::COFL_LOGGED_IN.load(Ordering::Relaxed)
         {
             info!("Waiting for COFL sign-in before starting Minecraft login...");
