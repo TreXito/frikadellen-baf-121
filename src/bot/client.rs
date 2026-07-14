@@ -4387,10 +4387,10 @@ async fn handle_window_interaction(
 
             info!("[Bazaar] Window: \"{}\" | step: {:?}", window_title, current_step);
 
-            // Poll every 50ms for up to 1500ms for slots to be populated by ContainerSetContent.
-            // Matching TypeScript's findAndClick() poll pattern (checks every 50ms, up to ~600ms).
-            // This is more reliable than a fixed sleep because ContainerSetContent may arrive
-            // at any time after OpenScreen.
+            // Poll every 20ms for up to 1500ms for slots to be populated by ContainerSetContent.
+            // Polling the (in-memory) menu is far more reliable than a fixed sleep because
+            // ContainerSetContent may arrive at any time after OpenScreen — and it breaks the
+            // instant the slot appears, so it never waits longer than detection needs.
             let poll_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(1500);
 
             // Helper: read the current slots from the menu
@@ -4443,7 +4443,7 @@ async fn handle_window_interaction(
                         }
                         break None;
                     }
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                    tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
                 };
 
                 if let Some(i) = order_button_slot {
@@ -4454,10 +4454,7 @@ async fn handle_window_interaction(
                     }
                     info!("[Bazaar] Item detail: clicking \"{}\" at slot {}", order_btn_name, i);
                     *state.bazaar_step.write() = BazaarStep::SelectOrderType;
-                    // Add randomized human-like delay before clicking (200-500ms)
-                    let jitter = 200 + (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().subsec_nanos() % 300) as u64;
-                    tokio::time::sleep(tokio::time::Duration::from_millis(jitter)).await;
-                    if *state.last_window_id.read() != window_id { return; }
+                    // Click the instant the button is detected — no fixed delay.
                     click_window_slot(bot, &state.last_window_id, window_id, i as i16).await;
                     return;
                 }
@@ -4478,17 +4475,14 @@ async fn handle_window_interaction(
                     if f.is_some() || tokio::time::Instant::now() >= poll_deadline {
                         break f;
                     }
-                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                    tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
                 };
 
                 match found {
                     Some(i) => {
                         if *state.last_window_id.read() != window_id { return; }
                         info!("[Bazaar] Found item at slot {}", i);
-                        // Add randomized human-like delay (200-450ms)
-                        let jitter = 200 + (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().subsec_nanos() % 250) as u64;
-                        tokio::time::sleep(tokio::time::Duration::from_millis(jitter)).await;
-                        if *state.last_window_id.read() != window_id { return; }
+                        // Click the instant the item is detected — no fixed delay.
                         click_window_slot(bot, &state.last_window_id, window_id, i as i16).await;
                     }
                     None => {
@@ -4500,9 +4494,83 @@ async fn handle_window_interaction(
                 return;
             }
 
-            // For steps 3-5: poll for the relevant button (Custom Amount / Custom Price) for up
-            // to 1500ms matching the order-button poll above.  A single fixed sleep is unreliable
-            // because ContainerSetContent may arrive at any time after OpenScreen.
+            // ── Step 5: Confirm screen (step == SetPrice) ────────────────────
+            // Past the amount/price steps the only thing left is pressing the
+            // confirm button (slot 13). Handle it here, ahead of the amount/price
+            // poll below, so we don't wait on that poll before confirming. Detect
+            // slot 13 by polling tightly and click the instant it's populated —
+            // no fixed delay. If it never populates, abort rather than click an
+            // empty slot.
+            if current_step == BazaarStep::SetPrice {
+                *state.bazaar_step.write() = BazaarStep::Confirm;
+                // Clear rejection flag before clicking so we only capture the
+                // response to *this* placement attempt.
+                state.bazaar_order_rejected.store(false, Ordering::Relaxed);
+
+                const CONFIRM_SLOT: usize = 13;
+                // Poll every 20ms (≤800ms cap) for slot 13 to hold a real item,
+                // since ContainerSetContent may lag OpenScreen. Breaks the instant
+                // it's ready — no polling slower than detection needs.
+                let confirm_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_millis(800);
+                let confirm_ready = loop {
+                    if *state.last_window_id.read() != window_id { return; }
+                    let slots = read_slots();
+                    if slots.get(CONFIRM_SLOT).map(|s| !s.is_empty()).unwrap_or(false) {
+                        break true;
+                    }
+                    if tokio::time::Instant::now() >= confirm_deadline {
+                        break false;
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
+                };
+                if !confirm_ready {
+                    warn!("[Bazaar] Confirm button (slot {}) never populated — aborting instead of clicking an empty slot", CONFIRM_SLOT);
+                    send_raw_close(bot, window_id, &state.handlers);
+                    *state.bot_state.write() = BotState::Idle;
+                    return;
+                }
+
+                info!("[Bazaar] Confirm screen: clicking slot {}", CONFIRM_SLOT);
+                // Click the instant slot 13 is detected — no fixed delay.
+                click_window_slot(bot, &state.last_window_id, window_id, CONFIRM_SLOT as i16).await;
+
+                // NOT a padding delay: this is the rejection window. The
+                // limit/"price not competitive" reply arrives async as a chat
+                // message that flips the flags below, so give it a brief moment
+                // before deciding whether the order really placed (otherwise we'd
+                // log/emit a placed order that the server actually rejected). Runs
+                // after the click, so it never delays the buy itself.
+                tokio::time::sleep(tokio::time::Duration::from_millis(250)).await;
+
+                if state.bazaar_at_limit.load(Ordering::Relaxed) {
+                    warn!("[Bazaar] Order rejected (at limit) — not emitting BazaarOrderPlaced");
+                } else if state.bazaar_order_rejected.load(Ordering::Relaxed) {
+                    warn!("[Bazaar] Order rejected (price not competitive) — not emitting BazaarOrderPlaced");
+                } else {
+                    let item = item_name.clone();
+                    let amount = *state.bazaar_amount.read();
+                    let price_per_unit = *state.bazaar_price_per_unit.read();
+                    let total_value = amount as f64 * price_per_unit;
+                    log_bazaar_order_placed(is_buy_order, &item, total_value);
+                    let _ = state.event_tx.send(BotEvent::BazaarOrderPlaced {
+                        item_name: item,
+                        amount,
+                        price_per_unit,
+                        is_buy_order,
+                    });
+                    info!("[Bazaar] ===== ORDER COMPLETE =====");
+                }
+                send_raw_close(bot, window_id, &state.handlers);
+                *state.bot_state.write() = BotState::Idle;
+                return;
+            }
+
+            // ── Steps 3-4: Amount / Price screens ────────────────────────────
+            // The confirm screen was already handled and returned above, so poll
+            // here for whichever "Custom Amount" / "Custom Price" slot this screen
+            // exposes. Poll every 20ms (≤1500ms cap) — ContainerSetContent may lag
+            // OpenScreen — and break the instant the slot appears so we never wait
+            // longer than detection actually needs.
             let poll_deadline2 = tokio::time::Instant::now() + tokio::time::Duration::from_millis(1500);
             let (amount_slot, price_slot) = loop {
                 if *state.last_window_id.read() != window_id { return; }
@@ -4512,7 +4580,7 @@ async fn handle_window_interaction(
                 if ca.is_some() || cp.is_some() || tokio::time::Instant::now() >= poll_deadline2 {
                     break (ca, cp);
                 }
-                tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                tokio::time::sleep(tokio::time::Duration::from_millis(20)).await;
             };
 
             // Step 3: Amount screen (buy orders only)
@@ -4535,43 +4603,8 @@ async fn handle_window_interaction(
                 click_window_slot(bot, &state.last_window_id, window_id, i as i16).await;
                 // Sign response is sent in the OpenSignEditor packet handler
             }
-            // Step 5: Confirm screen — anything that opens after SetPrice
-            else if current_step == BazaarStep::SetPrice {
-                if *state.last_window_id.read() != window_id { return; }
-                info!("[Bazaar] Confirm screen: clicking slot 13");
-                *state.bazaar_step.write() = BazaarStep::Confirm;
-                // Clear rejection flag before clicking so we only capture the
-                // response to *this* placement attempt.
-                state.bazaar_order_rejected.store(false, Ordering::Relaxed);
-                // Add randomized human-like delay before confirming (300-700ms)
-                let jitter = 300 + (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().subsec_nanos() % 400) as u64;
-                tokio::time::sleep(tokio::time::Duration::from_millis(jitter)).await;
-                click_window_slot(bot, &state.last_window_id, window_id, 13).await;
-
-                // Wait briefly for the server to respond (limit/rejection message arrives asynchronously)
-                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-
-                if state.bazaar_at_limit.load(Ordering::Relaxed) {
-                    warn!("[Bazaar] Order rejected (at limit) — not emitting BazaarOrderPlaced");
-                } else if state.bazaar_order_rejected.load(Ordering::Relaxed) {
-                    warn!("[Bazaar] Order rejected (price not competitive) — not emitting BazaarOrderPlaced");
-                } else {
-                    let item = item_name.clone();
-                    let amount = *state.bazaar_amount.read();
-                    let price_per_unit = *state.bazaar_price_per_unit.read();
-                    let total_value = amount as f64 * price_per_unit;
-                    log_bazaar_order_placed(is_buy_order, &item, total_value);
-                    let _ = state.event_tx.send(BotEvent::BazaarOrderPlaced {
-                        item_name: item,
-                        amount,
-                        price_per_unit,
-                        is_buy_order,
-                    });
-                    info!("[Bazaar] ===== ORDER COMPLETE =====");
-                }
-                send_raw_close(bot, window_id, &state.handlers);
-                *state.bot_state.write() = BotState::Idle;
-            }
+            // Any other window/step combination has no actionable slot here — fall
+            // through and do nothing rather than click a slot that isn't there.
         }
         BotState::InstaSelling => {
             // Sell a dominant inventory item via /bz → Sell Instantly to free space.

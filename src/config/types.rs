@@ -208,6 +208,12 @@ pub struct Config {
     #[serde(default)]
     pub auto_cookie: u64,
 
+    /// Internal: set once the first-run wizard has asked about auto-cookie, so
+    /// the prompt does not reappear on every launch. Not a user-facing setting
+    /// (edit `auto_cookie` directly to change the threshold afterwards).
+    #[serde(default)]
+    pub auto_cookie_prompted: bool,
+
     #[serde(default = "default_true")]
     pub use_cofl_chat: bool,
 
@@ -480,6 +486,7 @@ impl Default for Config {
             auction_duration_hours: default_auction_duration_hours(),
             max_items_in_inventory: default_max_items_in_inventory(),
             auto_cookie: 0,
+            auto_cookie_prompted: false,
             use_cofl_chat: true,
             enable_console_input: true,
             // Proxy

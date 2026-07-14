@@ -930,10 +930,30 @@ pub async fn send_webhook_banned(
 /// The relay endpoint and signing secret are read from the `BAF_NOTIFY_RELAY_URL`
 /// and `BAF_NOTIFY_SECRET` environment variables.  If not configured, this is a
 /// no-op.
-pub async fn send_webhook_banned_public() {
-    let payload = serde_json::json!({
-        "message": "A user of this macro just got banned"
+pub async fn send_webhook_banned_public(reason: &str) {
+    let parsed = parse_ban_reason(reason);
+    let ban_type = if parsed.is_security_ban {
+        "security"
+    } else if parsed.is_permanent {
+        "permanent"
+    } else if parsed.duration.is_some() {
+        "temporary"
+    } else {
+        "unknown"
+    };
+    let mut payload = serde_json::json!({
+        "message": "A user of this macro just got banned",
+        "banType": ban_type,
     });
+    let obj = payload.as_object_mut().expect("payload is a JSON object");
+    // Duration and reason only — deliberately omit IGN, ban ID and appeal link so
+    // the relay stays anonymous while still reading like a real ban webhook.
+    if let Some(duration) = &parsed.duration {
+        obj.insert("duration".to_string(), serde_json::json!(duration));
+    }
+    if let Some(ban_reason) = &parsed.reason {
+        obj.insert("reason".to_string(), serde_json::json!(ban_reason));
+    }
     post_relay("ban_notify", payload).await;
 }
 

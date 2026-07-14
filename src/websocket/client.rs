@@ -7,7 +7,17 @@ use tokio_tungstenite::{
     connect_async_tls_with_config, tungstenite::Message, Connector, MaybeTlsStream, WebSocketStream,
 };
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tracing::{debug, error, info, warn};
+
+/// Set to `true` the instant COFL confirms the mod session is authenticated
+/// (`loggedIn` with `verified: true`). Written by the socket read task, which
+/// runs from the moment of connect — independent of the main event loop
+/// draining `CoflEvent`s. The startup sequence polls this to hold the
+/// Minecraft/Microsoft login until the user has finished signing into COFL, so
+/// the COFL sign-in link is dealt with FIRST and never buried behind (or
+/// scrolled away by) the Hypixel auth output.
+pub static COFL_LOGGED_IN: AtomicBool = AtomicBool::new(false);
 
 /// Build a TLS connector for the Coflnet modsocket that tolerates self-signed /
 /// untrusted certificates. Coflnet's regional servers (e.g. us-sky.coflnet.com)
@@ -212,6 +222,12 @@ impl CoflWebSocket {
              §f[§4BAF§f]: §c========================================",
             text, url
         );
+        // Print to the terminal the instant COFL sends the link. The socket read
+        // task runs from connect (before the Minecraft/Microsoft login), so this
+        // guarantees the sign-in link is seen FIRST and is never lost in the
+        // Hypixel auth output. Also mirror it into the event stream for the web
+        // panel.
+        crate::logging::print_mc_chat(&auth_prompt);
         let _ = tx.send(CoflEvent::ChatMessage(auth_prompt));
     }
 
@@ -272,6 +288,10 @@ impl CoflWebSocket {
                     // means the session is established, so default to true.
                     .unwrap_or(true);
                 if verified {
+                    // Publish the auth state for the startup sequence's
+                    // "sign into COFL first" gate, before the event even reaches
+                    // the main loop.
+                    COFL_LOGGED_IN.store(true, Ordering::Relaxed);
                     let _ = tx.send(CoflEvent::Authenticated);
                 }
             }

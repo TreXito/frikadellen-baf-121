@@ -1535,15 +1535,31 @@ const CONFIG_FIELDS = {
 // Simple TOML parser for flat config (no nested tables except [sessions])
 function parseSimpleToml(text) {
     const result = {};
-    for (const line of text.split('\n')) {
-        const trimmed = line.trim();
+    const lines = text.split('\n');
+    for (let i = 0; i < lines.length; i++) {
+        const trimmed = lines[i].trim();
         if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('[')) continue;
         const eqIdx = trimmed.indexOf('=');
         if (eqIdx < 0) continue;
         const key = trimmed.substring(0, eqIdx).trim();
         let val = trimmed.substring(eqIdx + 1).trim();
         // Remove inline comments
-        if (val.startsWith('"')) {
+        if (val.startsWith('[')) {
+            // Array value. toml::to_string_pretty emits multi-element arrays
+            // across several lines (one element per line, trailing comma), so
+            // accumulate lines until the brackets balance, then tokenize it into
+            // a real JS array. Storing it as a raw string was the bug that made
+            // save re-emit `multisocket_urls = "[]"` (a quoted string) which
+            // Rust rejected as "expected a sequence".
+            let buf = val;
+            let depth = (buf.match(/\[/g) || []).length - (buf.match(/\]/g) || []).length;
+            while (depth > 0 && i + 1 < lines.length) {
+                i++;
+                buf += '\n' + lines[i];
+                depth += (lines[i].match(/\[/g) || []).length - (lines[i].match(/\]/g) || []).length;
+            }
+            result[key] = parseTomlArray(buf);
+        } else if (val.startsWith('"')) {
             // String value — find closing quote
             const endQ = val.indexOf('"', 1);
             if (endQ >= 0) val = val.substring(0, endQ + 1);
@@ -1559,6 +1575,26 @@ function parseSimpleToml(text) {
         }
     }
     return result;
+}
+
+// Parse a TOML array literal (inline `["a", "b"]`, empty `[]`, or the
+// multi-line form toml::to_string_pretty produces) into a JS array. Config
+// arrays only ever hold quoted strings or bare numbers.
+function parseTomlArray(buf) {
+    const open = buf.indexOf('[');
+    const close = buf.lastIndexOf(']');
+    const inner = (open >= 0 && close > open) ? buf.slice(open + 1, close) : '';
+    const arr = [];
+    const re = /"((?:[^"\\]|\\.)*)"|(-?\d+(?:\.\d+)?)/g;
+    let m;
+    while ((m = re.exec(inner)) !== null) {
+        if (m[1] !== undefined) {
+            arr.push(m[1].replace(/\\\\/g, '\\').replace(/\\"/g, '"'));
+        } else {
+            arr.push(parseFloat(m[2]));
+        }
+    }
+    return arr;
 }
 
 function populateConfigGUI(parsed) {
@@ -1602,6 +1638,10 @@ function buildTomlFromGUI(originalToml) {
     }
 
     function tomlLine(key, val, fieldDef) {
+        if (Array.isArray(val)) {
+            const items = val.map(v => (typeof v === 'number') ? String(v) : escapeTomlString(v));
+            return key + ' = [' + items.join(', ') + ']';
+        }
         if (typeof val === 'boolean') return key + ' = ' + val;
         if (typeof val === 'number') {
             if (fieldDef && fieldDef.type === 'float') {
