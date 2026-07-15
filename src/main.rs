@@ -1682,11 +1682,19 @@ async fn main() -> Result<()> {
     // that has run before resumes an authenticated session: COFL shows no sign-in
     // link and may never re-send `loggedIn`, so waiting on it would hang startup
     // forever. Those bots skip the wait entirely and go straight to Minecraft.
+    //
+    // Also skipped entirely in finder-only mode (`websocket_url` points at our own
+    // baf-flip-finder rather than Coflnet). There is no COFL in that setup: nothing
+    // sends a sign-in link and nothing ever sends `loggedIn`, so this wait could
+    // only ever burn the full timeout while telling the user to open a link that
+    // was never printed. Own-finder flips already bypass the COFL auth gate when
+    // buying, so nothing downstream needs this either.
+    //
     // Also skipped on managed VPS instances and when console input is disabled; a
     // generous timeout means even a first-time user can never hang startup.
     {
         let is_vps = std::env::var("VPS_SECRET").ok().filter(|s| !s.is_empty()).is_some();
-        if !is_vps && config.enable_console_input && !had_valid_session
+        if !is_vps && !ws_client.is_finder() && config.enable_console_input && !had_valid_session
             && !frikadellen_baf::websocket::COFL_LOGGED_IN.load(Ordering::Relaxed)
         {
             info!("Waiting for COFL sign-in before starting Minecraft login...");
