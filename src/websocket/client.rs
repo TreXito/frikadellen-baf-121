@@ -19,12 +19,19 @@ use tracing::{debug, error, info, warn};
 /// scrolled away by) the Hypixel auth output.
 pub static COFL_LOGGED_IN: AtomicBool = AtomicBool::new(false);
 
-/// Build a TLS connector for the Coflnet modsocket that tolerates self-signed /
-/// untrusted certificates. Coflnet's regional servers (e.g. us-sky.coflnet.com)
-/// present self-signed certs that the system trust store rejects; this connector
-/// is used ONLY for the Coflnet websocket (which the bot already authenticates
-/// to), so the relaxed verification is scoped to that single endpoint. `ws://`
-/// (non-TLS) URLs ignore the connector entirely.
+/// True when a websocket URL points at Coflnet rather than the private
+/// baf-flip-finder, identified by "coflnet" in the host or a "/modsocket" path.
+/// Anything else is the finder (e.g. ws://127.0.0.1:15101), which speaks its own
+/// protocol and has no sign-in of any kind. Scheme-insensitive, so it gives the
+/// same answer before or after `normalize_ws_url`.
+pub fn is_cofl_url(url: &str) -> bool {
+    let host = url
+        .strip_prefix("wss://")
+        .or_else(|| url.strip_prefix("ws://"))
+        .unwrap_or(url);
+    host.contains("coflnet") || host.contains("/modsocket")
+}
+
 /// Normalize a websocket URL. Coflnet hosts are force-upgraded to `wss://`
 /// (their regional servers are TLS-only; old configs may still say `ws://`).
 /// NON-Coflnet endpoints — e.g. the local baf-flip-finder on
@@ -36,8 +43,7 @@ fn normalize_ws_url(url: &str) -> String {
         .strip_prefix("wss://")
         .or_else(|| url.strip_prefix("ws://"))
         .unwrap_or(url);
-    let is_cofl = host.contains("coflnet") || host.contains("/modsocket");
-    if !is_cofl && url.starts_with("ws://") {
+    if !is_cofl_url(url) && url.starts_with("ws://") {
         // Bare-authority URLs ("ws://127.0.0.1:15101") need an explicit "/":
         // tungstenite passes the empty path through and the handshake becomes
         // "GET ?player=… HTTP/1.1", which strict HTTP parsers (Node) 400.
@@ -49,6 +55,12 @@ fn normalize_ws_url(url: &str) -> String {
     format!("wss://{}", host)
 }
 
+/// Build a TLS connector for the Coflnet modsocket that tolerates self-signed /
+/// untrusted certificates. Coflnet's regional servers (e.g. us-sky.coflnet.com)
+/// present self-signed certs that the system trust store rejects; this connector
+/// is used ONLY for the Coflnet websocket (which the bot already authenticates
+/// to), so the relaxed verification is scoped to that single endpoint. `ws://`
+/// (non-TLS) URLs ignore the connector entirely.
 fn cofl_tls_connector() -> Option<Connector> {
     native_tls::TlsConnector::builder()
         .danger_accept_invalid_certs(true)
@@ -124,11 +136,10 @@ impl CoflWebSocket {
         // an older persisted config to `wss://` so the bot never tries (and fails)
         // a plaintext connection to a regional server that only speaks TLS.
         let url = normalize_ws_url(&url);
-        // Coflnet endpoints are identified the same way normalize_ws_url does:
-        // by "coflnet" in the host or a "/modsocket" path. Anything else is the
-        // private finder (e.g. ws://127.0.0.1:15101), which is the only endpoint
-        // that understands inventory-pricing messages.
-        let is_finder = !(url.contains("coflnet") || url.contains("/modsocket"));
+        // Anything that isn't Coflnet is the private finder (e.g.
+        // ws://127.0.0.1:15101), which is the only endpoint that understands
+        // inventory-pricing messages and the only one with no COFL sign-in.
+        let is_finder = !is_cofl_url(&url);
         let full_url = format!(
             "{}?player={}&version={}&SId={}",
             url, username, version, session_id
@@ -210,6 +221,15 @@ impl CoflWebSocket {
         });
 
         Ok((Self { tx, write, is_finder }, rx))
+    }
+
+    /// True when this socket points at the private baf-flip-finder rather than
+    /// Coflnet. Callers use this to skip COFL-only startup steps: the finder has
+    /// no accounts and no sign-in, so it never sends an `authmod` link and never
+    /// sends `loggedIn`. Waiting on COFL auth against a finder socket can only
+    /// ever time out.
+    pub fn is_finder(&self) -> bool {
+        self.is_finder
     }
 
     /// Format and send an authentication prompt to the user
@@ -702,6 +722,38 @@ pub fn normalize_flip_value(mut value: serde_json::Value) -> serde_json::Value {
 mod tests {
     use super::*;
     use crate::types::Flip;
+
+    #[test]
+    fn test_is_cofl_url_classifies_finder_vs_cofl() {
+        // Coflnet: the sign-in gate must still apply to these.
+        assert!(is_cofl_url("wss://sky.coflnet.com/modsocket"));
+        assert!(is_cofl_url("ws://sky.coflnet.com/modsocket"));
+        assert!(is_cofl_url("wss://us-sky.coflnet.com/modsocket"));
+
+        // Own finder: no sign-in exists, so the gate must never wait on these.
+        assert!(!is_cofl_url("ws://127.0.0.1:15101/"));
+        assert!(!is_cofl_url("ws://127.0.0.1:15101"));
+        assert!(!is_cofl_url("ws://192.168.0.250:15101/"));
+    }
+
+    #[test]
+    fn test_is_cofl_url_agrees_before_and_after_normalize() {
+        // is_finder is derived from the normalized URL; the startup gate asks the
+        // same question. Both must agree or the gate desyncs from the socket.
+        for url in [
+            "wss://sky.coflnet.com/modsocket",
+            "ws://sky.coflnet.com/modsocket",
+            "ws://127.0.0.1:15101/",
+            "ws://127.0.0.1:15101",
+        ] {
+            assert_eq!(
+                is_cofl_url(url),
+                is_cofl_url(&normalize_ws_url(url)),
+                "classification flipped across normalize for {}",
+                url
+            );
+        }
+    }
 
     #[test]
     fn test_normalize_flip_value_nested_auction() {
