@@ -2493,6 +2493,20 @@ async fn event_handler(
                     let buy_speed_ms = state.last_buy_speed_ms.write().take();
                     // Whether this buy went through bed timing (vs an instant nugget).
                     let via_bed = state.last_buy_via_bed.write().take();
+                    // Drill part-out: if enabled and this looks like a drill, strip its
+                    // installed parts (Fuel Tank / Drill Engine / Upgrade Module) before
+                    // it is listed. The spawned task re-checks the item's NBT and only
+                    // proceeds when parts are actually present, so a partless drill is a
+                    // no-op. Runs off the event loop; never blocks purchase handling.
+                    if REMOVE_DRILL_PARTS.load(Ordering::Relaxed)
+                        && item_name.to_lowercase().contains("drill")
+                    {
+                        tokio::spawn(remove_drill_parts_workflow(
+                            bot.clone(),
+                            state.clone(),
+                            item_name.clone(),
+                        ));
+                    }
                     let _ = state.event_tx.send(BotEvent::ItemPurchased { item_name, price, buy_speed_ms, via_bed });
                 }
             } else if clean_message.contains("Putting coins in escrow") {
@@ -7062,6 +7076,288 @@ fn send_raw_click(bot: &Client, window_id: u8, slot: i16) {
         }
     });
     info!("Raw-clicked slot {} in window {}", slot, window_id);
+}
+
+// ═══════════════════════════ Drill part-out ═══════════════════════════
+// Config-gated (`remove_drill_parts`, off by default) workflow that pulls the
+// installed parts out of a just-bought drill via Jotraeline Greatforge (Abiphone)
+// so the parts + stripped drill sell separately. Deliberately slow and defensive:
+// waits for every GUI to load, opens no other menus, and bails cleanly (closing
+// any open window) the instant anything is unexpected. Listing afterwards is left
+// to the normal periodic finder inventory upload.
+
+/// Set once from config at startup; read by the purchase handler in the event loop.
+pub static REMOVE_DRILL_PARTS: AtomicBool = AtomicBool::new(false);
+/// Single-flight guard so two part-outs never overlap.
+static DRILL_WORKFLOW_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Enable/disable the drill part-out workflow (called from `main` with the config value).
+pub fn set_remove_drill_parts(enabled: bool) {
+    REMOVE_DRILL_PARTS.store(enabled, Ordering::Relaxed);
+}
+
+/// Anvil ("Drill Anvil") slot map, confirmed from the SlotLogger trace: the drill
+/// goes into slot 29; the three left-column buttons remove Fuel Tank / Drill
+/// Engine / Upgrade Module (clicking one with no part attached is a harmless
+/// "does not have a … attached" chat message, so it is always safe to click all).
+const DRILL_ANVIL_INPUT_SLOT: i16 = 29;
+const DRILL_REMOVE_SLOTS: [i16; 3] = [9, 18, 27];
+
+/// True for each Hypixel drill-part slot that currently has a part installed.
+/// `ExtraAttributes` stores an installed part under `drill_part_fuel_tank` /
+/// `drill_part_engine` / `drill_part_upgrade_module`.
+fn drill_parts_installed(item_data: &azalea_inventory::ItemStackData) -> [bool; 3] {
+    use azalea_inventory::components::CustomData;
+    let Some(custom_data) = item_data.component_patch.get::<CustomData>() else {
+        return [false; 3];
+    };
+    let Ok(nbt_val) = serde_json::to_value(&custom_data.nbt) else {
+        return [false; 3];
+    };
+    let ea = nbt_val.get("ExtraAttributes");
+    let has = |k: &str| ea.and_then(|e| e.get(k)).is_some();
+    [
+        has("drill_part_fuel_tank"),
+        has("drill_part_engine"),
+        has("drill_part_upgrade_module"),
+    ]
+}
+
+/// Locate a drill WITH at least one removable part in the player inventory.
+/// Returns the player-range-relative index and the item's display name.
+fn find_drill_with_parts(bot: &Client) -> Option<(usize, String)> {
+    let menu = bot.menu();
+    let slots = menu.slots();
+    let range = menu.player_slots_range();
+    for (i, item) in slots[range.clone()].iter().enumerate() {
+        if let azalea_inventory::ItemStack::Present(data) = item {
+            let name = get_item_display_name_from_slot(item).unwrap_or_default();
+            if name.to_lowercase().contains("drill") && drill_parts_installed(data).iter().any(|&p| p) {
+                return Some((i, name));
+            }
+        }
+    }
+    None
+}
+
+/// First player-inventory item whose (lowercased) name matches `pred`.
+/// Returns the player-range-relative index and the display name.
+fn find_in_player_inv<F: Fn(&str) -> bool>(bot: &Client, pred: F) -> Option<(usize, String)> {
+    let menu = bot.menu();
+    let slots = menu.slots();
+    let range = menu.player_slots_range();
+    for (i, item) in slots[range.clone()].iter().enumerate() {
+        let name = get_item_display_name_from_slot(item).unwrap_or_default();
+        if !name.is_empty() && pred(&name.to_lowercase()) {
+            return Some((i, name));
+        }
+    }
+    None
+}
+
+/// First slot in the currently open window whose name contains `needle`.
+fn find_window_slot_named(bot: &Client, needle: &str) -> Option<i16> {
+    let menu = bot.menu();
+    let slots = menu.slots();
+    let needle = needle.to_lowercase();
+    for (i, item) in slots.iter().enumerate() {
+        let name = get_item_display_name_from_slot(item).unwrap_or_default();
+        if !name.is_empty() && name.to_lowercase().contains(&needle) {
+            return Some(i as i16);
+        }
+    }
+    None
+}
+
+/// Poll until a slot named `needle` appears in the open window, or `timeout`.
+async fn wait_for_slot_named(bot: &Client, needle: &str, timeout: std::time::Duration) -> Option<i16> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if let Some(slot) = find_window_slot_named(bot, needle) {
+            return Some(slot);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+}
+
+/// Poll until the current window's title matches `pred`, or `timeout`. Returns the window id.
+async fn wait_for_window<F: Fn(&str) -> bool>(
+    state: &BotClientState,
+    timeout: std::time::Duration,
+    pred: F,
+) -> Option<u8> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        if let (Some(id), Some(title)) =
+            (state.handlers.current_window_id(), state.handlers.current_window_title())
+        {
+            if pred(&title) {
+                return Some(id);
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return None;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    }
+}
+
+/// Shift-click (QUICK_MOVE) a slot, moves its whole stack to the other grid.
+fn send_raw_shift_click(bot: &Client, window_id: u8, slot: i16) {
+    use azalea_protocol::packets::game::s_container_click::{HashedStack, ServerboundContainerClick};
+    let packet = ServerboundContainerClick {
+        container_id: window_id as i32,
+        state_id: 0,
+        slot_num: slot,
+        button_num: 0,
+        click_type: ClickType::QuickMove,
+        changed_slots: Default::default(),
+        carried_item: HashedStack(None),
+    };
+    bot.with_raw_connection_mut(|mut raw_conn| {
+        if let Err(e) = raw_conn.write(packet) {
+            error!("raw shift-click write failed (window {} slot {}): {e}", window_id, slot);
+        }
+    });
+    info!("Raw shift-clicked slot {} in window {}", slot, window_id);
+}
+
+/// Move the player-inventory item at player-range-relative index `rel_idx` into a
+/// hotbar slot, select it, and right-click to use it (opens the Abiphone).
+async fn select_and_use_item(bot: &Client, state: &BotClientState, rel_idx: usize) {
+    let player_start = *bot.menu().player_slots_range().start();
+    let hotbar_slot: u16 = if rel_idx >= 27 {
+        // Already in the hotbar (indices 27-35 → hotbar 0-8).
+        (rel_idx - 27) as u16
+    } else {
+        // In the main inventory: pick it up and drop it into hotbar slot 0 (slot 36).
+        let inv_slot = (player_start + rel_idx) as i16;
+        click_window_slot(bot, &state.last_window_id, 0, inv_slot).await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        click_window_slot(bot, &state.last_window_id, 0, 36).await;
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        0
+    };
+    bot.write_packet(ServerboundSetCarriedItem { slot: hotbar_slot });
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    bot.write_packet(ServerboundUseItem {
+        hand: InteractionHand::MainHand,
+        seq: 0,
+        y_rot: 0.0,
+        x_rot: 0.0,
+    });
+}
+
+/// Entry point spawned from the purchase handler. Confirms the buy is a drill with
+/// parts, marks the bot busy, runs the strip, then always restores state + closes
+/// any window it left open.
+async fn remove_drill_parts_workflow(bot: Client, state: BotClientState, purchased_name: String) {
+    if DRILL_WORKFLOW_ACTIVE.swap(true, Ordering::AcqRel) {
+        debug!("[DrillParts] Already running, skipping '{}'", purchased_name);
+        return;
+    }
+    struct ActiveGuard;
+    impl Drop for ActiveGuard {
+        fn drop(&mut self) {
+            DRILL_WORKFLOW_ACTIVE.store(false, Ordering::Release);
+        }
+    }
+    let _active = ActiveGuard;
+
+    // Let the buy settle into the inventory before inspecting it.
+    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+
+    // Only act on a drill that actually has removable parts.
+    let Some((_rel_idx, drill_name)) = find_drill_with_parts(&bot) else {
+        debug!("[DrillParts] '{}' has no removable parts, nothing to do", purchased_name);
+        return;
+    };
+    info!("[DrillParts] '{}' has parts, starting part-out (intentionally slow)", drill_name);
+
+    // Mark busy so the listing path doesn't grab the assembled drill mid-strip.
+    let prev_state = *state.bot_state.read();
+    *state.bot_state.write() = BotState::Purchasing;
+
+    let result = drill_parts_inner(&bot, &state, &drill_name).await;
+
+    // Always clean up: close any window we left open, then restore the prior state.
+    if let Some(wid) = state.handlers.current_window_id() {
+        send_raw_close(&bot, wid, &state.handlers);
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+    *state.bot_state.write() = prev_state;
+
+    match result {
+        Ok(()) => info!(
+            "[DrillParts] '{}' parted out; parts + stripped drill re-list on the next inventory upload",
+            drill_name
+        ),
+        Err(e) => warn!("[DrillParts] '{}' aborted safely: {}", drill_name, e),
+    }
+}
+
+/// The sequential GUI steps. Returns Err (triggering cleanup) on anything unexpected.
+async fn drill_parts_inner(
+    bot: &Client,
+    state: &BotClientState,
+    drill_name: &str,
+) -> std::result::Result<(), String> {
+    // Start clean: close any stray window and let it settle.
+    if let Some(wid) = state.handlers.current_window_id() {
+        send_raw_close(bot, wid, &state.handlers);
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    }
+
+    // 1. Abiphone → hotbar → right-click to open the contacts screen.
+    let (abi_idx, abi_name) = find_in_player_inv(bot, |n| n.contains("abiphone"))
+        .ok_or_else(|| "no abiphone in inventory".to_string())?;
+    info!("[DrillParts] Opening {}", abi_name);
+    select_and_use_item(bot, state, abi_idx).await;
+
+    // 2. Wait for the contacts screen and find Jotraeline Greatforge by name.
+    let jot_slot = wait_for_slot_named(bot, "jotraeline greatforge", std::time::Duration::from_secs(6))
+        .await
+        .ok_or_else(|| "Abiphone contacts did not show Jotraeline Greatforge".to_string())?;
+    let contacts_wid = state
+        .handlers
+        .current_window_id()
+        .ok_or_else(|| "contacts window closed unexpectedly".to_string())?;
+    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+    info!("[DrillParts] Calling Jotraeline Greatforge (slot {})", jot_slot);
+    click_window_slot(bot, &state.last_window_id, contacts_wid, jot_slot).await;
+
+    // 3. Wait for the call to connect and the Drill Anvil to open (it rings a few seconds).
+    let anvil_wid = wait_for_window(state, std::time::Duration::from_secs(12), |t| {
+        t.to_lowercase().contains("drill anvil")
+    })
+    .await
+    .ok_or_else(|| "Drill Anvil did not open".to_string())?;
+    tokio::time::sleep(std::time::Duration::from_millis(1500)).await; // let slot data load
+
+    // 4. Put the drill into the anvil's input slot (29).
+    let drill_slot = find_window_slot_named(bot, drill_name)
+        .ok_or_else(|| "drill not visible in the anvil window".to_string())?;
+    info!("[DrillParts] Inserting drill from slot {} into input {}", drill_slot, DRILL_ANVIL_INPUT_SLOT);
+    click_window_slot(bot, &state.last_window_id, anvil_wid, drill_slot).await; // pick up
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+    click_window_slot(bot, &state.last_window_id, anvil_wid, DRILL_ANVIL_INPUT_SLOT).await; // place
+    tokio::time::sleep(std::time::Duration::from_millis(1300)).await; // let the buttons populate
+
+    // 5. Remove each part (harmless chat error if a part isn't present).
+    for slot in DRILL_REMOVE_SLOTS {
+        click_window_slot(bot, &state.last_window_id, anvil_wid, slot).await;
+        tokio::time::sleep(std::time::Duration::from_millis(900)).await;
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+
+    // 6. Take the stripped drill back out (shift-click the input slot).
+    send_raw_shift_click(bot, anvil_wid, DRILL_ANVIL_INPUT_SLOT);
+    tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
+
+    Ok(())
 }
 
 /// Send a container close packet directly to the TCP socket via
