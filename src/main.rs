@@ -1440,10 +1440,16 @@ async fn main() -> Result<()> {
                 let Some(purse) = bc.get_purse() else { continue };
                 let (locked, auctions) = bc.active_listing_value_and_count();
                 let inv_free = bc.empty_slot_count();
+                // Backlog signals for the finder's congestion throttle: items sitting
+                // in the 36-slot player inventory (bought but not yet listed) and
+                // whether the AH is at its per-account slot cap. Together they mean
+                // the AH can't drain what we're buying (see finder client_ineligibility).
+                let inv_used = 36u8.saturating_sub(inv_free);
+                let auction_at_limit = bc.is_auction_at_limit();
                 let worth = purse.saturating_add(locked);
                 let json = format!(
-                    "{{\"type\":\"purse\",\"purse\":{},\"locked\":{},\"worth\":{},\"invFree\":{},\"auctions\":{}}}",
-                    purse, locked, worth, inv_free, auctions
+                    "{{\"type\":\"purse\",\"purse\":{},\"locked\":{},\"worth\":{},\"invFree\":{},\"auctions\":{},\"invUsed\":{},\"auctionAtLimit\":{}}}",
+                    purse, locked, worth, inv_free, auctions, inv_used, auction_at_limit
                 );
                 if let Ok(mut g) = status_holder.lock() {
                     *g = Some(json);
