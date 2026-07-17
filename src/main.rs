@@ -200,6 +200,19 @@ fn is_ban_disconnect(reason: &str) -> bool {
         || lower.contains("block id:")
 }
 
+/// Ban / security notice delivered as a CHAT line rather than a disconnect.
+/// Deliberately STRICTER than `is_ban_disconnect`: only tokens that appear in
+/// Hypixel's own ban/security notices (a ban/block id, a security-block, or the
+/// "account has been blocked" line), never a bare "banned", so a normal player's
+/// chat message cannot trigger a false process kill.
+fn is_ban_chat(msg: &str) -> bool {
+    let lower = msg.to_ascii_lowercase();
+    lower.contains("ban id:")
+        || lower.contains("block id:")
+        || lower.contains("security-block")
+        || lower.contains("account has been blocked")
+}
+
 /// Check whether the web GUI port is allowed through UFW.
 /// Prints a prominent warning when UFW is active but the port is not listed.
 /// No-ops silently if UFW is not installed or the check fails.
@@ -1501,21 +1514,19 @@ async fn main() -> Result<()> {
         let tracker = Arc::new(frikadellen_baf::profit::ProfitTracker::new());
         let saved = load_profit_stats(&profit_path);
         if let Some(entry) = saved.get(&ingame_name) {
-            // Same rule as session time: only a QUICK restart resumes the
-            // totals. A long pause starts the session profit at 0 — this was
-            // previously unconditional, so profit never reset at all.
-            let gap = unix_now().saturating_sub(entry.saved_at);
-            if gap <= MAX_SESSION_GAP_SECS {
-                if entry.ah_total != 0 {
-                    tracker.set_ah_total(entry.ah_total);
-                    info!("[Profit] Restored AH profit from disk: {} coins", entry.ah_total);
-                }
-                if entry.bz_total != 0 {
-                    tracker.set_bz_total(entry.bz_total);
-                    info!("[Profit] Restored BZ profit from disk: {} coins", entry.bz_total);
-                }
-            } else {
-                info!("[Profit] Session gap {}s (> {}s) — profit starts fresh at 0", gap, MAX_SESSION_GAP_SECS);
+            // Realized profit is CUMULATIVE and must survive rest breaks and long
+            // pauses (unlike session time, which intentionally resets after a gap).
+            // Restore it unconditionally. Gating it on the 5-minute session-gap
+            // rule reset profit to 0 after every rest break longer than 5 min,
+            // which is what users running humanization breaks saw as "profit
+            // resets every ~30 min" (they noticed it at each 30-min profit summary).
+            if entry.ah_total != 0 {
+                tracker.set_ah_total(entry.ah_total);
+                info!("[Profit] Restored AH profit from disk: {} coins", entry.ah_total);
+            }
+            if entry.bz_total != 0 {
+                tracker.set_bz_total(entry.bz_total);
+                info!("[Profit] Restored BZ profit from disk: {} coins", entry.bz_total);
             }
         }
         tracker
@@ -1847,6 +1858,24 @@ async fn main() -> Result<()> {
                     // Parse Coflnet profit response:
                     // "According to our data <ign> made <amount> in the last <days> days across <N> auctions"
                     let clean = frikadellen_baf::utils::remove_minecraft_colors(&msg);
+
+                    // Ban / security notice that arrived as a chat line (not a
+                    // disconnect). Terminate the process exactly like the
+                    // Disconnected ban path so a banned account stops immediately
+                    // instead of idling until the next reconnect or manual kill.
+                    if is_ban_chat(&clean) {
+                        error!("Ban detected in chat: {} (sending webhook and terminating process)", clean);
+                        if let Some(webhook_url) = config_for_events.active_webhook_url() {
+                            frikadellen_baf::webhook::send_webhook_banned(
+                                &ingame_name_for_events,
+                                &clean,
+                                config_for_events.active_discord_id(),
+                                webhook_url,
+                            ).await;
+                        }
+                        frikadellen_baf::webhook::send_webhook_banned_public(&clean).await;
+                        std::process::exit(1);
+                    }
 
                     // SkyBlock maintenance / downtime. When Hypixel is restarting
                     // SkyBlock, a join attempt is answered with a "maintenance"
