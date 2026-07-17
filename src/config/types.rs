@@ -145,6 +145,17 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub enable_ah_flips: bool,
 
+    /// When a purchased drill has parts installed (Fuel Tank / Drill Engine /
+    /// Upgrade Module), call Jotraeline Greatforge via the Abiphone and pull the
+    /// parts out before listing, so the parts and the stripped drill sell
+    /// separately (often worth more than the assembled drill). Off by default.
+    /// The workflow is deliberately slow and safe, waits for every GUI to load,
+    /// opens no other menus, and only acts when the bought item is a drill that
+    /// actually has removable parts. In finder-primary mode the periodic inventory
+    /// upload re-lists the parts + stripped drill automatically afterwards.
+    #[serde(default)]
+    pub remove_drill_parts: bool,
+
     /// Enable fast-buy skip-click on predicted Confirm Purchase window.
     /// When true, the bot pre-clicks slot 11 (confirm) in the same TCP burst as
     /// the buy-click, saving one round-trip to the server.
@@ -471,6 +482,7 @@ impl Default for Config {
             // Flip behaviour toggles
             enable_bazaar_flips: true,
             enable_ah_flips: true,
+            remove_drill_parts: false,
             skip: false,
             bedtiming: true,
             // Timing / delays

@@ -1020,6 +1020,8 @@ async fn main() -> Result<()> {
     info!("Configuration loaded for player: {} (account {}/{})", ingame_name, current_account_index + 1, ingame_names.len());
     info!("AH Flips: {}", if config.enable_ah_flips { "ENABLED" } else { "DISABLED" });
     info!("Bazaar Flips: {}", if config.enable_bazaar_flips { "ENABLED" } else { "DISABLED" });
+    info!("Remove Drill Parts: {}", if config.remove_drill_parts { "ENABLED" } else { "DISABLED" });
+    frikadellen_baf::bot::set_remove_drill_parts(config.remove_drill_parts);
     info!("Web GUI Port: {}", config.web_gui_port);
 
     // Check whether the web GUI port is allowed through UFW (Linux firewall).
