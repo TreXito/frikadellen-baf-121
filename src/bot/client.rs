@@ -1031,6 +1031,17 @@ impl BotClient {
         self.startup_in_progress.load(Ordering::Relaxed)
     }
 
+    /// Force-clear the startup-in-progress flag. This flag gates ALL flips (both
+    /// AH and bazaar); every code path that sets it also clears it, but that
+    /// guarantee relies on the detached startup task always running to
+    /// completion. If that task is cancelled or stranded (e.g. an in-process
+    /// reconnect that does not re-emit `Login`), the flag stays `true` and the
+    /// bot silently stops buying forever. The main-loop stall watchdog calls
+    /// this to recover.
+    pub fn clear_startup_in_progress(&self) {
+        self.startup_in_progress.store(false, Ordering::Relaxed);
+    }
+
     /// Set the shared command queue so the startup workflow can enqueue commands.
     /// Must be called before `connect()`.
     pub fn set_command_queue(&self, queue: CommandQueue) {

@@ -90,6 +90,15 @@ const STALL_RECOVERY_GRACE_SECS: u64 = 90;
 /// the whole process for a clean session.
 const STALL_MAX_ATTEMPTS: u32 = 3;
 
+/// A legitimate startup workflow (cookie + order management + claim sold/bought)
+/// finishes within a few minutes. `startup_in_progress` gates ALL flips, so if
+/// it stays set far longer than any real startup could take, treat it as
+/// stranded and force-clear it. Well above the worst-case real startup so a slow
+/// (but genuine) startup is never interrupted.
+const STARTUP_STUCK_MAX_SECS: u64 = 8 * 60; // 8 minutes
+/// How often the startup-flag self-heal watchdog re-checks.
+const STARTUP_STUCK_CHECK_INTERVAL_SECS: u64 = 60;
+
 /// Epoch-millis until which SkyBlock is considered under maintenance / down.
 /// Set from chat when a maintenance line appears; read by the island and stall
 /// guards. 0 = not in maintenance.
@@ -132,6 +141,116 @@ fn mark_activity() {
 fn secs_since_activity() -> i64 {
     let last = LAST_ACTIVITY_MS.load(Ordering::Acquire);
     if last == 0 { 0 } else { (now_ms() - last) / 1000 }
+}
+
+// ── Flip-drop visibility ────────────────────────────────────────────────────
+// When flips arrive from COFL/the finder but every one is rejected by the same
+// gate (not authenticated, startup not finished, inventory full, intake paused,
+// …), the bot looks "afk": it is connected and receiving flips, yet buys
+// nothing — with no INFO-level reason. Each reject used to be a bare `debug!`
+// that is invisible at the default log level, so a user (or maintainer reading
+// shared logs) could not tell WHY buying stopped. These helpers surface the
+// active drop reason at WARN once on the transition, then as a throttled rollup
+// while it persists, and log a "resumed" note the moment buying recovers.
+
+/// The gate currently dropping every incoming flip, with counters for the rollup.
+struct FlipDropState {
+    /// Stable, human-readable label (no per-item text) so repeats collapse.
+    reason: &'static str,
+    /// How many flips have been dropped for this reason since it started.
+    count: u64,
+    /// When this reason first started dropping flips.
+    since: Instant,
+    /// When we last emitted a WARN for this reason (drives the throttle).
+    last_logged: Instant,
+}
+
+static FLIP_DROP: Mutex<Option<FlipDropState>> = Mutex::new(None);
+
+/// How often a persistent drop reason is re-logged while it keeps firing.
+const FLIP_DROP_LOG_INTERVAL_SECS: u64 = 60;
+
+/// What to do with a WARN when a flip is dropped, given whether the cause is the
+/// same as the one already being tracked and how long since we last logged it.
+/// Extracted as a pure function so the throttle logic is unit-testable.
+#[derive(Debug, PartialEq, Eq)]
+enum FlipDropLog {
+    /// New (or changed) cause — announce it immediately.
+    Announce,
+    /// Same cause, throttle interval elapsed — emit a rolling summary.
+    Rollup,
+    /// Same cause, still within the throttle window — stay quiet.
+    Suppress,
+}
+
+fn flip_drop_log_action(same_reason: bool, secs_since_last_log: u64) -> FlipDropLog {
+    if !same_reason {
+        FlipDropLog::Announce
+    } else if secs_since_last_log >= FLIP_DROP_LOG_INTERVAL_SECS {
+        FlipDropLog::Rollup
+    } else {
+        FlipDropLog::Suppress
+    }
+}
+
+/// Record that an incoming flip was dropped by a gate. `reason` must be a stable
+/// label (no per-item text) so repeats of the same cause collapse into one
+/// rolling warning; `sample` is an example item name only for log context.
+fn note_flip_drop(reason: &'static str, sample: &str) {
+    let mut guard = FLIP_DROP.lock().unwrap_or_else(|p| p.into_inner());
+    let same_reason = guard.as_ref().map(|s| s.reason) == Some(reason);
+    let secs_since_last_log = guard
+        .as_ref()
+        .map(|s| s.last_logged.elapsed().as_secs())
+        .unwrap_or(u64::MAX);
+
+    match flip_drop_log_action(same_reason, secs_since_last_log) {
+        FlipDropLog::Suppress => {
+            // Same cause, still within the throttle window: just count it.
+            if let Some(state) = guard.as_mut() {
+                state.count += 1;
+            }
+        }
+        FlipDropLog::Rollup => {
+            // Same cause, a full interval later: emit a rolling summary.
+            if let Some(state) = guard.as_mut() {
+                state.count += 1;
+                warn!(
+                    "[FlipDrop] Still not buying: {} — {} flip(s) dropped over {}s (e.g. {})",
+                    reason,
+                    state.count,
+                    state.since.elapsed().as_secs(),
+                    frikadellen_baf::utils::remove_minecraft_colors(sample),
+                );
+                state.last_logged = Instant::now();
+            }
+        }
+        FlipDropLog::Announce => {
+            // Reason changed, or this is the first drop: announce the new cause.
+            warn!(
+                "[FlipDrop] Not buying flips: {} (e.g. {})",
+                reason,
+                frikadellen_baf::utils::remove_minecraft_colors(sample),
+            );
+            let now = Instant::now();
+            *guard = Some(FlipDropState { reason, count: 1, since: now, last_logged: now });
+        }
+    }
+}
+
+/// Record that a flip passed all gates and is being acted on. Clears any active
+/// drop state and, when flips had been stalled, logs a recovery line so the log
+/// tells a clean "stopped → resumed" story.
+fn note_flip_passed() {
+    let mut guard = FLIP_DROP.lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(state) = guard.take() {
+        info!(
+            "[FlipDrop] Buying resumed — cleared '{}' after {} dropped flip(s) over {}s",
+            state.reason,
+            state.count,
+            state.since.elapsed().as_secs(),
+        );
+    }
 }
 
 /// Best-effort current SkyBlock area from the scoreboard (the line carrying the
@@ -2901,7 +3020,7 @@ async fn main() -> Result<()> {
 
                     // Skip if the web panel's Disconnect button paused intake.
                     if flip_intake_paused_ws.load(Ordering::Relaxed) {
-                        debug!("Skipping AH flip — intake paused (Disconnect): {}", flip.item_name);
+                        note_flip_drop("intake paused (web panel Disconnect)", &flip.item_name);
                         continue;
                     }
 
@@ -2910,7 +3029,7 @@ async fn main() -> Result<()> {
                     // finder-only mode (no COFL license/auth), so they bypass this gate.
                     let from_own_finder = flip.finder.as_deref() == Some("BAF_FINDER");
                     if !from_own_finder && !cofl_authenticated_ws.load(Ordering::Relaxed) {
-                        debug!("Skipping flip — Coflnet not yet authenticated: {}", flip.item_name);
+                        note_flip_drop("Coflnet not authenticated (sign in to COFL)", &flip.item_name);
                         continue;
                     }
 
@@ -2918,7 +3037,7 @@ async fn main() -> Result<()> {
                     // state can briefly be Idle between queued startup commands,
                     // so checking is_startup_in_progress() covers that gap.
                     if bot_client_for_ws.is_startup_in_progress() {
-                        debug!("Skipping AH flip during startup: {}", flip.item_name);
+                        note_flip_drop("startup workflow in progress", &flip.item_name);
                         continue;
                     }
 
@@ -2931,13 +3050,13 @@ async fn main() -> Result<()> {
                     // Only hard-block during Startup which indicates the bot
                     // is not yet ready to interact with Hypixel at all.
                     if bot_client_for_ws.state() == frikadellen_baf::types::BotState::Startup {
-                        debug!("Skipping flip — bot in Startup state: {}", flip.item_name);
+                        note_flip_drop("bot in Startup state", &flip.item_name);
                         continue;
                     }
 
                     // Skip AH flips when inventory is full — selling mode
                     if bot_client_for_ws.is_inventory_full() {
-                        debug!("Skipping AH flip — inventory full (selling mode): {}", flip.item_name);
+                        note_flip_drop("inventory full (selling mode)", &flip.item_name);
                         continue;
                     }
 
@@ -2962,6 +3081,10 @@ async fn main() -> Result<()> {
                         }
                     }
 
+                    // Flip cleared every gate — clear any active drop diagnostic so
+                    // a prior stall is logged as resolved.
+                    note_flip_passed();
+
                     // Queue the flip command
                     // Buy-speed start time is now set in execute_command when
                     // /viewauction is sent, so the measurement covers the
@@ -2980,13 +3103,13 @@ async fn main() -> Result<()> {
 
                     // Skip if the web panel's Disconnect button paused intake.
                     if flip_intake_paused_ws.load(Ordering::Relaxed) {
-                        debug!("Skipping bazaar flip — intake paused (Disconnect): {}", bazaar_flip.item_name);
+                        note_flip_drop("intake paused (web panel Disconnect)", &bazaar_flip.item_name);
                         continue;
                     }
 
                     // Block flips until Coflnet auth is confirmed
                     if !cofl_authenticated_ws.load(Ordering::Relaxed) {
-                        debug!("Skipping bazaar flip — Coflnet not yet authenticated: {}", bazaar_flip.item_name);
+                        note_flip_drop("Coflnet not authenticated (sign in to COFL)", &bazaar_flip.item_name);
                         continue;
                     }
 
@@ -2997,7 +3120,7 @@ async fn main() -> Result<()> {
                     if matches!(bot_state, frikadellen_baf::types::BotState::Startup)
                         || bot_client_for_ws.is_startup_in_progress()
                     {
-                        debug!("Skipping bazaar flip during startup ({:?}): {}", bot_state, bazaar_flip.item_name);
+                        note_flip_drop("startup workflow in progress", &bazaar_flip.item_name);
                         continue;
                     }
 
@@ -5082,6 +5205,43 @@ async fn main() -> Result<()> {
         });
     }
 
+    // ── Startup-flag self-heal ──────────────────────────────────────────────
+    // `startup_in_progress` gates ALL flips (AH + bazaar). Every path that sets
+    // it also clears it, but that relies on the detached startup task running to
+    // completion. If that task is cancelled or stranded (e.g. an in-process
+    // reconnect that never re-emits `Login`), the flag stays true and the bot
+    // silently stops buying — while the game keeps opening windows, so the
+    // heartbeat stall guard above never fires. Force-clear a flag that has been
+    // set far longer than any real startup could take so flips resume.
+    {
+        let bot_client_startup_heal = bot_client.clone();
+        let chat_tx_startup_heal = chat_tx.clone();
+        tokio::spawn(async move {
+            let mut stuck_since: Option<Instant> = None;
+            loop {
+                sleep(Duration::from_secs(STARTUP_STUCK_CHECK_INTERVAL_SECS)).await;
+                if !bot_client_startup_heal.is_startup_in_progress() {
+                    // Not in startup — reset the timer.
+                    stuck_since = None;
+                    continue;
+                }
+                // In startup: start (or keep) the stopwatch and check the ceiling.
+                let held = stuck_since.get_or_insert_with(Instant::now).elapsed().as_secs();
+                if held >= STARTUP_STUCK_MAX_SECS {
+                    warn!(
+                        "[StartupHeal] startup_in_progress stuck for {}m (all flips blocked) — force-clearing so buying resumes",
+                        held / 60
+                    );
+                    bot_client_startup_heal.clear_startup_in_progress();
+                    let baf_msg = "§f[§4BAF§f]: §eRecovered a stuck startup state — flip buying re-enabled".to_string();
+                    print_mc_chat(&baf_msg);
+                    let _ = chat_tx_startup_heal.send(baf_msg);
+                    stuck_since = None;
+                }
+            }
+        });
+    }
+
     // Automatic account switching timer.
     // When multiple accounts are configured and `multi_switch_time` is set, switch to the
     // next account after the specified number of hours by persisting the next account index
@@ -5526,7 +5686,7 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_ban_disconnect, parse_cofl_profit_response, parse_cofl_bz_h_total_profit, parse_short_number, parse_bz_list_flip_detail, should_drop_bazaar_command_during_ah_pause, should_enqueue_periodic_auction_claim, parse_island_visitor, parse_name_mention, is_direct_address, current_skyblock_area, note_maintenance, skyblock_in_maintenance, mark_activity, secs_since_activity};
+    use super::{is_ban_disconnect, parse_cofl_profit_response, parse_cofl_bz_h_total_profit, parse_short_number, parse_bz_list_flip_detail, should_drop_bazaar_command_during_ah_pause, should_enqueue_periodic_auction_claim, parse_island_visitor, parse_name_mention, is_direct_address, current_skyblock_area, note_maintenance, skyblock_in_maintenance, mark_activity, secs_since_activity, flip_drop_log_action, FlipDropLog, FLIP_DROP_LOG_INTERVAL_SECS};
     use frikadellen_baf::types::{BotState, CommandType};
 
     #[test]
@@ -5783,5 +5943,28 @@ mod tests {
     #[test]
     fn parse_cofl_bz_h_no_match() {
         assert_eq!(parse_cofl_bz_h_total_profit("Some random message"), None);
+    }
+
+    #[test]
+    fn flip_drop_throttle_behaviour() {
+        // First drop of a cause (nothing tracked yet) → announce.
+        assert_eq!(flip_drop_log_action(false, u64::MAX), FlipDropLog::Announce);
+        // A different cause than the tracked one → announce the new cause.
+        assert_eq!(flip_drop_log_action(false, 0), FlipDropLog::Announce);
+        // Same cause, still inside the throttle window → stay quiet.
+        assert_eq!(flip_drop_log_action(true, 0), FlipDropLog::Suppress);
+        assert_eq!(
+            flip_drop_log_action(true, FLIP_DROP_LOG_INTERVAL_SECS - 1),
+            FlipDropLog::Suppress
+        );
+        // Same cause, a full interval later → emit the rolling summary.
+        assert_eq!(
+            flip_drop_log_action(true, FLIP_DROP_LOG_INTERVAL_SECS),
+            FlipDropLog::Rollup
+        );
+        assert_eq!(
+            flip_drop_log_action(true, FLIP_DROP_LOG_INTERVAL_SECS + 100),
+            FlipDropLog::Rollup
+        );
     }
 }
