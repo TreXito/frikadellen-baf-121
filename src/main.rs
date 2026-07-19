@@ -691,8 +691,9 @@ struct ProfitStatsEntry {
     /// Cumulative Bazaar profit in coins.
     bz_total: i64,
     /// Unix seconds when this entry was last saved — profit follows the same
-    /// session rule as uptime: a quick restart resumes it, a long pause (>
-    /// MAX_SESSION_GAP_SECS) starts a fresh session at 0.
+    /// session rule as uptime: a quick restart (< MAX_SESSION_GAP_SECS) or a
+    /// humanization rest break of any length resumes it, any other gap starts a
+    /// fresh session at 0.
     #[serde(default)]
     saved_at: u64,
 }
@@ -803,6 +804,21 @@ fn pending_rest_break_secs(ign: &str) -> Option<u64> {
     let until = v.get("until").and_then(|x| x.as_u64())?;
     let now = unix_now();
     (until > now).then(|| until - now)
+}
+
+/// True when a rest-break marker exists for this account, i.e. the previous
+/// process exited to take a humanization break rather than being stopped by the
+/// user. Unlike `pending_rest_break_secs` this ignores whether the break window
+/// has already elapsed — it answers "was this restart our own break?", which is
+/// what decides whether uptime and profit carry over across the gap.
+fn resumed_from_rest_break(ign: &str) -> bool {
+    let Ok(contents) = std::fs::read_to_string(rest_break_marker_path()) else {
+        return false;
+    };
+    serde_json::from_str::<serde_json::Value>(&contents)
+        .ok()
+        .and_then(|v| v.get("ign").and_then(|x| x.as_str()).map(|s| s == ign))
+        .unwrap_or(false)
 }
 
 /// Delete the rest-break marker (break finished or no longer applicable).
@@ -991,12 +1007,17 @@ async fn main() -> Result<()> {
         .ok()
         .and_then(|p| p.parent().map(|d| d.join("profit_stats.json")))
         .unwrap_or_else(|| std::path::PathBuf::from("profit_stats.json"));
+    // Did the previous process exit to take a humanization rest break? Those
+    // gaps are the SAME session deliberately paused, so uptime and profit both
+    // survive them however long they are. Read before `clear_rest_break_marker`
+    // below deletes the marker.
+    let after_rest_break = resumed_from_rest_break(&ingame_name);
     let previous_session_secs: u64 = {
         let times = load_session_times(&session_times_path);
         if let Some(entry) = times.get(&ingame_name) {
             let now = unix_now();
             let gap = now.saturating_sub(entry.saved_at);
-            if gap <= MAX_SESSION_GAP_SECS {
+            if gap <= MAX_SESSION_GAP_SECS || after_rest_break {
                 entry.secs
             } else {
                 info!("Session gap for {} is {}s (>{} max) — starting fresh session",
@@ -1513,13 +1534,34 @@ async fn main() -> Result<()> {
     let profit_tracker = {
         let tracker = Arc::new(frikadellen_baf::profit::ProfitTracker::new());
         let saved = load_profit_stats(&profit_path);
-        if let Some(entry) = saved.get(&ingame_name) {
-            // Realized profit is CUMULATIVE and must survive rest breaks and long
-            // pauses (unlike session time, which intentionally resets after a gap).
-            // Restore it unconditionally. Gating it on the 5-minute session-gap
-            // rule reset profit to 0 after every rest break longer than 5 min,
-            // which is what users running humanization breaks saw as "profit
-            // resets every ~30 min" (they noticed it at each 30-min profit summary).
+        // Profit is a SESSION total and must move in lockstep with uptime —
+        // every "profit per hour" figure divides one by the other, so carrying
+        // profit across a restart that zeroes uptime reports a wildly inflated
+        // rate. Same rule as uptime: carry across a quick restart (crash, manual
+        // relaunch) or a humanization rest break of any length; start at 0 on a
+        // genuine cold start. Restoring unconditionally (the previous fix for
+        // "profit resets every ~30 min") over-corrected into profit that never
+        // resets at all. `saved_at == 0` is a pre-`saved_at` file: carry it
+        // rather than wipe totals on upgrade.
+        let carry_profit = saved
+            .get(&ingame_name)
+            .map(|e| {
+                e.saved_at == 0
+                    || after_rest_break
+                    || unix_now().saturating_sub(e.saved_at) <= MAX_SESSION_GAP_SECS
+            })
+            .unwrap_or(false);
+        if !carry_profit {
+            if let Some(e) = saved.get(&ingame_name) {
+                if e.ah_total != 0 || e.bz_total != 0 {
+                    info!(
+                        "[Profit] New session for {} — starting profit at 0 (discarded {} AH / {} BZ from the previous session)",
+                        ingame_name, e.ah_total, e.bz_total
+                    );
+                }
+            }
+        }
+        if let Some(entry) = saved.get(&ingame_name).filter(|_| carry_profit) {
             if entry.ah_total != 0 {
                 tracker.set_ah_total(entry.ah_total);
                 info!("[Profit] Restored AH profit from disk: {} coins", entry.ah_total);
@@ -1717,7 +1759,20 @@ async fn main() -> Result<()> {
             && !frikadellen_baf::websocket::COFL_LOGGED_IN.load(Ordering::Relaxed)
         {
             info!("Waiting for COFL sign-in before starting Minecraft login...");
-            let baf_msg = "§f[§4BAF§f]: §eSign into COFL first (link above). Minecraft login starts once COFL is authenticated.".to_string();
+            // COFL pushes the authmod link only for a session id it considers
+            // unauthenticated; on every other path nothing is ever printed and the
+            // old "link above" wording pointed at empty terminal. `conId` in that
+            // link IS the `SId` we generated and sent on connect, so build and show
+            // it ourselves whenever COFL hasn't already shown one.
+            let baf_msg = if frikadellen_baf::websocket::COFL_AUTH_LINK_SHOWN.load(Ordering::Relaxed) {
+                "§f[§4BAF§f]: §eSign into COFL first (link above). Minecraft login starts once COFL is authenticated.".to_string()
+            } else {
+                format!(
+                    "§f[§4BAF§f]: §eSign into COFL first — open: §f{}\n\
+                     §f[§4BAF§f]: §eMinecraft login starts once COFL is authenticated.",
+                    frikadellen_baf::websocket::cofl_auth_url(&session_id)
+                )
+            };
             print_mc_chat(&baf_msg);
             let _ = chat_tx.send(baf_msg);
 
@@ -1734,7 +1789,10 @@ async fn main() -> Result<()> {
                 }
                 tokio::time::sleep(Duration::from_millis(500)).await;
                 if last_reminder.elapsed() >= Duration::from_secs(20) {
-                    let m = "§f[§4BAF§f]: §eStill waiting for COFL sign-in — open the link above and log in.".to_string();
+                    let m = format!(
+                        "§f[§4BAF§f]: §eStill waiting for COFL sign-in — open §f{}§e and log in.",
+                        frikadellen_baf::websocket::cofl_auth_url(&session_id)
+                    );
                     print_mc_chat(&m);
                     let _ = chat_tx.send(m);
                     last_reminder = Instant::now();
