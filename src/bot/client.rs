@@ -40,6 +40,47 @@ const ISLAND_TELEPORT_DELAY_SECS: u64 = 2;
 /// Wait time for island teleport to complete
 const TELEPORT_COMPLETION_WAIT_SECS: u64 = 3;
 
+/// Slot of the "Visit player island" ender-eye in the `/visit <player>` GUI.
+/// Confirmed from a SlotLogger trace: `Slot: 11 | Item: Visit player island`.
+const VISIT_ISLAND_SLOT: i16 = 11;
+
+/// How long to wait for the `/visit` GUI to open before clicking slot 11.
+const VISIT_GUI_OPEN_WAIT_MS: u64 = 1500;
+
+/// Send the bot to its "home" island. When `visitfriend` is active this is the
+/// configured friend's island — `/visit <friend>` then a click on the
+/// "Visit player island" ender-eye (slot 11). Otherwise it is the bot's own
+/// island via `/is`. Returns once the navigation input has been sent; the caller
+/// waits for the teleport to complete. A friend that has guest visits disabled
+/// answers the slot-11 click with a chat line that `main.rs` turns into a
+/// session fallback to `/is` (see `crate::visitfriend`).
+async fn go_to_island(bot: &Client, last_window_id: &Arc<RwLock<u8>>) {
+    match crate::visitfriend::active_friend() {
+        Some(friend) => {
+            info!("[VisitFriend] Heading to {}'s island via /visit + slot {}", friend, VISIT_ISLAND_SLOT);
+            crate::visitfriend::note_attempt();
+            // Clear the window id first so a slow/failed `/visit` (no GUI) is
+            // detected reliably below instead of clicking into a stale window.
+            *last_window_id.write() = 0;
+            send_chat_command(bot, &format!("/visit {}", friend));
+            // Wait for the visit GUI to open, then click the ender-eye. The GUI
+            // is a normal container, so `last_window_id` is updated to its id by
+            // the OpenScreen handler by the time this fires.
+            tokio::time::sleep(tokio::time::Duration::from_millis(VISIT_GUI_OPEN_WAIT_MS)).await;
+            let wid = *last_window_id.read();
+            if wid > 0 {
+                click_window_slot(bot, last_window_id, wid, VISIT_ISLAND_SLOT).await;
+            } else {
+                warn!("[VisitFriend] Visit GUI never opened — falling back to /is this time");
+                send_chat_command(bot, "/is");
+            }
+        }
+        None => {
+            send_chat_command(bot, "/is");
+        }
+    }
+}
+
 /// Timeout for waiting for SkyBlock join confirmation (seconds)
 const SKYBLOCK_JOIN_TIMEOUT_SECS: u64 = 15;
 
@@ -2398,6 +2439,7 @@ async fn event_handler(
                 let command_queue_wd = state.command_queue.clone();
                 let startup_in_progress_wd = state.startup_in_progress.clone();
                 let enable_bazaar_flips_wd = state.enable_bazaar_flips.clone();
+                let last_window_id_wd = state.last_window_id.clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
                     let already_done = *teleported_wd.read();
@@ -2409,7 +2451,9 @@ async fn event_handler(
                         send_chat_command(&bot_wd, "/play sb");
                         // Wait for SkyBlock to load (5s) + island teleport delay combined
                         tokio::time::sleep(tokio::time::Duration::from_secs(5 + ISLAND_TELEPORT_DELAY_SECS)).await;
-                        send_chat_command(&bot_wd, "/is");
+                        // Go home: friend's island via /visit + slot 11 when
+                        // visitfriend is active, else /is.
+                        go_to_island(&bot_wd, &last_window_id_wd).await;
                         tokio::time::sleep(tokio::time::Duration::from_secs(TELEPORT_COMPLETION_WAIT_SECS)).await;
                         run_startup_workflow(bot_wd, bot_state_wd, event_tx_wd, manage_orders_cancelled_wd, auto_cookie_wd, command_queue_wd, startup_in_progress_wd, enable_bazaar_flips_wd).await;
                     }
@@ -2946,10 +2990,13 @@ async fn event_handler(
                         let command_queue_startup = state.command_queue.clone();
                         let startup_in_progress_startup = state.startup_in_progress.clone();
                         let enable_bazaar_flips_startup = state.enable_bazaar_flips.clone();
+                        let last_window_id_startup = state.last_window_id.clone();
                         tokio::spawn(async move {
                             tokio::time::sleep(tokio::time::Duration::from_secs(ISLAND_TELEPORT_DELAY_SECS)).await;
-                            send_chat_command(&bot_clone, "/is");
-                            
+                            // Go home: friend's island via /visit + slot 11 when
+                            // visitfriend is active, else /is.
+                            go_to_island(&bot_clone, &last_window_id_startup).await;
+
                             // Wait for teleport to complete
                             tokio::time::sleep(tokio::time::Duration::from_secs(TELEPORT_COMPLETION_WAIT_SECS)).await;
 
@@ -3928,6 +3975,11 @@ async fn execute_command(
             *state.bazaar_step.write() = BazaarStep::Initial;
             send_chat_command(bot, "/bz");
             *state.bot_state.write() = BotState::SellingInventoryBz;
+        }
+        CommandType::GoToIsland => {
+            // Return home — friend's island (/visit + slot 11) when visitfriend
+            // is active, else the bot's own island (/is).
+            go_to_island(bot, &state.last_window_id).await;
         }
     }
 }

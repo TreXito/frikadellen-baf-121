@@ -305,6 +305,7 @@ a{color:var(--accent2);text-decoration:none}
             <div class="status-item"><div class="label">Account</div><div class="value" id="s-account">—</div></div>
             <div class="status-item"><div class="label">Purse</div><div class="value" id="s-purse">—</div></div>
             <div class="status-item"><div class="label">Uptime</div><div class="value" id="s-uptime">—</div></div>
+            <div class="status-item"><div class="label">Flips</div><div class="value" id="s-flips" title="">—</div></div>
         </div>
     </div>
 
@@ -321,6 +322,7 @@ a{color:var(--accent2);text-decoration:none}
             <button class="btn btn-sm" style="background:var(--accent);color:#fff" onclick="claimBzOrders()">📋 Claim BZ Orders</button>
         </div>
         <div style="display:flex;gap:10px;margin-bottom:16px">
+            <button class="btn btn-sm" style="background:var(--surface);color:var(--text);border:1px solid var(--border)" onclick="pingBot()">🏓 Ping</button>
             <button class="btn btn-sm" id="btn-disconnect" style="background:#e74c3c;color:#fff" onclick="toggleConnection()">🔌 Disconnect</button>
             <button class="btn btn-sm" style="background:#c0392b;color:#fff" onclick="killSession()">💀 Kill Session</button>
         </div>
@@ -675,6 +677,15 @@ async function fetchStatus() {
         $('s-account').textContent = d.current_account || '—';
         $('s-purse').textContent = formatCoins(d.purse);
         $('s-uptime').textContent = formatUptime(d.uptime_seconds);
+        // Flip-intake health: bought/skipped counts, with the reason for the
+        // most recent skip as a hover tooltip and a red tint when the bot is
+        // dropping flips but has bought none (the "why no flips?" case).
+        const fEl = $('s-flips');
+        if (fEl) {
+            fEl.textContent = (d.flips_accepted || 0) + ' / ' + (d.flips_dropped || 0) + ' skip';
+            fEl.title = d.flip_drop_reason || 'intake healthy';
+            fEl.style.color = (d.flips_accepted === 0 && d.flips_dropped > 0) ? 'var(--danger)' : '';
+        }
         $('tog-anon').checked = d.anonymize_webhook_name;
         isAnonymized = d.anonymize_webhook_name;
         $('btn-pause').style.display = d.macro_paused ? 'none' : '';
@@ -1171,17 +1182,28 @@ function appendChat(text) {
     box.scrollTop = box.scrollHeight;
 }
 
-function sendChat() {
-    const input = $('chat-input');
-    const msg = input.value.trim();
+function sendChatMessage(msg) {
     if (!msg) return;
     if (chatWs && chatWs.readyState === WebSocket.OPEN) {
         chatWs.send(msg);
     } else {
         fetch('/api/chat/send', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({message:msg})});
     }
+}
+
+function sendChat() {
+    const input = $('chat-input');
+    const msg = input.value.trim();
+    if (!msg) return;
+    sendChatMessage(msg);
     input.value = '';
     input.focus();
+}
+
+// Ask the bot for its live ping + flip-intake health. The reply is rendered in
+// the chat feed by the server (`/ping` is handled locally by the panel).
+function pingBot() {
+    sendChatMessage('/ping');
 }
 
 $('chat-input').addEventListener('keydown', e => {

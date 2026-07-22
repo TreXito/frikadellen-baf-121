@@ -77,6 +77,8 @@ pub struct WebSharedState {
     pub bazaar_tracker: Arc<BazaarOrderTracker>,
     /// Config loader for persisting changes to config.toml.
     pub config_loader: Arc<crate::config::ConfigLoader>,
+    /// Flip-intake diagnostics — surfaces why incoming flips are being dropped.
+    pub flip_diag: Arc<crate::state::FlipDiagnostics>,
 }
 
 // ── JSON payloads ────────────────────────────────────────────
@@ -97,6 +99,12 @@ struct StatusResponse {
     bazaar_at_limit: bool,
     auction_at_limit: bool,
     inventory_full: bool,
+    /// Flips queued for purchase this session (intake health).
+    flips_accepted: u64,
+    /// Flips dropped this session across all reasons.
+    flips_dropped: u64,
+    /// Human-readable reason the most recent flip was dropped, if any.
+    flip_drop_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -573,6 +581,11 @@ async fn get_status(State(s): State<WebSharedState>) -> Json<StatusResponse> {
         bazaar_at_limit: s.bot_client.is_bazaar_at_limit(),
         auction_at_limit: s.bot_client.is_auction_at_limit(),
         inventory_full: s.bot_client.is_inventory_full(),
+        flips_accepted: s.flip_diag.accepted_total(),
+        flips_dropped: s.flip_diag.dropped_total(),
+        flip_drop_reason: s.flip_diag.last_drop().map(|(r, secs_ago)| {
+            format!("{} ({}) — {}s ago", r.as_str(), r.hint(), secs_ago)
+        }),
     })
 }
 
@@ -666,8 +679,37 @@ async fn toggle_anonymize(
 /// - `/cofl <cmd>` or `/baf <cmd>` → send to Coflnet WebSocket
 /// - `/<command>` → queue as Minecraft SendChat command
 /// - plain text → send to Coflnet as "chat" type
+/// Build the `/ping` report: live Hypixel ping, bot state, purse and a one-line
+/// flip-intake health summary (which also reveals *why* flips are being dropped,
+/// e.g. Coflnet not authenticated or AH flips disabled).
+fn ping_report(state: &WebSharedState) -> String {
+    let ping = crate::hypixel_ping::best_ping_ms()
+        .map(|ms| format!("{}ms", ms))
+        .unwrap_or_else(|| "measuring…".to_string());
+    let bot_state = format!("{:?}", state.bot_client.state());
+    let purse = state
+        .bot_client
+        .get_purse()
+        .map(crate::utils::format_number_with_separators)
+        .unwrap_or_else(|| "?".to_string());
+    format!(
+        "§f[§4BAF§f]: §b/ping §7→ §fping §a{}§7 | §fstate §b{}§7 | §fpurse §6{}§7 | {}",
+        ping, bot_state, purse, state.flip_diag.summary_line(),
+    )
+}
+
 async fn process_chat_input(input: &str, state: &WebSharedState) {
     let lowercase = input.to_lowercase();
+
+    // `/ping` is answered locally by the panel: it reports the bot's live ping
+    // to Hypixel plus a flip-intake health line, instead of spamming Hypixel's
+    // own `/ping` in-game. Handled before the generic `/command` forwarder.
+    if lowercase == "/ping" {
+        let report = ping_report(state);
+        print_mc_chat(&report);
+        let _ = state.chat_tx.send(report);
+        return;
+    }
 
     if lowercase.starts_with("/cofl") || lowercase.starts_with("/baf") {
         let parts: Vec<&str> = input.split_whitespace().collect();
@@ -744,6 +786,11 @@ async fn switch_account(
     if let Err(e) = std::fs::write(&s.account_index_path, payload.index.to_string()) {
         warn!("[WebGUI] Failed to write account index: {}", e);
     }
+
+    // Mark the incoming account so the restarted process starts a fresh session
+    // (profit + uptime reset to 0) rather than resuming the previous account's
+    // stale totals when the restart lands inside the quick-restart window.
+    crate::session::write_account_switch_marker(next_name);
 
     let _ = s
         .chat_tx

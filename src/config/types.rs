@@ -307,6 +307,17 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub notify_island_visitors: bool,
 
+    /// Flip on a FRIEND's island instead of the bot's own. When set to a
+    /// friend's IGN the bot goes to their island via `/visit <ign>` (clicking
+    /// the "Visit player island" ender-eye at slot 11) wherever it would
+    /// otherwise `/is` home, and treats that island as its default location so
+    /// the AFK guard doesn't teleport it back. If the friend has guest visits
+    /// disabled, the option is ignored for the rest of the session (the bot
+    /// flips on its own island) and a webhook is sent. Leave empty to flip on
+    /// the bot's own island (the default).
+    #[serde(default, with = "opt_string_as_empty")]
+    pub visitfriend: Option<String>,
+
     /// Ping the owner (via `discord_id`) when another player tries to reach the
     /// bot in chat: an incoming whisper/DM, or a guild/party/public line that
     /// directly addresses the bot (name at the start of the message, or
@@ -519,6 +530,7 @@ impl Default for Config {
             discord_id: None,
             share_legendary_flips: true,
             notify_island_visitors: true,
+            visitfriend: None,
             notify_name_mentions: true,
             // Central backend
             instance_id: None,
