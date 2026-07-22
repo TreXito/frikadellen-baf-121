@@ -1012,9 +1012,20 @@ async fn main() -> Result<()> {
     // survive them however long they are. Read before `clear_rest_break_marker`
     // below deletes the marker.
     let after_rest_break = resumed_from_rest_break(&ingame_name);
+    // Was this restart triggered by an account switch (web panel button or the
+    // automatic rotation timer)? A switch starts a FRESH session for the
+    // incoming account — profit AND uptime reset to 0 — even when the restart
+    // lands inside the 5-minute quick-restart window that would otherwise carry
+    // them. Consumed once here (deletes the marker).
+    let switched_account = frikadellen_baf::session::take_account_switch(&ingame_name);
+    if switched_account {
+        info!("[AccountSwitch] Fresh session for {} — profit and uptime reset to 0", ingame_name);
+    }
     let previous_session_secs: u64 = {
         let times = load_session_times(&session_times_path);
-        if let Some(entry) = times.get(&ingame_name) {
+        if switched_account {
+            0
+        } else if let Some(entry) = times.get(&ingame_name) {
             let now = unix_now();
             let gap = now.saturating_sub(entry.saved_at);
             if gap <= MAX_SESSION_GAP_SECS || after_rest_break {
@@ -1056,6 +1067,13 @@ async fn main() -> Result<()> {
     info!("Bazaar Flips: {}", if config.enable_bazaar_flips { "ENABLED" } else { "DISABLED" });
     info!("Remove Drill Parts: {}", if config.remove_drill_parts { "ENABLED" } else { "DISABLED" });
     frikadellen_baf::bot::set_remove_drill_parts(config.remove_drill_parts);
+    match &config.visitfriend {
+        Some(friend) if !friend.trim().is_empty() => {
+            info!("Visit Friend: flipping on {}'s island", friend.trim())
+        }
+        _ => info!("Visit Friend: DISABLED (flipping on own island)"),
+    }
+    frikadellen_baf::visitfriend::configure(config.visitfriend.clone());
     info!("Web GUI Port: {}", config.web_gui_port);
 
     // Check whether the web GUI port is allowed through UFW (Linux firewall).
@@ -1093,6 +1111,9 @@ async fn main() -> Result<()> {
     // of queueing them.  Cleared by the Connect button (or process restart).
     let flip_intake_paused = Arc::new(AtomicBool::new(false));
     let anonymize_webhook_name = Arc::new(AtomicBool::new(false));
+    // Flip-intake diagnostics — records why incoming flips are dropped so the
+    // panel and `/ping` can answer "why am I not getting flips?".
+    let flip_diag = Arc::new(frikadellen_baf::state::FlipDiagnostics::new());
 
     // Broadcast channel for chat messages → web panel clients.
     let (chat_tx, _chat_rx) = broadcast::channel::<String>(256);
@@ -1543,14 +1564,15 @@ async fn main() -> Result<()> {
         // "profit resets every ~30 min") over-corrected into profit that never
         // resets at all. `saved_at == 0` is a pre-`saved_at` file: carry it
         // rather than wipe totals on upgrade.
-        let carry_profit = saved
-            .get(&ingame_name)
-            .map(|e| {
-                e.saved_at == 0
-                    || after_rest_break
-                    || unix_now().saturating_sub(e.saved_at) <= MAX_SESSION_GAP_SECS
-            })
-            .unwrap_or(false);
+        let carry_profit = !switched_account
+            && saved
+                .get(&ingame_name)
+                .map(|e| {
+                    e.saved_at == 0
+                        || after_rest_break
+                        || unix_now().saturating_sub(e.saved_at) <= MAX_SESSION_GAP_SECS
+                })
+                .unwrap_or(false);
         if !carry_profit {
             if let Some(e) = saved.get(&ingame_name) {
                 if e.ah_total != 0 || e.bz_total != 0 {
@@ -1700,6 +1722,7 @@ async fn main() -> Result<()> {
             anonymize_webhook_name: anonymize_webhook_name.clone(),
             bazaar_tracker: bazaar_tracker.clone(),
             config_loader: config_loader.clone(),
+            flip_diag: flip_diag.clone(),
         };
         let web_port = config.web_gui_port;
         let web_tls = if config.web_https {
@@ -1950,6 +1973,50 @@ async fn main() -> Result<()> {
                             let baf_msg = "§f[§4BAF§f]: §eSkyBlock is under maintenance — pausing rejoin until it's back up".to_string();
                             print_mc_chat(&baf_msg);
                             let _ = chat_tx_events.send(baf_msg);
+                        }
+                    }
+
+                    // Friend-island visit refused. After we click the "Visit
+                    // player island" ender-eye, a friend who has guest visits
+                    // disabled answers with "Couldn't warp you!" /
+                    // "This island doesn't allow everyone to guest!". Only react
+                    // when we actually attempted a visit recently (so an
+                    // unrelated warp failure can't disable the feature), and only
+                    // while it's still active. Fall back to our own island for the
+                    // rest of the session and notify.
+                    if let Some(friend) = frikadellen_baf::visitfriend::active_friend() {
+                        // Only react to a warp failure that follows a visit WE
+                        // initiated in the last 20s, so an unrelated
+                        // "Couldn't warp you!" can't disable the feature.
+                        let is_visit_refusal = frikadellen_baf::visitfriend::recently_attempted(20)
+                            && (clean.contains("doesn't allow everyone to guest")
+                                || clean.contains("Couldn't warp you"));
+                        if is_visit_refusal {
+                            warn!(
+                                "[VisitFriend] {}'s island refused the bot — falling back to our own island for this session",
+                                friend
+                            );
+                            frikadellen_baf::visitfriend::disable_for_session();
+                            let baf_msg = format!(
+                                "§f[§4BAF§f]: §e{}'s island isn't open to visitors — flipping on our own island this session",
+                                friend
+                            );
+                            print_mc_chat(&baf_msg);
+                            let _ = chat_tx_events.send(baf_msg);
+                            if let Some(webhook_url) = config_for_events.active_webhook_url() {
+                                frikadellen_baf::webhook::send_webhook_visit_refused(
+                                    &ingame_name_for_events,
+                                    &friend,
+                                    webhook_url,
+                                )
+                                .await;
+                            }
+                            // Head to our own island now.
+                            command_queue_clone.enqueue(
+                                frikadellen_baf::types::CommandType::GoToIsland,
+                                frikadellen_baf::types::CommandPriority::High,
+                                false,
+                            );
                         }
                     }
 
@@ -2917,6 +2984,7 @@ async fn main() -> Result<()> {
     let enable_ah_flips_ws = enable_ah_flips.clone();
     let enable_bazaar_flips_ws = enable_bazaar_flips.clone();
     let flip_intake_paused_ws = flip_intake_paused.clone();
+    let flip_diag_ws = flip_diag.clone();
     let chat_tx_ws = chat_tx.clone();
     let detected_cofl_license_ws = detected_cofl_license.clone();
     let cofl_authenticated_ws = cofl_authenticated.clone();
@@ -2952,14 +3020,23 @@ async fn main() -> Result<()> {
                     }
                 }
                 CoflEvent::AuctionFlip(flip) => {
-                    // Skip if AH flips are disabled
+                    // Skip if AH flips are disabled. This gate used to `continue`
+                    // with no log at all, so a bot with AH flips toggled off
+                    // silently dropped every flip and looked perfectly healthy.
                     if !enable_ah_flips_ws.load(Ordering::Relaxed) {
+                        flip_diag_ws.record_drop(
+                            frikadellen_baf::state::FlipDropReason::AhDisabled,
+                            &flip.item_name,
+                        );
                         continue;
                     }
 
                     // Skip if the web panel's Disconnect button paused intake.
                     if flip_intake_paused_ws.load(Ordering::Relaxed) {
-                        debug!("Skipping AH flip — intake paused (Disconnect): {}", flip.item_name);
+                        flip_diag_ws.record_drop(
+                            frikadellen_baf::state::FlipDropReason::IntakePaused,
+                            &flip.item_name,
+                        );
                         continue;
                     }
 
@@ -2968,7 +3045,10 @@ async fn main() -> Result<()> {
                     // finder-only mode (no COFL license/auth), so they bypass this gate.
                     let from_own_finder = flip.finder.as_deref() == Some("BAF_FINDER");
                     if !from_own_finder && !cofl_authenticated_ws.load(Ordering::Relaxed) {
-                        debug!("Skipping flip — Coflnet not yet authenticated: {}", flip.item_name);
+                        flip_diag_ws.record_drop(
+                            frikadellen_baf::state::FlipDropReason::CoflUnauthenticated,
+                            &flip.item_name,
+                        );
                         continue;
                     }
 
@@ -2976,7 +3056,10 @@ async fn main() -> Result<()> {
                     // state can briefly be Idle between queued startup commands,
                     // so checking is_startup_in_progress() covers that gap.
                     if bot_client_for_ws.is_startup_in_progress() {
-                        debug!("Skipping AH flip during startup: {}", flip.item_name);
+                        flip_diag_ws.record_drop(
+                            frikadellen_baf::state::FlipDropReason::StartupInProgress,
+                            &flip.item_name,
+                        );
                         continue;
                     }
 
@@ -2989,13 +3072,19 @@ async fn main() -> Result<()> {
                     // Only hard-block during Startup which indicates the bot
                     // is not yet ready to interact with Hypixel at all.
                     if bot_client_for_ws.state() == frikadellen_baf::types::BotState::Startup {
-                        debug!("Skipping flip — bot in Startup state: {}", flip.item_name);
+                        flip_diag_ws.record_drop(
+                            frikadellen_baf::state::FlipDropReason::StartupState,
+                            &flip.item_name,
+                        );
                         continue;
                     }
 
                     // Skip AH flips when inventory is full — selling mode
                     if bot_client_for_ws.is_inventory_full() {
-                        debug!("Skipping AH flip — inventory full (selling mode): {}", flip.item_name);
+                        flip_diag_ws.record_drop(
+                            frikadellen_baf::state::FlipDropReason::InventoryFull,
+                            &flip.item_name,
+                        );
                         continue;
                     }
 
@@ -3024,6 +3113,7 @@ async fn main() -> Result<()> {
                     // Buy-speed start time is now set in execute_command when
                     // /viewauction is sent, so the measurement covers the
                     // relevant path: command-send → coins-in-escrow.
+                    flip_diag_ws.record_accepted();
                     command_queue_clone.enqueue(
                         CommandType::PurchaseAuction { flip },
                         CommandPriority::Critical,
@@ -4966,6 +5056,20 @@ async fn main() -> Result<()> {
                     continue;
                 }
 
+                // When flipping on a friend's island, the sidebar shows the
+                // friend's island ("⏣ <name>'s Island"), not "Your Island". Treat
+                // being on ANY island as home so the guard doesn't yank the bot
+                // back to its own island. Only applies while visitfriend is active
+                // (configured and not disabled for this session).
+                if frikadellen_baf::visitfriend::active_friend().is_some()
+                    && current_skyblock_area(&lines)
+                        .map(|a| a.contains("Island"))
+                        .unwrap_or(false)
+                {
+                    consecutive_rejoin_attempts = 0;
+                    continue;
+                }
+
                 consecutive_rejoin_attempts += 1;
 
                 // Safety cap: after REJOIN_MAX_ATTEMPTS consecutive failures,
@@ -5033,8 +5137,10 @@ async fn main() -> Result<()> {
                     continue;
                 }
 
+                // Go home: friend's island (/visit + slot 11) when visitfriend is
+                // active, else the bot's own island (/is).
                 command_queue_island.enqueue(
-                    CommandType::SendChat { message: "/is".to_string() },
+                    CommandType::GoToIsland,
                     CommandPriority::High,
                     false,
                 );
@@ -5124,7 +5230,9 @@ async fn main() -> Result<()> {
                 );
                 print_mc_chat(&baf_msg);
                 let _ = chat_tx_hb.send(baf_msg);
-                for (cmd, delay) in [("/lobby", 5u64), ("/play sb", 10), ("/is", 15)] {
+                // /lobby → /play sb, then "go home" (friend's island via /visit +
+                // slot 11 when visitfriend is active, else /is).
+                for (cmd, delay) in [("/lobby", 5u64), ("/play sb", 10)] {
                     command_queue_hb.enqueue(
                         CommandType::SendChat { message: cmd.to_string() },
                         CommandPriority::High,
@@ -5132,6 +5240,12 @@ async fn main() -> Result<()> {
                     );
                     sleep(Duration::from_secs(delay)).await;
                 }
+                command_queue_hb.enqueue(
+                    CommandType::GoToIsland,
+                    CommandPriority::High,
+                    false,
+                );
+                sleep(Duration::from_secs(15)).await;
 
                 // Give a live session time to open a window (which resets the
                 // heartbeat) before the next check, so we don't escalate too fast.
@@ -5183,6 +5297,11 @@ async fn main() -> Result<()> {
                 // fresh when this account is used again.
                 clear_session_time(&session_times_path_switch, &ign_switch);
                 info!("[AccountSwitch] Cleared session time for {}", ign_switch);
+                // Mark the incoming account so the next process start begins a
+                // fresh session (profit + uptime reset to 0) instead of resuming
+                // stale totals when the restart lands inside the quick-restart
+                // window.
+                frikadellen_baf::session::write_account_switch_marker(&next_name);
                 // Transfer the COFL license to the next account before restarting.
                 let license_index = detected_license_switch.load(Ordering::Relaxed);
                 if license_index > 0 {

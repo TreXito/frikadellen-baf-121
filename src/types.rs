@@ -313,6 +313,10 @@ pub enum CommandType {
     /// Sell entire inventory instantly via /bz → "Sell Inventory Now" (slot 47)
     /// → "Selling whole inventory" (slot 11).
     SellInventoryBz,
+    /// Return the bot to its "home" island: the configured friend's island via
+    /// `/visit <friend>` + slot-11 click when `visitfriend` is active, otherwise
+    /// the bot's own island via `/is`.
+    GoToIsland,
 }
 
 impl CommandType {
@@ -335,6 +339,7 @@ impl CommandType {
             CommandType::AcceptTrade { .. } => "accepting trade",
             CommandType::CancelAuction { .. } => "cancelling auction",
             CommandType::SellInventoryBz => "selling inventory via bazaar",
+            CommandType::GoToIsland => "returning to island",
         }
     }
 }

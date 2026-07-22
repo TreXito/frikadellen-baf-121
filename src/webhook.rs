@@ -1520,6 +1520,31 @@ pub async fn send_webhook_rest_break_end(
     post_embed(webhook_url, payload).await;
 }
 
+/// Send a webhook when a friend's island refuses the bot's visit (guest visits
+/// disabled). The `visitfriend` option is ignored for the rest of the session
+/// and the bot flips on its own island instead.
+pub async fn send_webhook_visit_refused(
+    ingame_name: &str,
+    friend: &str,
+    webhook_url: &str,
+) {
+    let payload = serde_json::json!({
+        "embeds": [{
+            "title": "🚪 Friend Island Unavailable",
+            "description": format!(
+                "**{}**'s island isn't open to visitors (guest visits disabled).\n\
+                 Flipping on the bot's own island for the rest of this session.",
+                friend,
+            ),
+            "color": 0xf39c12u32,
+            "footer": {
+                "text": format!("BAF • {}", ingame_name)
+            }
+        }]
+    });
+    post_embed(webhook_url, payload).await;
+}
+
 #[cfg(test)]
 mod tests {
     use super::parse_ban_reason;
