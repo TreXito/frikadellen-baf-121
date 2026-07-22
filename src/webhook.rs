@@ -138,6 +138,50 @@ fn sanitize_item_name(name: &str) -> String {
         .to_string()
 }
 
+/// Cache of display-name → Coflnet item tag, so each item is looked up at most once.
+static ICON_TAG_CACHE: Lazy<std::sync::Mutex<std::collections::HashMap<String, String>>> =
+    Lazy::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+/// Resolve the Coflnet item tag used for the icon URL. `sanitize_item_name`
+/// mangles pets ("[Lvl 69] Pig" → PET_PIG) and reforged/starred gear ("Fabled
+/// Scorpion Foil ✪✪✪✪✪" → SCORPION_FOIL), so their icons 500 and show blank.
+/// When we have the auction uuid we fetch the exact tag from Coflnet once and
+/// cache it by display name; otherwise we fall back to the name-derived tag
+/// (fine for simple / bazaar items).
+async fn resolve_icon_tag(item_name: &str, auction_uuid: Option<&str>) -> String {
+    let uuid = match auction_uuid {
+        Some(u) if !u.is_empty() => u,
+        _ => return sanitize_item_name(item_name),
+    };
+    let key = item_name.trim().to_lowercase();
+    if let Some(tag) = ICON_TAG_CACHE.lock().ok().and_then(|m| m.get(&key).cloned()) {
+        return tag;
+    }
+    let url = format!("https://sky.coflnet.com/api/auction/{}", uuid);
+    match HTTP_CLIENT
+        .get(&url)
+        .timeout(std::time::Duration::from_secs(6))
+        .send()
+        .await
+    {
+        Ok(resp) if resp.status().is_success() => {
+            if let Ok(json) = resp.json::<serde_json::Value>().await {
+                if let Some(tag) = json.get("tag").and_then(|t| t.as_str()) {
+                    if !tag.is_empty() {
+                        if let Ok(mut m) = ICON_TAG_CACHE.lock() {
+                            m.insert(key, tag.to_string());
+                        }
+                        return tag.to_string();
+                    }
+                }
+            }
+        }
+        Ok(resp) => warn!("[Webhook] auction tag lookup {} -> HTTP {}", uuid, resp.status()),
+        Err(e) => warn!("[Webhook] auction tag lookup failed: {}", e),
+    }
+    sanitize_item_name(item_name)
+}
+
 /// Unix timestamp seconds for Discord relative timestamps
 fn now_unix() -> u64 {
     std::time::SystemTime::now()
@@ -390,14 +434,14 @@ pub async fn send_webhook_item_purchased(
     webhook_url: &str,
 ) {
     let fields = build_purchase_fields(price, target, profit, buy_speed_ms, via_bed, finder, auction_uuid, received_at_ms, purchased_at_ms);
-    let safe_item = sanitize_item_name(item_name);
+    let safe_item = resolve_icon_tag(item_name, auction_uuid).await;
     let payload = serde_json::json!({
         "embeds": [{
             "title": "🛒 Item Purchased Successfully",
             "description": format!("**{}** • <t:{}:R>", item_name, now_unix()),
             "color": 0x00ff00,
             "fields": fields,
-            "thumbnail": {"url": format!("https://sky.coflnet.com/static/icon/{}", safe_item)},
+            "thumbnail": {"url": format!("https://sky.coflnet.com/static/icon/{}?size=64", safe_item)},
             "footer": {
                 "text": format!("BAF • {}{}", ingame_name,
                     purse.map(|p| format!(" • Purse: {} coins", format_purse(p))).unwrap_or_default()),
@@ -420,7 +464,7 @@ pub async fn send_webhook_item_sold(
     auction_uuid: Option<&str>,
     webhook_url: &str,
 ) {
-    let safe_item = sanitize_item_name(item_name);
+    let safe_item = resolve_icon_tag(item_name, auction_uuid).await;
     let status_emoji = match profit {
         Some(p) if p >= 0 => "✅",
         Some(_) => "❌",
@@ -485,7 +529,7 @@ pub async fn send_webhook_item_sold(
             "description": format!("**{}** • <t:{}:R>", item_name, now_unix()),
             "color": 0x0099ff,
             "fields": fields,
-            "thumbnail": {"url": format!("https://sky.coflnet.com/static/icon/{}", safe_item)},
+            "thumbnail": {"url": format!("https://sky.coflnet.com/static/icon/{}?size=64", safe_item)},
             "footer": {
                 "text": format!("BAF • {}{}", ingame_name,
                     purse.map(|p| format!(" • Purse: {} coins", format_purse(p))).unwrap_or_default()),
@@ -641,7 +685,7 @@ pub async fn send_webhook_bazaar_order_placed(
                 {"name": "📊 Order Type",   "value": format!("```\n{}\n```", order_type),                     "inline": true},
                 {"name": "📋 Active Orders", "value": format!("```fix\n{}\n```", active_orders),              "inline": true},
             ],
-            "thumbnail": {"url": format!("https://sky.coflnet.com/static/icon/{}", safe_item)},
+            "thumbnail": {"url": format!("https://sky.coflnet.com/static/icon/{}?size=64", safe_item)},
             "footer": {
                 "text": format!("BAF • {}{}", ingame_name,
                     purse.map(|p| format!(" • Purse: {} coins", format_purse(p))).unwrap_or_default()),
@@ -720,7 +764,7 @@ pub async fn send_webhook_bazaar_order_collected(
             "description": format!("**{}** • <t:{}:R>", item_name, now_unix()),
             "color": color,
             "fields": fields,
-            "thumbnail": {"url": format!("https://sky.coflnet.com/static/icon/{}", safe_item)},
+            "thumbnail": {"url": format!("https://sky.coflnet.com/static/icon/{}?size=64", safe_item)},
             "footer": {
                 "text": format!("BAF • {}{}", ingame_name,
                     purse.map(|p| format!(" • Purse: {} coins", format_purse(p))).unwrap_or_default()),
@@ -770,7 +814,7 @@ pub async fn send_webhook_bazaar_order_cancelled(
             "description": format!("**{}** • <t:{}:R>", item_name, now_unix()),
             "color": color,
             "fields": fields,
-            "thumbnail": {"url": format!("https://sky.coflnet.com/static/icon/{}", safe_item)},
+            "thumbnail": {"url": format!("https://sky.coflnet.com/static/icon/{}?size=64", safe_item)},
             "footer": {
                 "text": format!("BAF • {}{}", ingame_name,
                     purse.map(|p| format!(" • Purse: {} coins", format_purse(p))).unwrap_or_default()),
@@ -832,7 +876,7 @@ pub async fn send_webhook_auction_listed(
                 {"name": "📅 Expires",    "value": format!("<t:{}:R>", expires_unix),                                    "inline": true},
                 {"name": "📋 Active Listings", "value": format!("```fix\n{}\n```", active_listings),                     "inline": true},
             ],
-            "thumbnail": {"url": format!("https://sky.coflnet.com/static/icon/{}", safe_item)},
+            "thumbnail": {"url": format!("https://sky.coflnet.com/static/icon/{}?size=64", safe_item)},
             "footer": {
                 "text": format!("BAF • {}{}", ingame_name,
                     purse.map(|p| format!(" • Purse: {} coins", format_purse(p))).unwrap_or_default()),
@@ -1002,7 +1046,7 @@ pub async fn send_webhook_auction_cancelled(
                 {"name": "💵 Starting Bid", "value": format!("```fix\n{} coins\n```", format_number(starting_bid as f64)), "inline": true},
                 {"name": "📋 Remaining Listings", "value": format!("```fix\n{}\n```", remaining_listings), "inline": true},
             ],
-            "thumbnail": {"url": format!("https://sky.coflnet.com/static/icon/{}", safe_item)},
+            "thumbnail": {"url": format!("https://sky.coflnet.com/static/icon/{}?size=64", safe_item)},
             "footer": {
                 "text": format!("BAF • {}{}", ingame_name,
                     purse.map(|p| format!(" • Purse: {} coins", format_purse(p))).unwrap_or_default()),
@@ -1039,14 +1083,14 @@ pub async fn send_webhook_legendary_flip(
     webhook_url: &str,
 ) {
     let fields = build_purchase_fields(price, target, Some(profit), buy_speed_ms, via_bed, finder, auction_uuid, received_at_ms, purchased_at_ms);
-    let safe_item = sanitize_item_name(item_name);
+    let safe_item = resolve_icon_tag(item_name, auction_uuid).await;
     let payload = serde_json::json!({
         "embeds": [{
             "title": "🌟 Legendary Flip!",
             "description": format!("**{}** • <t:{}:R>", item_name, now_unix()),
             "color": 0xFFD700u32,
             "fields": fields,
-            "thumbnail": {"url": format!("https://sky.coflnet.com/static/icon/{}", safe_item)},
+            "thumbnail": {"url": format!("https://sky.coflnet.com/static/icon/{}?size=64", safe_item)},
             "footer": {
                 "text": format!("BAF • {}{}", ingame_name,
                     purse.map(|p| format!(" • Purse: {} coins", format_purse(p))).unwrap_or_default()),
@@ -1080,14 +1124,14 @@ pub async fn send_webhook_divine_flip(
     webhook_url: &str,
 ) {
     let fields = build_purchase_fields(price, target, Some(profit), buy_speed_ms, via_bed, finder, auction_uuid, received_at_ms, purchased_at_ms);
-    let safe_item = sanitize_item_name(item_name);
+    let safe_item = resolve_icon_tag(item_name, auction_uuid).await;
     let payload = serde_json::json!({
         "embeds": [{
             "title": "💎 Divine Flip!",
             "description": format!("**{}** • <t:{}:R>", item_name, now_unix()),
             "color": 0x00FFFFu32,
             "fields": fields,
-            "thumbnail": {"url": format!("https://sky.coflnet.com/static/icon/{}", safe_item)},
+            "thumbnail": {"url": format!("https://sky.coflnet.com/static/icon/{}?size=64", safe_item)},
             "footer": {
                 "text": format!("BAF • {}{}", ingame_name,
                     purse.map(|p| format!(" • Purse: {} coins", format_purse(p))).unwrap_or_default()),
