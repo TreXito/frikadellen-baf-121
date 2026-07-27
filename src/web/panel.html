@@ -198,12 +198,51 @@ a{color:var(--accent2);text-decoration:none}
 .profit-stat-box{background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:clamp(18px,2vw,28px);text-align:center}
 .profit-stat-box .label{font-size:clamp(.78rem,.9vw,.92rem);color:var(--text-dim);text-transform:uppercase;letter-spacing:1px;margin-bottom:10px}
 .profit-stat-box .value{font-size:clamp(1.6rem,2.5vw,2.4rem);font-weight:700;color:var(--success)}
-/* Config GUI */
-.cfg-row{display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border)}
-.cfg-row:last-child{border-bottom:none}
-.cfg-label{font-size:.88rem;color:var(--text);flex:1;margin-right:12px}
-.cfg-input{background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px 12px;font-size:.85rem;width:280px;max-width:50%;outline:none;transition:border-color .2s}
-.cfg-input:focus{border-color:var(--accent)}
+/* Config GUI — rendered from CONFIG_SCHEMA, see the script block below. */
+.cfg-toolbar{position:sticky;top:64px;z-index:6;display:flex;flex-wrap:wrap;gap:10px;align-items:center;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius);padding:12px 16px;margin-bottom:12px}
+.cfg-search{flex:1 1 220px;min-width:150px;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:9px 12px;font-size:.86rem;outline:none;transition:border-color .2s}
+.cfg-search:focus{border-color:var(--accent)}
+.cfg-chip{display:inline-flex;align-items:center;gap:7px;font-size:.78rem;color:var(--text-dim);white-space:nowrap;cursor:pointer;user-select:none}
+.cfg-dirty{color:var(--warn);font-weight:600;white-space:nowrap;font-size:.78rem}
+.cfg-nav{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px}
+.cfg-nav button{background:var(--surface);color:var(--text-dim);border:1px solid var(--border);border-radius:999px;padding:5px 13px;font-size:.78rem;cursor:pointer;transition:color .15s,border-color .15s,background .15s;font-family:inherit}
+.cfg-nav button:hover{color:var(--text);border-color:var(--accent)}
+.cfg-nav button.active{background:var(--accent);color:var(--btn-text);border-color:var(--accent);font-weight:600}
+.cfg-group{margin-bottom:12px}
+.cfg-group>summary{cursor:pointer;list-style:none;display:flex;align-items:center;gap:10px;font-family:'Space Grotesk','Inter',sans-serif;font-weight:700;color:var(--heading);font-size:.98rem;padding:14px 18px;background:var(--bg-card);border:1px solid var(--border);border-radius:var(--radius)}
+.cfg-group[open]>summary{border-radius:var(--radius) var(--radius) 0 0;border-bottom:none}
+.cfg-group>summary::-webkit-details-marker{display:none}
+.cfg-group>summary::before{content:'▸';color:var(--text-dim);transition:transform .15s;font-size:.8rem}
+.cfg-group[open]>summary::before{transform:rotate(90deg)}
+.cfg-count{margin-left:auto;font-size:.73rem;color:var(--text-dim);font-weight:500}
+.cfg-body{background:var(--bg-card);border:1px solid var(--border);border-top:none;border-radius:0 0 var(--radius) var(--radius);padding:2px 18px 14px;display:grid;grid-template-columns:repeat(auto-fit,minmax(290px,1fr));gap:0 26px}
+/* align-self:start stops the grid stretching every cell in a row to the tallest
+   one, which left big dead gaps under short fields (toggles) sitting beside a
+   field with three lines of help. */
+.cfg-field{display:flex;flex-direction:column;gap:6px;padding:13px 0;border-bottom:1px solid var(--border);min-width:0;align-self:start}
+.cfg-field.wide{grid-column:1/-1}
+.cfg-head{display:flex;align-items:center;gap:8px;min-height:22px}
+.cfg-name{font-size:.86rem;color:var(--text);font-weight:500}
+.cfg-help{font-size:.74rem;color:var(--text-dim);line-height:1.45}
+.cfg-input,.cfg-area{background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:8px 11px;font-size:.84rem;width:100%;outline:none;transition:border-color .2s;font-family:inherit}
+.cfg-input:focus,.cfg-area:focus{border-color:var(--accent)}
+.cfg-area{font-family:'JetBrains Mono',monospace;font-size:.78rem;min-height:62px;resize:vertical;line-height:1.5}
+.cfg-dot{width:6px;height:6px;border-radius:50%;background:var(--warn);flex:none}
+.cfg-reset{background:none;border:none;color:var(--text-dim);cursor:pointer;font-size:.72rem;padding:0;font-family:inherit;text-decoration:underline}
+.cfg-reset:hover{color:var(--accent)}
+/* Only offer "reset" on a field that actually has something to reset. */
+.cfg-field .cfg-reset.only-changed{display:none}
+.cfg-field[data-changed="1"] .cfg-reset.only-changed{display:inline}
+.cfg-inline{display:flex;gap:7px;align-items:center}
+.cfg-badge{font-size:.63rem;text-transform:uppercase;letter-spacing:.05em;padding:1px 6px;border-radius:4px;background:var(--surface);color:var(--text-dim);border:1px solid var(--border);flex:none}
+.cfg-badge.warn{color:var(--warn);border-color:var(--warn)}
+.cfg-foot{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+.cfg-foot .cfg-help{flex:1 1 100%;min-width:0}
+.cfg-empty{padding:28px;text-align:center;color:var(--text-dim);font-size:.86rem}
+/* Bools sit inline with their label, so a toggle costs one line, not three. */
+.cfg-head .toggle{margin-left:auto;flex:none}
+.cfg-head .cfg-spacer{margin-left:auto}
+@media(max-width:768px){.cfg-toolbar{top:0;position:static}.cfg-body{grid-template-columns:1fr;gap:0}}
 </style>
 </head>
 <body>
@@ -441,88 +480,24 @@ a{color:var(--accent2);text-decoration:none}
 <div class="tab-content" id="tab-config">
     <div id="config-status" style="display:none;margin-bottom:10px;padding:8px 14px;border-radius:6px;font-size:.85rem"></div>
 
-    <!-- Category: General -->
-    <div class="card" style="margin-bottom:16px">
-        <h2>🎮 General</h2>
-        <div class="cfg-row"><label class="cfg-label" for="cfg-ingame_name">Ingame Name(s)</label><input class="cfg-input" id="cfg-ingame_name" placeholder="Account1,Account2"></div>
-        <div class="cfg-row"><label class="cfg-label" for="cfg-multi_switch_time">Account Switch Time (hours)</label><input class="cfg-input" id="cfg-multi_switch_time" type="number" step="0.5" min="0" placeholder="0 = disabled"></div>
-        <div class="cfg-row"><label class="cfg-label" for="cfg-web_gui_port">Web GUI Port</label><input class="cfg-input" id="cfg-web_gui_port" type="number" min="1" max="65535"></div>
-        <div class="cfg-row"><label class="cfg-label" for="cfg-web_gui_password">Web GUI Password</label><input class="cfg-input" id="cfg-web_gui_password" type="text" placeholder="Leave empty to disable"></div>
-        <div class="cfg-row"><label class="cfg-label">Enable Console Input</label><label class="toggle"><input type="checkbox" id="cfg-enable_console_input"><span class="slider"></span></label></div>
-        <div class="cfg-row"><label class="cfg-label">Share Legendary Flips</label><label class="toggle"><input type="checkbox" id="cfg-share_legendary_flips"><span class="slider"></span></label></div>
-    </div>
-
-    <!-- Category: Timing & Delays -->
-    <div class="card" style="margin-bottom:16px">
-        <h2>⏱️ Timing &amp; Delays</h2>
-        <div class="cfg-row"><label class="cfg-label" for="cfg-command_delay_ms">Command Delay (ms)</label><input class="cfg-input" id="cfg-command_delay_ms" type="number" min="100"></div>
-        <div class="cfg-row"><label class="cfg-label" for="cfg-bed_spam_click_delay">Bed Spam Click Delay (ms)</label><input class="cfg-input" id="cfg-bed_spam_click_delay" type="number" min="10"></div>
-        <div class="cfg-row"><label class="cfg-label" for="cfg-bed_pre_click_ms">Bed Pre-Click (ms)</label><input class="cfg-input" id="cfg-bed_pre_click_ms" type="number" min="0"></div>
-        <div class="cfg-row"><label class="cfg-label" title="Use COFL purchaseAt timing to pre-click grace-period (bed) auctions">Bed Timing</label><label class="toggle"><input type="checkbox" id="cfg-bedtiming"><span class="slider"></span></label></div>
-    </div>
-
-    <!-- Category: Auction House -->
-    <div class="card" style="margin-bottom:16px">
-        <h2>🏛️ Auction House</h2>
-        <div class="cfg-row"><label class="cfg-label" for="cfg-auction_duration_hours">Auction Duration (hours)</label><input class="cfg-input" id="cfg-auction_duration_hours" type="number" min="1" max="48"></div>
-        <div class="cfg-row"><label class="cfg-label" for="cfg-auction_listing_delay_ms">Auction Listing Delay (ms)</label><input class="cfg-input" id="cfg-auction_listing_delay_ms" type="number" min="500"></div>
-        <div class="cfg-row"><label class="cfg-label" for="cfg-max_items_in_inventory">Max Flip Items in Inventory</label><input class="cfg-input" id="cfg-max_items_in_inventory" type="number" min="0" max="28"></div>
-    </div>
-
-    <!-- Category: Bazaar -->
-    <div class="card" style="margin-bottom:16px">
-        <h2>📦 Bazaar</h2>
-        <div class="cfg-row"><label class="cfg-label" for="cfg-bazaar_order_check_interval_seconds">Order Check Interval (seconds)</label><input class="cfg-input" id="cfg-bazaar_order_check_interval_seconds" type="number" min="10"></div>
-        <div class="cfg-row"><label class="cfg-label" for="cfg-bazaar_order_cancel_minutes_per_million">Cancel Minutes Per Million</label><input class="cfg-input" id="cfg-bazaar_order_cancel_minutes_per_million" type="number" min="1"></div>
-        <div class="cfg-row"><label class="cfg-label" for="cfg-bazaar_tax_rate">Tax Rate (%)</label><input class="cfg-input" id="cfg-bazaar_tax_rate" type="number" step="0.05" min="0" max="5"></div>
-    </div>
-
-    <!-- Category: Humanization -->
-    <div class="card" style="margin-bottom:16px">
-        <h2>😴 Humanization / Rest Breaks</h2>
-        <p style="color:var(--text-dim);font-size:.82rem;margin-bottom:12px">When enabled, the bot will periodically take random breaks to appear more human-like. Session time is preserved.</p>
-        <div class="cfg-row"><label class="cfg-label">Enable Rest Breaks</label><label class="toggle"><input type="checkbox" id="cfg-humanization_enabled"><span class="slider"></span></label></div>
-        <div class="cfg-row"><label class="cfg-label" for="cfg-humanization_min_interval_minutes">Min Interval (minutes)</label><input class="cfg-input" id="cfg-humanization_min_interval_minutes" type="number" min="5"></div>
-        <div class="cfg-row"><label class="cfg-label" for="cfg-humanization_max_interval_minutes">Max Interval (minutes)</label><input class="cfg-input" id="cfg-humanization_max_interval_minutes" type="number" min="10"></div>
-        <div class="cfg-row"><label class="cfg-label" for="cfg-humanization_min_break_minutes">Min Break Duration (minutes)</label><input class="cfg-input" id="cfg-humanization_min_break_minutes" type="number" min="1"></div>
-        <div class="cfg-row"><label class="cfg-label" for="cfg-humanization_max_break_minutes">Max Break Duration (minutes)</label><input class="cfg-input" id="cfg-humanization_max_break_minutes" type="number" min="1"></div>
-    </div>
-
-    <!-- Category: Webhooks -->
-    <div class="card" style="margin-bottom:16px">
-        <h2>🔔 Webhooks &amp; Notifications</h2>
-        <div class="cfg-row"><label class="cfg-label" for="cfg-webhook_url">Discord Webhook URL</label><input class="cfg-input" id="cfg-webhook_url" type="url" placeholder="https://discord.com/api/webhooks/..."></div>
-        <div class="cfg-row"><label class="cfg-label" for="cfg-bazaar_webhook_url">Bazaar Webhook URL</label><input class="cfg-input" id="cfg-bazaar_webhook_url" type="url" placeholder="Optional — falls back to main webhook"></div>
-        <div class="cfg-row"><label class="cfg-label" for="cfg-discord_id">Discord User ID (for pings)</label><input class="cfg-input" id="cfg-discord_id" placeholder="e.g. 123456789012345678"></div>
-    </div>
-
-    <!-- Category: Proxy -->
-    <div class="card" style="margin-bottom:16px">
-        <h2>🌐 Proxy</h2>
-        <div class="cfg-row"><label class="cfg-label">Proxy Enabled</label><label class="toggle"><input type="checkbox" id="cfg-proxy_enabled"><span class="slider"></span></label></div>
-        <div class="cfg-row"><label class="cfg-label" for="cfg-proxy_address">Proxy Address</label><input class="cfg-input" id="cfg-proxy_address" placeholder="host:port"></div>
-        <div class="cfg-row"><label class="cfg-label" for="cfg-proxy_credentials">Proxy Credentials</label><input class="cfg-input" id="cfg-proxy_credentials" placeholder="username:password"></div>
-    </div>
-
-    <!-- Category: Advanced -->
-    <div class="card" style="margin-bottom:16px">
-        <h2>⚙️ Advanced</h2>
-        <div class="cfg-row"><label class="cfg-label" for="cfg-websocket_url">WebSocket URL</label><input class="cfg-input" id="cfg-websocket_url" placeholder="wss://sky.coflnet.com/modsocket"></div>
-        <div class="cfg-row"><label class="cfg-label">Use COFL Chat</label><label class="toggle"><input type="checkbox" id="cfg-use_cofl_chat"><span class="slider"></span></label></div>
-        <div class="cfg-row"><label class="cfg-label" for="cfg-auto_cookie">Auto Cookie (0 = disabled)</label><input class="cfg-input" id="cfg-auto_cookie" type="number" min="0"></div>
-        <div class="cfg-row"><label class="cfg-label" for="cfg-hypixel_api_key">Hypixel API Key</label><input class="cfg-input" id="cfg-hypixel_api_key" placeholder="Optional"></div>
-    </div>
-
-    <!-- Raw TOML (collapsed) -->
-    <details class="card" style="margin-bottom:16px">
-        <summary style="cursor:pointer;color:var(--text-dim);font-size:.85rem">📝 Raw Config (TOML)</summary>
-        <textarea id="config-editor" spellcheck="false" style="width:100%;min-height:300px;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:14px;font-family:'JetBrains Mono','Fira Code',monospace;font-size:.82rem;line-height:1.6;resize:vertical;outline:none;tab-size:4;margin-top:10px" placeholder="Loading config..."></textarea>
-    </details>
-
-    <div style="display:flex;gap:10px;margin-bottom:20px">
-        <button class="btn" style="background:var(--accent);color:#fff" onclick="saveConfigGUI()">💾 Save Config</button>
+    <!-- Toolbar: search is the primary way to reach one of ~50 settings. -->
+    <div class="cfg-toolbar">
+        <input class="cfg-search" id="cfg-search" placeholder="Search settings…  (name, description, or config key)" autocomplete="off">
+        <label class="cfg-chip"><input type="checkbox" id="cfg-show-advanced"> Show advanced</label>
+        <span class="cfg-dirty" id="cfg-dirty"></span>
+        <button class="btn btn-sm" style="background:var(--accent);color:var(--btn-text)" onclick="saveConfigGUI()">💾 Save</button>
         <button class="btn btn-sm" style="background:var(--surface);color:var(--text);border:1px solid var(--border)" onclick="loadConfig()">🔄 Reload</button>
     </div>
+
+    <div class="cfg-nav" id="cfg-nav"></div>
+    <div id="cfg-groups"></div>
+
+    <!-- Raw TOML escape hatch: still the fastest way to diff or paste a whole config. -->
+    <details class="card" style="margin-bottom:16px">
+        <summary style="cursor:pointer;color:var(--text-dim);font-size:.85rem">📝 Raw config (TOML)</summary>
+        <p style="color:var(--text-dim);font-size:.78rem;margin:10px 0 0">Read-only view of what is on disk. Edit above and press Save; this refreshes after each save.</p>
+        <textarea id="config-editor" spellcheck="false" readonly style="width:100%;min-height:300px;background:var(--surface);color:var(--text);border:1px solid var(--border);border-radius:8px;padding:14px;font-family:'JetBrains Mono','Fira Code',monospace;font-size:.82rem;line-height:1.6;resize:vertical;outline:none;tab-size:4;margin-top:10px" placeholder="Loading config..."></textarea>
+    </details>
 </div>
 
 </div><!-- .main -->
@@ -1516,195 +1491,467 @@ async function fetchProfit() {
 setInterval(fetchProfit, 15000);
 
 // ── Config Editor ────────────────────────────────────────────
-// Config field definitions for the GUI ↔ TOML bridge
-const CONFIG_FIELDS = {
-    // strings
-    ingame_name: {type:'string', default:''},
-    websocket_url: {type:'string', default:'wss://sky.coflnet.com/modsocket'},
-    webhook_url: {type:'string', default:''},
-    bazaar_webhook_url: {type:'string', default:''},
-    discord_id: {type:'string', default:''},
-    web_gui_password: {type:'string', default:''},
-    hypixel_api_key: {type:'string', default:''},
-    proxy_address: {type:'string', default:''},
-    proxy_credentials: {type:'string', default:''},
-    // numbers
-    multi_switch_time: {type:'float', default:0.0},
-    web_gui_port: {type:'int', default:8080},
-    command_delay_ms: {type:'int', default:500},
-    bed_spam_click_delay: {type:'int', default:100},
-    bed_pre_click_ms: {type:'int', default:30},
-    bazaar_order_check_interval_seconds: {type:'int', default:60},
-    bazaar_order_cancel_minutes_per_million: {type:'int', default:1},
-    bazaar_tax_rate: {type:'float', default:1.25},
-    auction_listing_delay_ms: {type:'int', default:1500},
-    auction_duration_hours: {type:'int', default:24},
-    max_items_in_inventory: {type:'int', default:12},
-    auto_cookie: {type:'int', default:0},
-    humanization_min_interval_minutes: {type:'int', default:45},
-    humanization_max_interval_minutes: {type:'int', default:120},
-    humanization_min_break_minutes: {type:'int', default:2},
-    humanization_max_break_minutes: {type:'int', default:10},
-    // booleans
-    bedtiming: {type:'bool', default:true},
-    use_cofl_chat: {type:'bool', default:true},
-    enable_console_input: {type:'bool', default:true},
-    proxy_enabled: {type:'bool', default:false},
-    share_legendary_flips: {type:'bool', default:true},
-    humanization_enabled: {type:'bool', default:false},
-};
+//
+// The whole config tab is RENDERED FROM `CONFIG_SCHEMA` below. Adding a setting
+// used to mean editing three places (a hand-written HTML row, a CONFIG_FIELDS
+// entry, and a hand-rolled TOML writer), which is why the panel had drifted to
+// covering only about 60% of config.toml. Now a setting is one schema entry,
+// and values move over `/api/config.json` as JSON — serde owns the parsing and
+// validation, so the browser never writes TOML.
+//
+// Field: {key, label, group, type, help?, ph?, min?, max?, step?,
+//         advanced?, wide?, secret?, warn?}
+//   type: 'text' | 'number' | 'float' | 'bool' | 'list'
+//   advanced: hidden until "Show advanced" — keeps the common path short
+//   wide:     spans both grid columns (long URLs, lists)
+//   secret:   masked with a reveal button (safe to screenshot)
+//   warn:     flagged as risky to change
 
-// Simple TOML parser for flat config (no nested tables except [sessions])
-function parseSimpleToml(text) {
-    const result = {};
-    const lines = text.split('\n');
-    for (let i = 0; i < lines.length; i++) {
-        const trimmed = lines[i].trim();
-        if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('[')) continue;
-        const eqIdx = trimmed.indexOf('=');
-        if (eqIdx < 0) continue;
-        const key = trimmed.substring(0, eqIdx).trim();
-        let val = trimmed.substring(eqIdx + 1).trim();
-        // Remove inline comments
-        if (val.startsWith('[')) {
-            // Array value. toml::to_string_pretty emits multi-element arrays
-            // across several lines (one element per line, trailing comma), so
-            // accumulate lines until the brackets balance, then tokenize it into
-            // a real JS array. Storing it as a raw string was the bug that made
-            // save re-emit `multisocket_urls = "[]"` (a quoted string) which
-            // Rust rejected as "expected a sequence".
-            let buf = val;
-            let depth = (buf.match(/\[/g) || []).length - (buf.match(/\]/g) || []).length;
-            while (depth > 0 && i + 1 < lines.length) {
-                i++;
-                buf += '\n' + lines[i];
-                depth += (lines[i].match(/\[/g) || []).length - (lines[i].match(/\]/g) || []).length;
-            }
-            result[key] = parseTomlArray(buf);
-        } else if (val.startsWith('"')) {
-            // String value — find closing quote
-            const endQ = val.indexOf('"', 1);
-            if (endQ >= 0) val = val.substring(0, endQ + 1);
-            result[key] = val.slice(1, -1);
-        } else if (val === 'true') {
-            result[key] = true;
-        } else if (val === 'false') {
-            result[key] = false;
-        } else {
-            // number
-            const num = parseFloat(val);
-            result[key] = isNaN(num) ? val : num;
-        }
+const CFG_GROUPS = [
+    {id:'account',  icon:'👤', name:'Account'},
+    {id:'flipping', icon:'⚡', name:'Flipping'},
+    {id:'ah',       icon:'🏛️', name:'Auction House'},
+    {id:'relist',   icon:'🔒', name:'Relist Blocklist'},
+    {id:'bazaar',   icon:'📦', name:'Bazaar'},
+    {id:'cofl',     icon:'🔗', name:'Coflnet'},
+    {id:'finder',   icon:'🎯', name:'Private Finder'},
+    {id:'notify',   icon:'🔔', name:'Notifications'},
+    {id:'human',    icon:'😴', name:'Rest Breaks'},
+    {id:'panel',    icon:'🖥️', name:'Web Panel'},
+    {id:'proxy',    icon:'🌐', name:'Proxy'},
+    {id:'backend',  icon:'☁️', name:'Central Backend'},
+    {id:'system',   icon:'⚙️', name:'System'},
+];
+
+const CONFIG_SCHEMA = [
+    // ── Account ──
+    {key:'ingame_name', group:'account', type:'text', label:'Ingame name(s)', ph:'Account1,Account2',
+     help:'Your Minecraft username. Comma-separate several accounts to rotate between them.'},
+    {key:'multi_switch_time', group:'account', type:'float', label:'Account switch time (hours)', min:0, step:0.5,
+     help:'Switch to the next account after this many hours. 0 disables switching.'},
+    {key:'visitfriend', group:'account', type:'text', label:"Flip on a friend's island",
+     help:"Their IGN. The bot visits them instead of going home. Empty = use its own island."},
+
+    // ── Flipping ──
+    {key:'enable_ah_flips', group:'flipping', type:'bool', label:'Auction house flips'},
+    {key:'enable_bazaar_flips', group:'flipping', type:'bool', label:'Bazaar flips'},
+    {key:'bedtiming', group:'flipping', type:'bool', label:'Bed timing',
+     help:'Use the COFL purchaseAt time to pre-click grace-period (bed) auctions instead of waiting for them to open.'},
+    {key:'bed_pre_click_ms', group:'flipping', type:'number', label:'Bed pre-click (ms)', min:0,
+     help:'How early to start clicking before the grace period ends. Only used when bed timing is on.'},
+    {key:'bed_spam_click_delay', group:'flipping', type:'number', label:'Bed spam click delay (ms)', min:10,
+     help:'Gap between repeat clicks while waiting out a grace period.'},
+    {key:'skip', group:'flipping', type:'bool', label:'Fast-buy (skip confirm click)',
+     help:'Pre-clicks Confirm Purchase in the same burst as the buy, saving one round-trip to Hypixel.'},
+    {key:'max_items_in_inventory', group:'flipping', type:'number', label:'Max flip items in inventory', min:0, max:28,
+     help:'The bot switches to selling once it is holding this many flips.'},
+    {key:'remove_drill_parts', group:'flipping', type:'bool', label:'Part out drills before listing', advanced:true,
+     help:'Pull Fuel Tank / Engine / Upgrade Module via Jotraeline Greatforge so the parts and the stripped drill sell separately.'},
+
+    // ── Auction House ──
+    {key:'auction_duration_hours', group:'ah', type:'number', label:'Listing duration (hours)', min:1, max:48,
+     help:'How long the bot lists its own auctions for.'},
+    {key:'auction_listing_delay_ms', group:'ah', type:'number', label:'Delay between listings (ms)', min:500,
+     help:'Too low and Hypixel kicks the bot for "Sending packets too fast!" during bulk listings.'},
+
+    // ── Relist blocklist ──
+    {key:'do_not_relist_ids', group:'relist', type:'list', label:'Never relist these item IDs', wide:true,
+     ph:'HYPERION\nTERMINATOR',
+     help:'One per line. Matching buys stay in the inventory for you to handle by hand instead of being auto-listed.'},
+    {key:'do_not_relist_finders', group:'relist', type:'list', label:'Never relist from these finders', wide:true,
+     ph:'craftcost',
+     help:'Matches the finder shown on the purchase webhook. Case- and punctuation-insensitive, so craftcost = CRAFT_COST.'},
+    {key:'do_not_relist_over_profit', group:'relist', type:'number', label:'Hold flips above this profit', min:0,
+     help:'Coins. A flip expected to make at least this much is held for manual handling rather than auto-dumped. 0 disables.'},
+
+    // ── Bazaar ──
+    {key:'bazaar_order_check_interval_seconds', group:'bazaar', type:'number', label:'Order check interval (seconds)', min:10,
+     help:'How often to look at open bazaar orders.'},
+    {key:'bazaar_order_cancel_minutes_per_million', group:'bazaar', type:'number', label:'Cancel after (minutes per million)', min:1,
+     help:'How long an order may sit unfilled per million coins of value before it is cancelled.'},
+    {key:'bazaar_tax_rate', group:'bazaar', type:'float', label:'Sell tax rate (%)', min:0, max:5, step:0.05,
+     help:'Hypixel charges 1.25%. The maxed Bazaar Flipper perk from the Community Shop lowers it to 1.0.'},
+
+    // ── Coflnet ──
+    {key:'websocket_url', group:'cofl', type:'text', label:'Coflnet websocket URL', wide:true,
+     ph:'wss://sky.coflnet.com/modsocket',
+     help:'Point this at your own finder instead to run in finder-only mode.'},
+    {key:'multisocket_urls', group:'cofl', type:'list', label:'Extra Coflnet sockets', wide:true, advanced:true,
+     ph:'us-sky.coflnet.com/modsocket',
+     help:'Regional modsockets connected in parallel. Flips are deduped by UUID, so whichever socket delivers one first wins. One per line.'},
+    {key:'use_cofl_chat', group:'cofl', type:'bool', label:'Use COFL chat'},
+    {key:'auto_cookie', group:'cofl', type:'number', label:'Auto cookie threshold', min:0,
+     help:'Buy a booster cookie when the purse is above this many coins. 0 disables.'},
+
+    // ── Private finder ──
+    {key:'finder_ws_url', group:'finder', type:'text', label:'Finder websocket URL', wide:true,
+     ph:'ws://192.168.0.250:15101',
+     help:'Your own baf-flip-finder feed. Its flips are bought through the same pipeline as COFL flips.'},
+    {key:'finder_ws_token', group:'finder', type:'text', label:'Finder token', secret:true,
+     help:"From the finder's data/ws-config.json."},
+    {key:'finder_auto_list', group:'finder', type:'bool', label:'Auto-list what the finder prices',
+     help:'Needed in finder-only mode: COFL never sends createAuction there, so without this nothing lists your buys.'},
+    {key:'finder_report_purse', group:'finder', type:'bool', label:'Report purse to the finder',
+     help:'Lets the finder size flips to this account. Sent ONLY to finder sockets, never to Coflnet.'},
+
+    // ── Notifications ──
+    {key:'webhook_url', group:'notify', type:'text', label:'Discord webhook URL', wide:true, secret:true,
+     ph:'https://discord.com/api/webhooks/...'},
+    {key:'bazaar_webhook_url', group:'notify', type:'text', label:'Bazaar webhook URL', wide:true, secret:true,
+     help:'Optional. Falls back to the main webhook when empty.'},
+    {key:'discord_id', group:'notify', type:'text', label:'Discord user ID (for pings)', ph:'123456789012345678',
+     help:'Who to ping on legendary flips and bans. Empty disables pings.'},
+    {key:'share_legendary_flips', group:'notify', type:'bool', label:'Share legendary flips publicly',
+     help:'Posts legendary/divine buys to the public Discord channel.'},
+    {key:'notify_island_visitors', group:'notify', type:'bool', label:'Ping on island visitors'},
+    {key:'notify_name_mentions', group:'notify', type:'bool', label:'Ping when addressed in chat',
+     help:'Whispers, or a guild/party/public line that starts with the bot name or @name. A name mid-sentence does not count.'},
+
+    // ── Rest breaks ──
+    {key:'humanization_enabled', group:'human', type:'bool', label:'Enable rest breaks',
+     help:'Periodically disconnect for a random spell to look more human. Does not reset the account-switch timer.'},
+    {key:'humanization_min_interval_minutes', group:'human', type:'number', label:'Min interval (minutes)', min:1},
+    {key:'humanization_max_interval_minutes', group:'human', type:'number', label:'Max interval (minutes)', min:1},
+    {key:'humanization_min_break_minutes', group:'human', type:'number', label:'Min break length (minutes)', min:1},
+    {key:'humanization_max_break_minutes', group:'human', type:'number', label:'Max break length (minutes)', min:1},
+
+    // ── Web panel ──
+    {key:'web_gui_port', group:'panel', type:'number', label:'Panel port', min:1, max:65535,
+     help:'Takes effect after a restart.'},
+    {key:'web_gui_password', group:'panel', type:'text', label:'Panel password', secret:true,
+     help:'Empty means anyone who can reach the port can control the bot.'},
+    {key:'web_https', group:'panel', type:'bool', label:'Serve over HTTPS',
+     help:'Strongly recommended on a public IP. With no certificate paths below, a self-signed one is generated.'},
+    {key:'web_tls_cert_path', group:'panel', type:'text', label:'TLS certificate path', wide:true, advanced:true,
+     help:'PEM full chain. Empty = use the generated self-signed certificate.'},
+    {key:'web_tls_key_path', group:'panel', type:'text', label:'TLS private key path', wide:true, advanced:true,
+     help:'PEM key matching the certificate above.'},
+
+    // ── Proxy ──
+    {key:'proxy_enabled', group:'proxy', type:'bool', label:'Use a proxy',
+     help:'Applies to both the Minecraft and websocket connections.'},
+    {key:'proxy_address', group:'proxy', type:'text', label:'Proxy address', ph:'host:port'},
+    {key:'proxy_credentials', group:'proxy', type:'text', label:'Proxy credentials', ph:'username:password', secret:true,
+     help:'Leave empty if the proxy needs no authentication.'},
+
+    // ── Central backend ──
+    {key:'backend_enabled', group:'backend', type:'bool', label:'Connect to the central backend',
+     help:'Enables remote control from Discord and central profit tracking.'},
+    {key:'backend_url', group:'backend', type:'text', label:'Backend gateway URL', wide:true, advanced:true},
+    {key:'backend_allowed_ids', group:'backend', type:'text', label:'Extra allowed Discord IDs', wide:true,
+     help:'Comma-separated. These may control this bot from Discord in addition to the owner.'},
+    {key:'instance_id', group:'backend', type:'text', label:'Instance ID', advanced:true, warn:true,
+     help:'How the backend recognises this bot across reconnects. Changing it registers a brand new bot and orphans its history.'},
+
+    // ── System ──
+    {key:'command_delay_ms', group:'system', type:'number', label:'Command delay (ms)', min:0,
+     help:'Minimum gap between queued Hypixel interactions, so they cannot overlap.'},
+    {key:'enable_console_input', group:'system', type:'bool', label:'Accept console input',
+     help:'Turn off when running headless or as a service.'},
+    {key:'hypixel_api_key', group:'system', type:'text', label:'Hypixel API key', secret:true,
+     help:'From developer.hypixel.net. Optional — Coflnet is used as a fallback for auction lookups.'},
+    {key:'auto_cookie_prompted', group:'system', type:'bool', label:'Auto-cookie prompt answered', advanced:true,
+     help:'Internal. Remembers that the first-run wizard already asked about auto-cookie, so it stops asking.'},
+];
+
+// Values as last loaded from the server — the baseline "dirty" is measured
+// against, and what Reset restores a field to.
+let cfgLoaded = {};
+let cfgActiveGroup = 'all';
+
+const cfgEl = key => $('cfgf-' + key);
+
+/** Current UI value of one field, in the JSON shape the server expects. */
+function cfgReadField(f) {
+    const el = cfgEl(f.key);
+    if (!el) return undefined;
+    if (f.type === 'bool') return el.checked;
+    if (f.type === 'list') {
+        return el.value.split(/[\n,]/).map(s => s.trim()).filter(Boolean);
     }
-    return result;
+    if (f.type === 'number' || f.type === 'float') {
+        const raw = el.value.trim();
+        if (raw === '') return 0;
+        const n = f.type === 'number' ? parseInt(raw, 10) : parseFloat(raw);
+        // An unparsable box must not silently rewrite the stored value.
+        return Number.isNaN(n) ? cfgLoaded[f.key] : n;
+    }
+    return el.value;
 }
 
-// Parse a TOML array literal (inline `["a", "b"]`, empty `[]`, or the
-// multi-line form toml::to_string_pretty produces) into a JS array. Config
-// arrays only ever hold quoted strings or bare numbers.
-function parseTomlArray(buf) {
-    const open = buf.indexOf('[');
-    const close = buf.lastIndexOf(']');
-    const inner = (open >= 0 && close > open) ? buf.slice(open + 1, close) : '';
-    const arr = [];
-    const re = /"((?:[^"\\]|\\.)*)"|(-?\d+(?:\.\d+)?)/g;
-    let m;
-    while ((m = re.exec(inner)) !== null) {
-        if (m[1] !== undefined) {
-            arr.push(m[1].replace(/\\\\/g, '\\').replace(/\\"/g, '"'));
-        } else {
-            arr.push(parseFloat(m[2]));
-        }
-    }
-    return arr;
+function cfgWriteField(f, val) {
+    const el = cfgEl(f.key);
+    if (!el) return;
+    if (f.type === 'bool') el.checked = !!val;
+    else if (f.type === 'list') el.value = Array.isArray(val) ? val.join('\n') : (val || '');
+    else el.value = (val === null || val === undefined) ? '' : val;
 }
 
-function populateConfigGUI(parsed) {
-    for (const [key, def] of Object.entries(CONFIG_FIELDS)) {
-        const el = $('cfg-' + key);
-        if (!el) continue;
-        const val = parsed[key] !== undefined ? parsed[key] : def.default;
-        if (def.type === 'bool') {
-            el.checked = !!val;
-        } else {
-            el.value = val;
-        }
+function cfgSameValue(a, b) {
+    if (Array.isArray(a) || Array.isArray(b)) {
+        const x = Array.isArray(a) ? a : [], y = Array.isArray(b) ? b : [];
+        return x.length === y.length && x.every((v, i) => v === y[i]);
     }
+    // The server sends "" for unset optional strings, so treat null/undefined
+    // and "" as the same thing rather than showing a phantom change.
+    const norm = v => (v === null || v === undefined) ? '' : v;
+    return norm(a) === norm(b);
 }
 
-function buildTomlFromGUI(originalToml) {
-    // Start from the parsed values, overlay GUI changes
-    const parsed = parseSimpleToml(originalToml);
+/** Every field whose UI value differs from what was loaded. */
+function cfgChangedFields() {
+    const out = {};
+    for (const f of CONFIG_SCHEMA) {
+        const cur = cfgReadField(f);
+        if (cur === undefined) continue;
+        if (!cfgSameValue(cur, cfgLoaded[f.key])) out[f.key] = cur;
+    }
+    return out;
+}
 
-    for (const [key, def] of Object.entries(CONFIG_FIELDS)) {
-        const el = $('cfg-' + key);
-        if (!el) continue;
-        if (def.type === 'bool') {
-            parsed[key] = el.checked;
-        } else if (def.type === 'int') {
-            // NB: use an explicit NaN check, not `|| def.default`, so a legitimate
-            // 0 (e.g. auto_cookie = 0, multi_switch_time = 0) is preserved instead
-            // of silently reverting to the default.
-            const n = parseInt(el.value, 10);
-            parsed[key] = Number.isNaN(n) ? def.default : n;
-        } else if (def.type === 'float') {
-            const f = parseFloat(el.value);
-            parsed[key] = Number.isNaN(f) ? def.default : f;
+function cfgRefreshDirty() {
+    const changed = cfgChangedFields();
+    const keys = Object.keys(changed);
+    $('cfg-dirty').textContent = keys.length ? '● ' + keys.length + ' unsaved' : '';
+    for (const f of CONFIG_SCHEMA) {
+        const isChanged = f.key in changed;
+        const dot = $('cfgd-' + f.key);
+        if (dot) dot.style.display = isChanged ? 'block' : 'none';
+        // Drives both the reset link and the "never filter away an edit" rule,
+        // from an actual comparison rather than "was ever typed in".
+        const row = $('cfgr-' + f.key);
+        if (row) row.dataset.changed = isChanged ? '1' : '0';
+    }
+    cfgApplyFilter();
+}
+
+function cfgResetField(key) {
+    const f = CONFIG_SCHEMA.find(x => x.key === key);
+    if (!f) return;
+    cfgWriteField(f, cfgLoaded[key]);
+    cfgRefreshDirty();
+}
+
+/** Apply the search box + advanced toggle + category filter to every field. */
+function cfgApplyFilter() {
+    const q = ($('cfg-search').value || '').trim().toLowerCase();
+    const showAdv = $('cfg-show-advanced').checked;
+    let totalVisible = 0;
+    for (const g of CFG_GROUPS) {
+        const section = $('cfgg-' + g.id);
+        if (!section) continue;
+        let visible = 0;
+        for (const f of CONFIG_SCHEMA.filter(x => x.group === g.id)) {
+            const row = $('cfgr-' + f.key);
+            if (!row) continue;
+            // A field the user has actually changed always stays visible, so an
+            // unsaved edit can never hide behind a filter and get lost.
+            const dirty = row.dataset.changed === '1';
+            const matchesQuery = !q
+                || f.label.toLowerCase().includes(q)
+                || f.key.toLowerCase().includes(q)
+                || (f.help || '').toLowerCase().includes(q);
+            const allowedByAdv = showAdv || !f.advanced || dirty;
+            const allowedByGroup = cfgActiveGroup === 'all' || cfgActiveGroup === f.group;
+            const show = matchesQuery && allowedByAdv && allowedByGroup;
+            row.style.display = show ? '' : 'none';
+            if (show) visible++;
+        }
+        section.style.display = visible ? '' : 'none';
+        const count = $('cfgc-' + g.id);
+        if (count) count.textContent = visible + (visible === 1 ? ' setting' : ' settings');
+        // Searching should reveal hits, not make you expand every section.
+        if (q && visible) section.open = true;
+        totalVisible += visible;
+    }
+    $('cfg-empty').style.display = totalVisible ? 'none' : 'block';
+}
+
+function cfgRenderNav() {
+    const nav = $('cfg-nav');
+    nav.innerHTML = '';
+    const mk = (id, text) => {
+        const b = document.createElement('button');
+        b.textContent = text;
+        b.className = (cfgActiveGroup === id) ? 'active' : '';
+        b.onclick = () => {
+            cfgActiveGroup = id;
+            cfgRenderNav();
+            cfgApplyFilter();
+            if (id !== 'all') { const s = $('cfgg-' + id); if (s) s.open = true; }
+        };
+        nav.appendChild(b);
+    };
+    mk('all', 'All');
+    for (const g of CFG_GROUPS) mk(g.id, g.icon + ' ' + g.name);
+}
+
+function cfgRenderGroups() {
+    const host = $('cfg-groups');
+    host.innerHTML = '';
+    for (const g of CFG_GROUPS) {
+        const fields = CONFIG_SCHEMA.filter(f => f.group === g.id);
+        if (!fields.length) continue;
+
+        const section = document.createElement('details');
+        section.className = 'cfg-group';
+        section.id = 'cfgg-' + g.id;
+        section.open = true;
+
+        const summary = document.createElement('summary');
+        const title = document.createElement('span');
+        title.textContent = g.icon + '  ' + g.name;
+        summary.appendChild(title);
+        const count = document.createElement('span');
+        count.className = 'cfg-count';
+        count.id = 'cfgc-' + g.id;
+        summary.appendChild(count);
+        section.appendChild(summary);
+
+        const body = document.createElement('div');
+        body.className = 'cfg-body';
+        for (const f of fields) body.appendChild(cfgRenderField(f));
+        section.appendChild(body);
+        host.appendChild(section);
+    }
+    const empty = document.createElement('p');
+    empty.className = 'cfg-empty';
+    empty.id = 'cfg-empty';
+    empty.textContent = 'No settings match that search.';
+    empty.style.display = 'none';
+    host.appendChild(empty);
+}
+
+function cfgRenderField(f) {
+    const row = document.createElement('div');
+    row.className = 'cfg-field' + (f.wide ? ' wide' : '');
+    row.id = 'cfgr-' + f.key;
+
+    const head = document.createElement('div');
+    head.className = 'cfg-head';
+
+    const dot = document.createElement('span');
+    dot.className = 'cfg-dot';
+    dot.id = 'cfgd-' + f.key;
+    dot.style.display = 'none';
+    dot.title = 'Changed but not saved';
+    head.appendChild(dot);
+
+    const name = document.createElement('label');
+    name.className = 'cfg-name';
+    name.textContent = f.label;
+    name.htmlFor = 'cfgf-' + f.key;
+    // The config.toml key lives in the tooltip rather than on screen: shown
+    // inline it stole a third of every narrow column and wrapped the help text
+    // into six lines. It is still searchable, and the raw TOML view below
+    // spells every key out.
+    name.title = 'config.toml: ' + f.key;
+    head.appendChild(name);
+
+    if (f.advanced) { const b = document.createElement('span'); b.className = 'cfg-badge'; b.textContent = 'advanced'; head.appendChild(b); }
+    if (f.warn) { const b = document.createElement('span'); b.className = 'cfg-badge warn'; b.textContent = 'careful'; head.appendChild(b); }
+
+    row.appendChild(head);
+
+    let input;
+    if (f.type === 'bool') {
+        // Inline with the label: a toggle needs no line of its own.
+        const wrap = document.createElement('label');
+        wrap.className = 'toggle';
+        input = document.createElement('input');
+        input.type = 'checkbox';
+        const slider = document.createElement('span');
+        slider.className = 'slider';
+        wrap.appendChild(input);
+        wrap.appendChild(slider);
+        head.appendChild(wrap);
+    } else if (f.type === 'list') {
+        input = document.createElement('textarea');
+        input.className = 'cfg-area';
+        input.spellcheck = false;
+        if (f.ph) input.placeholder = f.ph;
+        row.appendChild(input);
+    } else {
+        input = document.createElement('input');
+        input.className = 'cfg-input';
+        if (f.type === 'number' || f.type === 'float') {
+            input.type = 'number';
+            if (f.min !== undefined) input.min = f.min;
+            if (f.max !== undefined) input.max = f.max;
+            input.step = f.step !== undefined ? f.step : (f.type === 'float' ? 'any' : 1);
         } else {
-            parsed[key] = el.value;
+            input.type = f.secret ? 'password' : 'text';
+        }
+        if (f.ph) input.placeholder = f.ph;
+        if (f.secret) {
+            const wrap = document.createElement('div');
+            wrap.className = 'cfg-inline';
+            wrap.appendChild(input);
+            const eye = document.createElement('button');
+            eye.className = 'cfg-reset';
+            eye.textContent = 'show';
+            eye.onclick = () => {
+                const hidden = input.type === 'password';
+                input.type = hidden ? 'text' : 'password';
+                eye.textContent = hidden ? 'hide' : 'show';
+            };
+            wrap.appendChild(eye);
+            row.appendChild(wrap);
+        } else {
+            row.appendChild(input);
         }
     }
+    input.id = 'cfgf-' + f.key;
+    input.addEventListener('input', cfgRefreshDirty);
+    input.addEventListener('change', cfgRefreshDirty);
 
-    function escapeTomlString(val) {
-        return '"' + (val || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"';
+    // Footer: the explanation, then the config.toml key and a reset that only
+    // appears once there is something to undo.
+    const foot = document.createElement('div');
+    foot.className = 'cfg-foot';
+    if (f.help) {
+        const help = document.createElement('p');
+        help.className = 'cfg-help';
+        help.textContent = f.help;
+        foot.appendChild(help);
     }
+    const reset = document.createElement('button');
+    reset.className = 'cfg-reset only-changed';
+    reset.textContent = 'reset';
+    reset.title = 'Restore the last saved value';
+    reset.onclick = () => cfgResetField(f.key);
+    foot.appendChild(reset);
 
-    function tomlLine(key, val, fieldDef) {
-        if (Array.isArray(val)) {
-            const items = val.map(v => (typeof v === 'number') ? String(v) : escapeTomlString(v));
-            return key + ' = [' + items.join(', ') + ']';
-        }
-        if (typeof val === 'boolean') return key + ' = ' + val;
-        if (typeof val === 'number') {
-            if (fieldDef && fieldDef.type === 'float') {
-                return key + ' = ' + (Number.isInteger(val) ? val.toFixed(1) : val);
-            }
-            return key + ' = ' + val;
-        }
-        return key + ' = ' + escapeTomlString(val);
-    }
+    row.appendChild(foot);
+    return row;
+}
 
-    // Rebuild TOML preserving order and known fields
-    const lines = [];
-    const written = new Set();
-    // Write known fields in order
-    for (const key of Object.keys(CONFIG_FIELDS)) {
-        const val = parsed[key];
-        written.add(key);
-        lines.push(tomlLine(key, val, CONFIG_FIELDS[key]));
-    }
-
-    // Also preserve fields that aren't in our GUI (e.g. bedtiming, skip, enable_ah_flips, etc.)
-    for (const [key, val] of Object.entries(parsed)) {
-        if (written.has(key)) continue;
-        written.add(key);
-        lines.push(tomlLine(key, val, null));
-    }
-
-    return lines.join('\n') + '\n';
+let cfgBuilt = false;
+function cfgEnsureBuilt() {
+    if (cfgBuilt) return;
+    cfgBuilt = true;
+    cfgRenderGroups();
+    cfgRenderNav();
+    $('cfg-search').addEventListener('input', cfgApplyFilter);
+    $('cfg-show-advanced').addEventListener('change', cfgApplyFilter);
 }
 
 async function loadConfig() {
+    cfgEnsureBuilt();
     try {
-        const r = await fetch('/api/config');
+        const r = await fetch('/api/config.json');
         if (r.status === 401) { showLoginOverlay(); return; }
         if (!r.ok) { showConfigStatus('Failed to load config', true); return; }
-        const text = await r.text();
-        $('config-editor').value = text;
-        // Populate GUI fields
-        const parsed = parseSimpleToml(text);
-        populateConfigGUI(parsed);
+        cfgLoaded = await r.json();
+        for (const f of CONFIG_SCHEMA) {
+            cfgWriteField(f, cfgLoaded[f.key]);
+            const row = $('cfgr-' + f.key);
+            if (row) row.dataset.changed = '0';
+        }
+        cfgRefreshDirty();
         hideConfigStatus();
+        // Mirror the on-disk TOML into the read-only escape hatch.
+        fetch('/api/config').then(r2 => r2.ok ? r2.text() : '').then(t => { if (t) $('config-editor').value = t; }).catch(() => {});
     } catch(e) {
         console.error('Config load failed', e);
         showConfigStatus('Failed to load config: ' + e.message, true);
@@ -1712,45 +1959,23 @@ async function loadConfig() {
 }
 
 async function saveConfigGUI() {
-    const originalToml = $('config-editor').value;
-    const toml = buildTomlFromGUI(originalToml);
-    if (!toml.trim()) { showConfigStatus('Config cannot be empty', true); return; }
-    // Also update the raw textarea
-    $('config-editor').value = toml;
+    const changed = cfgChangedFields();
+    const n = Object.keys(changed).length;
+    if (!n) { showConfigStatus('No changes to save', false); return; }
     try {
-        const r = await fetch('/api/config', {
+        // Only the edited fields go over the wire; everything else is left
+        // exactly as it is on disk instead of being rewritten from the browser.
+        const r = await fetch('/api/config.json', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({config_toml: toml})
+            body: JSON.stringify(changed)
         });
+        const msg = await r.text();
         if (r.ok) {
-            showConfigStatus('Config saved successfully!', false);
+            showConfigStatus(msg || ('Saved ' + n + ' setting(s)'), false);
+            await loadConfig();
             fetchStatus();
         } else {
-            const msg = await r.text();
-            showConfigStatus('Save failed: ' + msg, true);
-        }
-    } catch(e) {
-        console.error('Config save failed', e);
-        showConfigStatus('Save failed: ' + e.message, true);
-    }
-}
-
-// Keep legacy saveConfig for raw TOML editing
-async function saveConfig() {
-    const toml = $('config-editor').value;
-    if (!toml.trim()) { showConfigStatus('Config cannot be empty', true); return; }
-    try {
-        const r = await fetch('/api/config', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({config_toml: toml})
-        });
-        if (r.ok) {
-            showConfigStatus('Config saved successfully!', false);
-            fetchStatus();
-        } else {
-            const msg = await r.text();
             showConfigStatus('Save failed: ' + msg, true);
         }
     } catch(e) {
