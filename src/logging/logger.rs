@@ -33,6 +33,29 @@ pub fn vps_prefix() -> String {
     }
 }
 
+/// The log filter used when `RUST_LOG` says nothing.
+///
+/// Split out so the noise-suppression rules can be tested: each one exists
+/// because a library warns about something the user can neither fix nor act on,
+/// and a regression here shows up as console spam in front of customers.
+fn default_filter() -> EnvFilter {
+    EnvFilter::new("info")
+        // Azalea emits harmless errors and warnings (set_equipment "Unexpected
+        // enum variant 7", chunk entity warnings). Anything that matters
+        // surfaces through our own logging when we handle the event.
+        .add_directive("azalea_world=off".parse().unwrap())
+        .add_directive("azalea_entity=off".parse().unwrap())
+        .add_directive("azalea_client=off".parse().unwrap())
+        .add_directive("azalea_protocol=off".parse().unwrap())
+        // "Illegal SNI extension: ignoring IP address presented as hostname".
+        // The panel is reached by IP, and a client that puts an IP literal in
+        // SNI trips this on EVERY connection. rustls ignores the field and the
+        // handshake succeeds, so it is noise the user cannot act on — but it
+        // reads like a security warning and lands in front of customers. Real
+        // rustls problems are logged at error and still come through.
+        .add_directive("rustls::msgs::handshake=error".parse().unwrap())
+}
+
 pub fn init_logger() -> Result<()> {
     let logs_dir = get_logs_dir();
     std::fs::create_dir_all(&logs_dir)?;
@@ -47,19 +70,13 @@ pub fn init_logger() -> Result<()> {
         "latest.log",
     );
 
+
     // Create filter with specific rules to suppress noise.
     // Azalea library crates emit harmless errors & warnings (e.g. set_equipment
     // "Unexpected enum variant 7", chunk entity warnings) that spam the console.
     // We suppress them entirely – any important azalea error will surface through
     // our own logging when we handle the event.
-    let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| {
-            EnvFilter::new("info")
-                .add_directive("azalea_world=off".parse().unwrap())
-                .add_directive("azalea_entity=off".parse().unwrap())
-                .add_directive("azalea_client=off".parse().unwrap())
-                .add_directive("azalea_protocol=off".parse().unwrap())
-        });
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| default_filter());
 
     // Set up subscriber with both console and file output
     tracing_subscriber::registry()
@@ -280,4 +297,75 @@ mod tests {
         assert!(mc_to_ansi("§l").contains("\x1b[1m"));  // Bold
         assert!(mc_to_ansi("§r").contains("\x1b[0m"));  // Reset
     }
+
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::layer::Context;
+
+    /// Records the targets of every event that survives the filter.
+    struct Capture(Arc<Mutex<Vec<String>>>);
+
+    impl<S: tracing::Subscriber> Layer<S> for Capture {
+        fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+            self.0.lock().unwrap().push(event.metadata().target().to_string());
+        }
+    }
+
+    fn targets_passing_default_filter(emit: impl FnOnce()) -> Vec<String> {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry()
+            .with(default_filter())
+            .with(Capture(seen.clone()));
+        tracing::subscriber::with_default(subscriber, emit);
+        let out = seen.lock().unwrap().clone();
+        out
+    }
+
+    /// A customer asked "what does that mean" about a warning they cannot act
+    /// on. rustls logs it for EVERY connection that presents an IP as the SNI
+    /// hostname, which is what a panel reached by IP gets, so it spams the
+    /// console and reads like a security problem. The handshake succeeds
+    /// regardless — rustls simply ignores the field.
+    #[test]
+    fn the_illegal_sni_warning_is_not_shown_to_users() {
+        let seen = targets_passing_default_filter(|| {
+            tracing::warn!(
+                target: "rustls::msgs::handshake",
+                "Illegal SNI extension: ignoring IP address presented as hostname"
+            );
+        });
+        assert!(
+            seen.is_empty(),
+            "the per-connection SNI warning must not reach the console, got: {seen:?}"
+        );
+    }
+
+    /// Suppressing the noise must not blind us to genuine TLS failures.
+    #[test]
+    fn real_rustls_errors_still_come_through() {
+        let seen = targets_passing_default_filter(|| {
+            tracing::error!(target: "rustls::msgs::handshake", "something actually broke");
+            tracing::error!(target: "rustls", "a different rustls module");
+        });
+        assert_eq!(seen.len(), 2, "errors must survive the filter, got: {seen:?}");
+    }
+
+    /// Our own logging is what the filter exists to protect.
+    #[test]
+    fn our_own_warnings_are_unaffected() {
+        let seen = targets_passing_default_filter(|| {
+            tracing::warn!(target: "frikadellen_baf::web::server", "[WebTLS] something worth seeing");
+            tracing::info!(target: "frikadellen_baf", "startup");
+        });
+        assert_eq!(seen.len(), 2, "the bot's own logs must not be filtered, got: {seen:?}");
+    }
+
+    #[test]
+    fn azalea_noise_stays_suppressed() {
+        let seen = targets_passing_default_filter(|| {
+            tracing::error!(target: "azalea_world", "Unexpected enum variant 7");
+            tracing::warn!(target: "azalea_client", "chunk entity warning");
+        });
+        assert!(seen.is_empty(), "azalea noise must stay off, got: {seen:?}");
+    }
+
 }
