@@ -72,7 +72,13 @@ impl ConfigLoader {
 
     /// Settings this build drops from config.toml. Their presence in the file
     /// on disk is what marks it as "written by an older build".
-    const REMOVED_KEYS: [&'static str; 3] = ["web_https", "web_tls_cert_path", "web_tls_key_path"];
+    ///
+    /// `web_tls_cert_path` / `web_tls_key_path` are NOT in here: dropping them
+    /// silently deleted the certificate people had configured and left the panel
+    /// serving its own self-signed cert, with nothing in the log to say why.
+    /// Only `web_https` stays removed — TLS is unconditional now, so a flag that
+    /// could turn it off is the actual footgun.
+    const REMOVED_KEYS: [&'static str; 1] = ["web_https"];
 
     /// Save a copy of config.toml before this build's panel-security migration
     /// rewrites it — generating a password, or dropping the old TLS settings.
@@ -247,7 +253,7 @@ mod tests {
         // The actual promise being made to the user: copy the file back and you
         // are exactly where you started.
         let (loader, path) = temp_loader("revert");
-        let original = "web_gui_password = \"\"\nweb_tls_cert_path = \"/etc/cert.pem\"\n";
+        let original = "web_gui_password = \"\"\nweb_https = false\n";
         std::fs::write(&path, original).expect("write config");
         loader.load().expect("config should load");
 
