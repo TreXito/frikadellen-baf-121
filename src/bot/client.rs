@@ -6679,6 +6679,9 @@ fn rebuild_cached_window_json(bot: &Client, state: &BotClientState) {
 /// We extract the item name, lore, tag, and parse bid/time/status from lore.
 fn build_cached_my_auctions_json(slots: &[azalea_inventory::ItemStack], state: &BotClientState) {
     let mut auctions: Vec<serde_json::Value> = Vec::new();
+    // Per-window tallies so the summary line says what the panel will show.
+    let (mut n_active, mut n_sold, mut n_expired) = (0usize, 0usize, 0usize);
+    let (mut n_grace, mut n_unknown_time) = (0usize, 0usize);
 
     // Auction slots are typically in the first rows of the chest (slots 0-53).
     // Skip navigation items (like Close, Create Auction, page arrows, etc.)
@@ -6706,7 +6709,10 @@ fn build_cached_my_auctions_json(slots: &[azalea_inventory::ItemStack], state: &
             || combined_lower.contains("sold")
             || combined_lower.contains("expired")
             || contains_word_ended(&combined_lower)
-            || combined_lower.contains("click to claim");
+            || combined_lower.contains("click to claim")
+            // A listing still inside its grace period may show only the
+            // "Can be bought in 20s" countdown, with no price/"Ends in" line.
+            || is_grace_period_lore(&combined_lower);
         if !is_auction_slot {
             continue;
         }
@@ -6732,6 +6738,54 @@ fn build_cached_my_auctions_json(slots: &[azalea_inventory::ItemStack], state: &
         } else {
             None
         };
+
+        // Hypixel holds a freshly listed auction in a ~20s grace period during
+        // which its lore shows "Can be bought in 20s" and carries no "Ends in:"
+        // line yet. `unwrap_or(0)` turned that missing value into "0 seconds
+        // left", so the web panel rendered brand-new listings as "Expired".
+        // Report an unparsable time on an ACTIVE auction as JSON null (unknown)
+        // — only a sold/ended auction is genuinely at zero — and pass the grace
+        // countdown along so the panel can show what is really happening.
+        let grace_secs = if status == "active" {
+            extract_grace_seconds_from_lore(&lore)
+        } else {
+            None
+        };
+        let time_remaining_json = match time_remaining_secs {
+            Some(secs) => serde_json::json!(secs),
+            None if status == "active" => serde_json::Value::Null,
+            None => serde_json::json!(0),
+        };
+
+        match status {
+            "sold" => n_sold += 1,
+            "expired" => n_expired += 1,
+            _ => n_active += 1,
+        }
+        if grace_secs.is_some() {
+            n_grace += 1;
+        }
+        if status == "active" && time_remaining_secs.is_none() {
+            n_unknown_time += 1;
+            if grace_secs.is_none() {
+                // An ACTIVE auction whose lore we could parse neither an
+                // "Ends in:" nor a grace countdown out of. That is the exact
+                // shape that used to render as "Expired", so dump the real lore
+                // — Hypixel's wording is the only thing that can tell us which
+                // pattern to add next, and it is unreachable from a bug report.
+                warn!(
+                    "[MyAuctions] Active auction with UNPARSABLE time — please report this lore. item={:?} lore={:?}",
+                    remove_mc_colors(&display_name),
+                    lore,
+                );
+            } else {
+                debug!(
+                    "[MyAuctions] '{}' is in its listing grace period ({}s until buyable)",
+                    remove_mc_colors(&display_name),
+                    grace_secs.unwrap_or(0),
+                );
+            }
+        }
 
         // Extract tag for icon lookup
         let tag = if let Some(item_data) = item.as_present() {
@@ -6761,7 +6815,8 @@ fn build_cached_my_auctions_json(slots: &[azalea_inventory::ItemStack], state: &
             "starting_bid": price.unwrap_or(0),
             "highest_bid": 0,
             "lore": lore_colored,
-            "time_remaining_seconds": time_remaining_secs.unwrap_or(0),
+            "time_remaining_seconds": time_remaining_json,
+            "buyable_in_seconds": grace_secs,
         });
 
         // Add colored item name (with §-codes) for rarity-colored tooltip title
@@ -6779,7 +6834,16 @@ fn build_cached_my_auctions_json(slots: &[azalea_inventory::ItemStack], state: &
         auctions.push(entry);
     }
 
-    info!("[MyAuctions] Cached {} auction entries from Manage Auctions window", auctions.len());
+    info!(
+        "[MyAuctions] Cached {} auction entries from Manage Auctions window \
+         (active {} / sold {} / expired {}; {} in listing grace period, {} with unknown time left)",
+        auctions.len(),
+        n_active,
+        n_sold,
+        n_expired,
+        n_grace,
+        n_unknown_time,
+    );
 
     if let Ok(json_str) = serde_json::to_string(&auctions) {
         *state.cached_my_auctions_json.write() = Some(json_str);
@@ -6803,6 +6867,39 @@ fn extract_price_from_lore(lore: &[String]) -> Option<i64> {
                     return Some(n);
                 }
             }
+        }
+    }
+    None
+}
+
+/// True when a lowercased, color-stripped lore blob shows Hypixel's post-listing
+/// grace period ("Can be bought in 20s"), during which the auction exists but
+/// nobody may buy it yet.
+fn is_grace_period_lore(combined_lower: &str) -> bool {
+    combined_lower.contains("can be bought in")
+        || combined_lower.contains("buyable in")
+        || combined_lower.contains("purchasable in")
+}
+
+/// Seconds left in the post-listing grace period, if the lore is showing one.
+/// Returns `None` for an ordinary listing that is already buyable.
+fn extract_grace_seconds_from_lore(lore: &[String]) -> Option<i64> {
+    for line in lore {
+        let clean = remove_mc_colors(line).to_lowercase();
+        if !is_grace_period_lore(&clean) {
+            continue;
+        }
+        // Parse from the countdown onward so a price earlier on the line (e.g.
+        // "Buy it now: 20,000 coins — can be bought in 5s") can't be read as a
+        // duration.
+        let tail = clean
+            .find("bought in")
+            .or_else(|| clean.find("buyable in"))
+            .or_else(|| clean.find("purchasable in"))
+            .map(|i| &clean[i..])
+            .unwrap_or(&clean);
+        if let Some(secs) = parse_bed_remaining_secs_from_text(tail) {
+            return Some(secs as i64);
         }
     }
     None
@@ -7958,6 +8055,53 @@ mod tests {
         assert_eq!(parse_bed_remaining_secs_from_text("Purchase in 1m 05s"), Some(65));
         assert_eq!(parse_bed_remaining_secs_from_text("Grace period: 59s"), Some(59));
         assert_eq!(parse_bed_remaining_secs_from_text("No time here"), None);
+    }
+
+    #[test]
+    fn test_extract_grace_seconds_from_lore() {
+        // A listing inside Hypixel's post-listing grace period.
+        assert_eq!(
+            extract_grace_seconds_from_lore(&[
+                "§7Buy it now: §65,000,000 coins".to_string(),
+                "§cCan be bought in §e20s".to_string(),
+            ]),
+            Some(20)
+        );
+        assert_eq!(
+            extract_grace_seconds_from_lore(&["Auction can be bought in 20 seconds".to_string()]),
+            Some(20)
+        );
+        // A price earlier on the line must not be read as the countdown.
+        assert_eq!(
+            extract_grace_seconds_from_lore(&[
+                "§7Buy it now: §620,000,000 coins — can be bought in §e5s".to_string()
+            ]),
+            Some(5)
+        );
+        // An ordinary, already-buyable listing has no grace countdown.
+        assert_eq!(
+            extract_grace_seconds_from_lore(&[
+                "§7Buy it now: §65,000,000 coins".to_string(),
+                "§7Ends in: §e1d 4h".to_string(),
+            ]),
+            None
+        );
+    }
+
+    #[test]
+    fn test_grace_period_lore_is_not_mistaken_for_an_ended_auction() {
+        // The bug: a freshly listed auction has no "Ends in:" line yet, so the
+        // time extractor found nothing. It must stay recognisable as a real
+        // auction slot and must NOT report a time of zero.
+        let combined = "buy it now: 5,000,000 coins\ncan be bought in 20s".to_string();
+        assert!(is_grace_period_lore(&combined));
+        assert!(!contains_word_ended(&combined));
+        assert!(!combined.contains("expired"));
+        assert_eq!(
+            extract_time_remaining_from_lore(&["§cCan be bought in §e20s".to_string()]),
+            None,
+            "grace lore carries no 'Ends in', so the remaining time is UNKNOWN"
+        );
     }
 
     #[test]

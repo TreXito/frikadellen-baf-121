@@ -837,6 +837,10 @@ async function fetchBazaarOrders() {
 
 /** Format seconds remaining into a human-readable string */
 function formatTimeRemaining(secs) {
+    // null/undefined means the time is UNKNOWN, not zero — a listing still in
+    // Hypixel's grace period has no "Ends in:" line yet. Calling that 'Expired'
+    // labelled every brand-new auction as dead.
+    if (secs === null || secs === undefined) return '—';
     if (secs <= 0) return 'Expired';
     const d = Math.floor(secs / 86400);
     const h = Math.floor((secs % 86400) / 3600);
@@ -844,6 +848,18 @@ function formatTimeRemaining(secs) {
     if (d > 0) return d + 'd ' + h + 'h';
     if (h > 0) return h + 'h ' + m + 'm';
     return m + 'm ' + (secs % 60) + 's';
+}
+
+/**
+ * What to show in the "Time Left" column. A freshly listed auction spends ~20s
+ * in a grace period where nobody can buy it yet; show that countdown instead of
+ * an unknown/expired time so it reads as "just listed", not "dead".
+ */
+function formatAuctionTime(a) {
+    if (a.buyable_in_seconds !== null && a.buyable_in_seconds !== undefined) {
+        return 'Buyable in ' + a.buyable_in_seconds + 's';
+    }
+    return formatTimeRemaining(a.time_remaining_seconds);
 }
 
 function renderAuctions(auctions) {
@@ -863,7 +879,10 @@ function renderAuctions(auctions) {
             ? 'https://sky.coflnet.com/static/icon/' + encodeURIComponent(a.tag)
             : null;
         const bid = a.highest_bid > 0 ? a.highest_bid : a.starting_bid;
-        const urgent = a.time_remaining_seconds < 3600;
+        // Only flag a KNOWN, short remaining time as urgent — an unknown time
+        // (grace period) must not be painted red.
+        const urgent = typeof a.time_remaining_seconds === 'number'
+            && a.time_remaining_seconds < 3600;
         const escapedName = escapeHtml(a.item_name);
         tr.innerHTML =
             '<td style="width:36px">' +
@@ -871,7 +890,7 @@ function renderAuctions(auctions) {
             '</td>' +
             '<td>' + escapedName + '</td>' +
             '<td class="auction-bid"><span title="coins">' + bid.toLocaleString() + ' ✦</span></td>' +
-            '<td class="auction-time' + (urgent ? ' urgent' : '') + '">' + formatTimeRemaining(a.time_remaining_seconds) + '</td>' +
+            '<td class="auction-time' + (urgent ? ' urgent' : '') + '">' + escapeHtml(formatAuctionTime(a)) + '</td>' +
             '<td></td>';
         // Create cancel button via DOM to avoid XSS
         const cancelBtn = document.createElement('button');

@@ -193,8 +193,15 @@ struct AuctionEntry {
     bin: bool,
     /// ISO 8601 end timestamp
     end: String,
-    /// Seconds remaining until auction expires (negative = expired)
-    time_remaining_seconds: i64,
+    /// Seconds remaining until the auction expires (negative = expired).
+    /// `None` when the time is genuinely UNKNOWN — a listing still inside its
+    /// grace period shows no "Ends in:" line yet. Reporting that as `0` made the
+    /// panel label brand-new listings "Expired".
+    time_remaining_seconds: Option<i64>,
+    /// Seconds until a freshly listed auction leaves Hypixel's ~20s grace period
+    /// and becomes buyable. `None` once it is buyable (the normal case).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    buyable_in_seconds: Option<i64>,
     /// Lore lines from the in-game item tooltip (only present for GUI-sourced entries)
     #[serde(skip_serializing_if = "Option::is_none")]
     lore: Option<Vec<String>>,
@@ -1184,7 +1191,8 @@ async fn get_auctions(State(s): State<WebSharedState>) -> impl IntoResponse {
                         starting_bid: a.get("starting_bid").and_then(|v| v.as_i64()).unwrap_or(0),
                         bin: a.get("bin").and_then(|v| v.as_bool()).unwrap_or(false),
                         end: String::new(),
-                        time_remaining_seconds: a.get("time_remaining_seconds").and_then(|v| v.as_i64()).unwrap_or(0),
+                        time_remaining_seconds: a.get("time_remaining_seconds").and_then(|v| v.as_i64()),
+                        buyable_in_seconds: a.get("buyable_in_seconds").and_then(|v| v.as_i64()),
                         lore: a.get("lore").and_then(|v| v.as_array()).map(|arr| {
                             arr.iter().filter_map(|l| l.as_str().map(|s| s.to_string())).collect()
                         }),
@@ -1371,7 +1379,10 @@ async fn get_auctions(State(s): State<WebSharedState>) -> impl IntoResponse {
                 starting_bid,
                 bin,
                 end: end_str.to_string(),
-                time_remaining_seconds: time_remaining,
+                time_remaining_seconds: Some(time_remaining),
+                // The Hypixel API exposes no grace-period flag; only the in-game
+                // GUI lore shows the countdown.
+                buyable_in_seconds: None,
                 lore: None,
             })
         })
@@ -1531,7 +1542,8 @@ fn parse_hypixel_auctions(data: &serde_json::Value) -> Vec<AuctionEntry> {
                 starting_bid,
                 bin,
                 end: end_iso,
-                time_remaining_seconds: (time_remaining_ms / 1000).max(0),
+                time_remaining_seconds: Some((time_remaining_ms / 1000).max(0)),
+                buyable_in_seconds: None,
                 lore: None,
             })
         })
