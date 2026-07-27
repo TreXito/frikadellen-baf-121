@@ -607,6 +607,116 @@ async fn build_web_tls(
         .context("failed to load panel certificate")
 }
 
+
+/// Accepts a connection only if it is really TLS; a plain HTTP request gets a
+/// redirect to the https:// URL instead of a dead socket.
+///
+/// The panel is HTTPS-only, so a user typing `localhost:8080` — which every
+/// browser turns into `http://localhost:8080` — sent a plaintext request to a
+/// TLS port. rustls cannot parse it, the connection is dropped, and the browser
+/// shows "this site can't be reached". Users reported it as the panel simply not
+/// existing ("I cant see localhost", "no local host at all") and the workaround
+/// was knowing to type the `s` yourself.
+///
+/// A TLS ClientHello always starts with the handshake record type 0x16, and no
+/// HTTP method does, so one peeked byte separates the two without consuming
+/// anything.
+#[derive(Clone, Copy)]
+struct RedirectPlainHttpToHttps;
+
+impl<S> axum_server::accept::Accept<tokio::net::TcpStream, S> for RedirectPlainHttpToHttps
+where
+    S: Send + 'static,
+{
+    type Stream = tokio::net::TcpStream;
+    type Service = S;
+    type Future = futures::future::BoxFuture<'static, std::io::Result<(Self::Stream, S)>>;
+
+    fn accept(&self, mut stream: tokio::net::TcpStream, service: S) -> Self::Future {
+        Box::pin(async move {
+            let mut first = [0u8; 1];
+            // `peek` leaves the byte in the socket buffer, so a real TLS
+            // handshake is handed on completely untouched.
+            let n = stream.peek(&mut first).await?;
+            if n == 1 && first[0] == TLS_HANDSHAKE_RECORD {
+                return Ok((stream, service));
+            }
+
+            send_https_redirect(&mut stream).await;
+            // Dropping the connection here is correct: it has been answered.
+            // axum-server ignores a failed accept per connection.
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "plain HTTP request redirected to https",
+            ))
+        })
+    }
+}
+
+/// First byte of a TLS record carrying a handshake (a ClientHello).
+const TLS_HANDSHAKE_RECORD: u8 = 0x16;
+
+/// Read the plaintext request far enough to learn where it was aimed, then
+/// answer with a redirect to the same URL over https.
+async fn send_https_redirect(stream: &mut tokio::net::TcpStream) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // Enough for a request line and headers; we only need the target and Host.
+    let mut buf = vec![0u8; 2048];
+    let mut len = 0;
+    while len < buf.len() {
+        match stream.read(&mut buf[len..]).await {
+            Ok(0) => break,
+            Ok(n) => {
+                len += n;
+                if buf[..len].windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            Err(_) => return,
+        }
+    }
+    let request = String::from_utf8_lossy(&buf[..len]);
+
+    let target = request
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .filter(|t| t.starts_with('/'))
+        .unwrap_or("/");
+    let host = request
+        .lines()
+        .skip(1)
+        .find_map(|line| line.split_once(':').filter(|(k, _)| k.eq_ignore_ascii_case("host")))
+        .map(|(_, v)| v.trim());
+
+    let response = match host {
+        Some(host) if !host.is_empty() => {
+            let location = format!("https://{host}{target}");
+            // 302 rather than a permanent redirect: BAF_WEB_PLAIN_HTTP can turn
+            // TLS off for people terminating it upstream, and a cached
+            // permanent redirect would then send them somewhere nothing is
+            // listening.
+            format!(
+                "HTTP/1.1 302 Found\r\nLocation: {location}\r\nContent-Length: 0\r\n\
+                 Connection: close\r\n\r\n"
+            )
+        }
+        // No usable Host header to build a URL from: say what to do in plain
+        // words rather than leaving a blank page.
+        _ => {
+            let body = "The bot panel is HTTPS-only. Use https:// instead of http:// in the address bar.";
+            format!(
+                "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain; charset=utf-8\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            )
+        }
+    };
+    let _ = stream.write_all(response.as_bytes()).await;
+    let _ = stream.flush().await;
+}
+
 pub async fn start_web_server(state: WebSharedState, port: u16) {
     let use_tls = !plain_http_requested();
     WEB_TLS_ACTIVE.store(use_tls, Ordering::Relaxed);
@@ -690,7 +800,12 @@ pub async fn start_web_server(state: WebSharedState, port: u16) {
                 return;
             }
         };
-        if let Err(e) = axum_server::bind_rustls(socket, tls_config)
+        // A sniffing acceptor in front of rustls, so a plain http:// request is
+        // answered with a redirect instead of a dropped connection.
+        let acceptor = axum_server::tls_rustls::RustlsAcceptor::new(tls_config)
+            .acceptor(RedirectPlainHttpToHttps);
+        if let Err(e) = axum_server::bind(socket)
+            .acceptor(acceptor)
             .serve(app.into_make_service())
             .await
         {
@@ -2549,6 +2664,77 @@ mod tests {
             after, renewed_der,
             "after a renewal the panel must present the NEW certificate on the wire"
         );
+    }
+
+    /// The reported symptom: "I cant see localhost", "no local host at all",
+    /// "it legit just says the website isnt working".
+    ///
+    /// Typing `localhost:8080` gives every browser `http://localhost:8080`, and
+    /// the panel is HTTPS-only, so the plaintext request hit a TLS port and the
+    /// connection simply died. Three separate users reported the panel as
+    /// missing; the workaround was being told in Discord to type the `s`.
+    #[tokio::test]
+    async fn plain_http_on_the_tls_port_redirects_instead_of_dying() {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let dir = std::env::temp_dir().join(format!("baf-redirect-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let (cert, key) = ensure_panel_cert(&dir).expect("cert");
+        let tls = axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert, &key)
+            .await
+            .expect("load");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let app = Router::new().route("/", get(|| async { "panel" }));
+        let acceptor = axum_server::tls_rustls::RustlsAcceptor::new(tls)
+            .acceptor(RedirectPlainHttpToHttps);
+        tokio::spawn(async move {
+            axum_server::from_tcp(listener)
+                .acceptor(acceptor)
+                .serve(app.into_make_service())
+                .await
+                .ok();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+
+        // Exactly what a browser sends for http://localhost:PORT/config
+        let raw = tokio::task::spawn_blocking(move || {
+            use std::io::{Read, Write};
+            let mut sock = std::net::TcpStream::connect(addr).expect("connect");
+            write!(
+                sock,
+                "GET /config HTTP/1.1\r\nHost: localhost:{}\r\nConnection: close\r\n\r\n",
+                addr.port()
+            )
+            .expect("write");
+            let mut out = String::new();
+            let _ = sock.read_to_string(&mut out);
+            out
+        })
+        .await
+        .expect("client");
+
+        assert!(raw.starts_with("HTTP/1.1 302"), "expected a redirect, got: {raw:?}");
+        assert!(
+            raw.contains(&format!("Location: https://localhost:{}/config", addr.port())),
+            "the redirect must preserve host AND path, got: {raw:?}"
+        );
+
+        // The same port must still complete a real TLS handshake.
+        let served = tokio::task::spawn_blocking(move || {
+            let connector = native_tls::TlsConnector::builder()
+                .danger_accept_invalid_certs(true)
+                .danger_accept_invalid_hostnames(true)
+                .build()
+                .expect("connector");
+            let tcp = std::net::TcpStream::connect(addr).expect("connect");
+            connector.connect("127.0.0.1", tcp).is_ok()
+        })
+        .await
+        .expect("client");
+        assert!(served, "https on the same port must be unaffected");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The panel must still come up when a configured certificate cannot be
