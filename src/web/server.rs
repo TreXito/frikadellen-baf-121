@@ -372,6 +372,7 @@ pub async fn start_web_server_tls(state: WebSharedState, port: u16, tls: Option<
         .route("/api/bazaar_orders", get(get_bazaar_orders))
         .route("/api/queue", get(get_queue_status))
         .route("/api/config", get(get_config).post(save_config))
+        .route("/api/config.json", get(get_config_json).post(save_config_json))
         .route("/api/logs/latest", get(download_latest_log))
         .route("/api/profit", get(get_profit))
         .route("/api/kill_session", axum::routing::post(kill_session))
@@ -1483,6 +1484,114 @@ async fn save_config(
     }
 }
 
+// ── JSON config API ─────────────────────────────────────────
+//
+// The panel used to round-trip the WHOLE config as TOML text: the browser
+// hand-parsed it, rebuilt it field by field, and posted the result back. Every
+// setting the hand-rolled parser did not know about had to be re-emitted
+// blind, so adding a field meant touching three places and any mismatch
+// silently rewrote the user's file. These two endpoints move that job to serde,
+// which already knows the real schema:
+//
+//   GET  /api/config.json  → the current config as JSON
+//   POST /api/config.json  → a PARTIAL object of changed fields, merged in
+//
+// A patch only carries what the user actually edited, so unknown, unedited and
+// server-managed fields are preserved by construction rather than by the
+// client remembering to write them back.
+
+/// Serialize the live config to JSON with server-managed secrets stripped.
+fn config_to_json(config: &crate::config::Config) -> Result<serde_json::Value, String> {
+    let mut config = config.clone();
+    // Same reasoning as get_config: COFL session tokens are account
+    // credentials, not settings. Never send them to the browser.
+    config.sessions.clear();
+    serde_json::to_value(&config).map_err(|e| format!("Failed to serialize config: {e}"))
+}
+
+async fn get_config_json(State(s): State<WebSharedState>) -> impl IntoResponse {
+    let loader = s.config_loader.clone();
+    match tokio::task::spawn_blocking(move || loader.load()).await {
+        Ok(Ok(config)) => match config_to_json(&config) {
+            Ok(v) => (StatusCode::OK, Json(v)).into_response(),
+            Err(e) => {
+                error!("[WebGUI] {}", e);
+                (StatusCode::INTERNAL_SERVER_ERROR, "Failed to serialize config").into_response()
+            }
+        },
+        Ok(Err(e)) => {
+            error!("[WebGUI] Failed to load config: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, "Failed to load config").into_response()
+        }
+        Err(e) => {
+            error!("[WebGUI] Config task panicked: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, "Internal error").into_response()
+        }
+    }
+}
+
+/// Merge a partial `patch` object into `base`, returning the config it produces.
+///
+/// Rejects unknown keys rather than dropping them: a typo'd field name from a
+/// stale panel would otherwise look like it saved and then silently do nothing.
+fn merge_config_patch(
+    base: &crate::config::Config,
+    patch: &serde_json::Map<String, serde_json::Value>,
+) -> Result<crate::config::Config, String> {
+    let mut doc = config_to_json(base)?;
+    let obj = doc
+        .as_object_mut()
+        .ok_or_else(|| "config did not serialize to an object".to_string())?;
+    for (key, value) in patch {
+        if !obj.contains_key(key) {
+            return Err(format!("Unknown config field '{key}'"));
+        }
+        obj.insert(key.clone(), value.clone());
+    }
+    // Round-tripping through Config is the validation: a wrong type, or a
+    // number where a string belongs, fails HERE instead of corrupting the file.
+    serde_json::from_value(doc).map_err(|e| format!("Invalid config value: {e}"))
+}
+
+async fn save_config_json(
+    State(s): State<WebSharedState>,
+    Json(patch): Json<serde_json::Map<String, serde_json::Value>>,
+) -> impl IntoResponse {
+    if patch.is_empty() {
+        return (StatusCode::OK, "No changes".to_string()).into_response();
+    }
+    let loader = s.config_loader.clone();
+    let enable_ah = s.enable_ah_flips.clone();
+    let enable_bz = s.enable_bazaar_flips.clone();
+    let changed: Vec<String> = patch.keys().cloned().collect();
+    match tokio::task::spawn_blocking(move || -> Result<(), String> {
+        let existing = loader.load().map_err(|e| format!("Failed to load config: {e}"))?;
+        let mut config = merge_config_patch(&existing, &patch)?;
+        // config_to_json cleared these; restore the real ones so saving from the
+        // panel never wipes the user's authenticated COFL sessions.
+        config.sessions = existing.sessions;
+        config.normalize_do_not_relist_ids();
+        enable_ah.store(config.enable_ah_flips, Ordering::Relaxed);
+        enable_bz.store(config.enable_bazaar_flips, Ordering::Relaxed);
+        loader.save(&config).map_err(|e| format!("Failed to save config: {e}"))
+    })
+    .await
+    {
+        Ok(Ok(())) => {
+            info!("[WebGUI] Config updated ({} field(s): {})", changed.len(), changed.join(", "));
+            (StatusCode::OK, format!("Saved {} setting(s)", changed.len())).into_response()
+        }
+        Ok(Err(msg)) => {
+            warn!("[WebGUI] Config patch rejected: {}", msg);
+            (StatusCode::BAD_REQUEST, msg).into_response()
+        }
+        Err(e) => {
+            error!("[WebGUI] Config patch task panicked: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".to_string()).into_response()
+        }
+    }
+}
+
 /// Parse auctions from Hypixel API response format.
 /// Hypixel uses millisecond timestamps and different field names than Coflnet.
 fn parse_hypixel_auctions(data: &serde_json::Value) -> Vec<AuctionEntry> {
@@ -1688,6 +1797,118 @@ async fn handle_chat_ws(mut socket: WebSocket, state: WebSharedState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every `key:'…'` in the panel's CONFIG_SCHEMA.
+    fn panel_schema_keys() -> std::collections::HashSet<String> {
+        let panel = include_str!("panel.html");
+        // The schema block only — so an unrelated `key:'x'` elsewhere in the
+        // panel cannot make this test pass by accident.
+        let start = panel
+            .find("const CONFIG_SCHEMA = [")
+            .expect("panel.html defines CONFIG_SCHEMA");
+        let body = &panel[start..];
+        let end = body.find("\n];").expect("CONFIG_SCHEMA is terminated");
+        let re = regex::Regex::new(r"\{key:'([a-zA-Z0-9_]+)'").unwrap();
+        re.captures_iter(&body[..end])
+            .map(|c| c[1].to_string())
+            .collect()
+    }
+
+    /// Every serialized field name of `Config`.
+    fn config_field_names() -> Vec<String> {
+        let value = serde_json::to_value(crate::config::Config::default())
+            .expect("Config serializes to JSON");
+        value
+            .as_object()
+            .expect("Config is a JSON object")
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    /// The web panel is meant to be a COMPLETE editor for config.toml. It had
+    /// drifted to covering roughly 60% of the fields because each one had to be
+    /// hand-written into the HTML. Now the form renders from CONFIG_SCHEMA, and
+    /// this test is what keeps "everything is adjustable from the web" true: a
+    /// new field in Config fails here until it is given a schema entry.
+    #[test]
+    fn config_panel_exposes_every_config_field() {
+        let keys = panel_schema_keys();
+        assert!(!keys.is_empty(), "CONFIG_SCHEMA parsed as empty");
+
+        let missing: Vec<String> = config_field_names()
+            .into_iter()
+            // Server-managed COFL credentials, never sent to the browser.
+            .filter(|name| name != "sessions")
+            .filter(|name| !keys.contains(name))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "these config fields are not editable in the web panel — add them to CONFIG_SCHEMA in panel.html: {missing:?}"
+        );
+    }
+
+    /// The other direction: a schema entry naming a field that no longer exists
+    /// would render a control that silently saves nothing (the patch endpoint
+    /// rejects unknown keys, so the user would just get an error on save).
+    #[test]
+    fn config_panel_has_no_stale_schema_entries() {
+        let fields = config_field_names();
+        let stale: Vec<String> = panel_schema_keys()
+            .into_iter()
+            .filter(|k| !fields.contains(k))
+            .collect();
+        assert!(stale.is_empty(), "CONFIG_SCHEMA names fields that no longer exist in Config: {stale:?}");
+    }
+
+    #[test]
+    fn config_patch_merges_only_the_given_fields() {
+        let mut base = crate::config::Config::default();
+        base.ingame_name = Some("Original".to_string());
+        base.bed_pre_click_ms = 30;
+
+        let patch: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"bed_pre_click_ms": 45}"#).unwrap();
+        let merged = merge_config_patch(&base, &patch).expect("patch applies");
+
+        assert_eq!(merged.bed_pre_click_ms, 45, "the edited field changed");
+        assert_eq!(
+            merged.ingame_name.as_deref(),
+            Some("Original"),
+            "an untouched field must survive the patch"
+        );
+    }
+
+    #[test]
+    fn config_patch_rejects_unknown_and_mistyped_fields() {
+        let base = crate::config::Config::default();
+
+        // A typo'd key would otherwise look like it saved and do nothing.
+        let unknown: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"bed_pre_click_msec": 45}"#).unwrap();
+        let err = merge_config_patch(&base, &unknown).expect_err("unknown key is rejected");
+        assert!(err.contains("bed_pre_click_msec"), "got: {err}");
+
+        // Wrong type must fail here, not corrupt config.toml.
+        let mistyped: serde_json::Map<String, serde_json::Value> =
+            serde_json::from_str(r#"{"bed_pre_click_ms": "soon"}"#).unwrap();
+        assert!(merge_config_patch(&base, &mistyped).is_err(), "a string is not a u64");
+    }
+
+    #[test]
+    fn config_patch_never_leaks_cofl_sessions() {
+        let mut base = crate::config::Config::default();
+        base.sessions.insert(
+            "Player".to_string(),
+            crate::config::types::CoflSession {
+                id: "secret-session-id".to_string(),
+                expires: chrono::Utc::now(),
+            },
+        );
+        let json = config_to_json(&base).expect("serializes");
+        let text = serde_json::to_string(&json).unwrap();
+        assert!(!text.contains("secret-session-id"), "session tokens must never reach the browser");
+    }
 
     #[test]
     fn derive_tag_from_item_name() {
