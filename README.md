@@ -177,7 +177,7 @@ wget https://github.com/TreXito/frikadellen-baf-121/releases/latest/download/fri
 3. **Authenticate with Microsoft** — a browser window will open. Sign in with the Microsoft account linked to your Minecraft: Java Edition license.
 4. **Wait for connection** — the bot will connect to Hypixel and automatically travel to Skyblock.
 5. **Flipping starts automatically** — the bot connects to [Coflnet](https://sky.coflnet.com) via WebSocket and begins receiving and executing flip recommendations.
-6. **Open the Web Panel** — go to `http://localhost:8080` in your browser (or `http://<your-vps-ip>:8080` if on a remote server) to monitor the bot, view profits, and change settings.
+6. **Open the Web Panel** — go to `https://localhost:8080` in your browser (or `https://<your-vps-ip>:8080` if on a remote server) to monitor the bot, view profits, and change settings. The password is printed in the console on first run.
 
 A `config.toml` file is created in the same directory as the binary after the first run. You can edit it manually or use the Config tab in the web panel.
 
@@ -188,10 +188,24 @@ A `config.toml` file is created in the same directory as the binary after the fi
 The bot runs a built-in web server (default port **8080**). Open it in your browser:
 
 ```
-http://localhost:8080
+https://localhost:8080
 ```
 
-If running on a VPS, replace `localhost` with your server's IP address. You can change the port with the `web_gui_port` config option and optionally set a password with `web_gui_password`.
+If running on a VPS, replace `localhost` with your server's IP address. Change the port with the `web_gui_port` config option.
+
+### Panel security
+
+The panel can pause the bot, edit every setting and read your game chat, so it protects itself with no setup required:
+
+- **A random password is generated on first run.** It is printed in the console in a box you cannot miss, and stored as `web_gui_password` in `config.toml`. Change it there or in the Config tab — but it cannot be left empty. Blanking it just generates a new one.
+- **HTTPS is always on.** The bot issues and renews its own certificate (kept next to the logs), so your password is never sent over the network in the clear. It is self-signed, so your browser shows a one-time "not private" warning the first time — click through it once and it will not ask again.
+- **If you terminate TLS yourself** (nginx, Caddy, a Cloudflare tunnel), set the environment variable `BAF_WEB_PLAIN_HTTP=1` to serve plain HTTP behind your proxy. Do not use this to expose the panel directly.
+
+Even so, do not open the panel port to the whole internet if you can avoid it. Restricting it to your own IP with a firewall rule (or reaching it over an SSH tunnel) is the strongest option:
+
+```bash
+ufw allow from <your-ip> to any port 8080
+```
 
 ### Panel Tabs
 
@@ -314,7 +328,7 @@ The `config.toml` file is created automatically on first run. You can edit it wi
 | `ingame_name` | string | — | Minecraft username(s), comma-separated for multi-account |
 | `multi_switch_time` | float | `0` | Hours between account switches (0 = disabled) |
 | `web_gui_port` | integer | `8080` | Port for the web control panel |
-| `web_gui_password` | string | — | Optional password for the web panel |
+| `web_gui_password` | string | random | Password for the web panel. Generated on first run; cannot be empty |
 | `enable_console_input` | boolean | `true` | Allow typing commands in the terminal |
 | `share_legendary_flips` | boolean | `true` | Share legendary/divine flips with the community |
 | `websocket_url` | string | `wss://sky.coflnet.com/modsocket` | Coflnet WebSocket URL (advanced — don't change unless you know what you're doing) |

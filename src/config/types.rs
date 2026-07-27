@@ -250,27 +250,15 @@ pub struct Config {
     #[serde(default = "default_web_gui_port")]
     pub web_gui_port: u16,
 
-    /// Password to protect the web control panel. Leave empty to disable authentication.
+    /// Password required to open the web control panel. A strong random one is
+    /// generated the first time this file is written, so a panel is never
+    /// reachable without a password. Change it to whatever you like — but it
+    /// cannot be left empty: blanking it just generates a fresh random one.
+    ///
+    /// The panel always serves HTTPS and manages its own certificate, so this
+    /// password is never sent over the wire in the clear.
     #[serde(default, with = "opt_string_as_empty")]
     pub web_gui_password: Option<String>,
-
-    /// Serve the web control panel over HTTPS. Strongly recommended when the panel
-    /// is reachable over a public IP (e.g. a VPS) so the password and traffic are
-    /// encrypted. Provide `web_tls_cert_path`/`web_tls_key_path` for a real
-    /// certificate (e.g. a Let's Encrypt IP certificate); if omitted, a self-signed
-    /// certificate is generated automatically (browsers will show a one-time
-    /// "not trusted" warning, but the connection is still encrypted).
-    #[serde(default)]
-    pub web_https: bool,
-
-    /// Path to a PEM TLS certificate (full chain) for the web panel. Empty = use a
-    /// generated self-signed certificate.
-    #[serde(default, with = "opt_string_as_empty")]
-    pub web_tls_cert_path: Option<String>,
-
-    /// Path to the PEM private key matching `web_tls_cert_path`. Empty = self-signed.
-    #[serde(default, with = "opt_string_as_empty")]
-    pub web_tls_key_path: Option<String>,
 
     // ═══════════════════════ External API keys ═════════════════════
     /// Hypixel API key for fetching active auctions. Obtain one from https://developer.hypixel.net/
@@ -392,6 +380,22 @@ fn default_backend_url() -> String {
 
 fn default_web_gui_port() -> u16 {
     8080
+}
+
+/// Generate a random panel password.
+///
+/// The alphabet deliberately drops the characters people mis-transcribe
+/// (`0/O`, `1/l/I`) because this password is read off a console banner or out of
+/// config.toml and typed by hand. 20 characters of a 58-symbol alphabet is ~117
+/// bits, far past anything the 500 ms-per-attempt login endpoint can be walked
+/// through.
+pub fn generate_web_password() -> String {
+    use rand::Rng;
+    const ALPHABET: &[u8] = b"abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    let mut rng = rand::rng();
+    (0..20)
+        .map(|_| ALPHABET[rng.random_range(0..ALPHABET.len())] as char)
+        .collect()
 }
 
 fn default_do_not_relist_ids() -> Vec<String> {
@@ -519,9 +523,6 @@ impl Default for Config {
             // Web control panel
             web_gui_port: default_web_gui_port(),
             web_gui_password: None,
-            web_https: false,
-            web_tls_cert_path: None,
-            web_tls_key_path: None,
             // External API keys
             hypixel_api_key: None,
             // Discord notifications
@@ -550,6 +551,24 @@ impl Default for Config {
 }
 
 impl Config {
+    /// Guarantee the control panel has a password, generating one if it does not.
+    ///
+    /// Returns the password when it had to invent one, so the caller can shout
+    /// about it — a password nobody is told about is the same as a lockout.
+    ///
+    /// This runs on every load, not just on first write, because the panel
+    /// exposes full bot control (chat, config, account switching) and an
+    /// unauthenticated one on a public VPS is exactly how instances get taken
+    /// over. Blanking the field is therefore not a way to disable auth.
+    pub fn ensure_web_gui_password(&mut self) -> Option<String> {
+        if self.web_gui_password.as_deref().is_some_and(|p| !p.is_empty()) {
+            return None;
+        }
+        let generated = generate_web_password();
+        self.web_gui_password = Some(generated.clone());
+        Some(generated)
+    }
+
     /// Normalize the finder relist blocklist before it is persisted so the
     /// generated config stays easy to read and comparisons are reliable.
     pub fn normalize_do_not_relist_ids(&mut self) {
@@ -703,7 +722,7 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-    use super::Config;
+    use super::{default_web_gui_port, generate_web_password, Config};
 
     #[test]
     fn default_config_enables_bedtiming() {
@@ -826,6 +845,49 @@ mod tests {
     fn web_gui_password_empty_string_is_none() {
         let config: Config = toml::from_str(r#"web_gui_password = """#).expect("config should parse");
         assert_eq!(config.web_gui_password, None);
+    }
+
+    #[test]
+    fn ensure_web_gui_password_fills_in_a_missing_one() {
+        let mut config: Config = toml::from_str(r#"web_gui_password = """#).expect("config should parse");
+        let generated = config.ensure_web_gui_password().expect("should generate one");
+        assert_eq!(config.web_gui_password.as_deref(), Some(generated.as_str()));
+        assert_eq!(generated.len(), 20);
+        assert!(generated.chars().all(|c| c.is_ascii_alphanumeric()));
+    }
+
+    #[test]
+    fn ensure_web_gui_password_keeps_a_configured_one() {
+        let mut config: Config =
+            toml::from_str(r#"web_gui_password = "hunter2""#).expect("config should parse");
+        assert_eq!(config.ensure_web_gui_password(), None);
+        assert_eq!(config.web_gui_password.as_deref(), Some("hunter2"));
+    }
+
+    #[test]
+    fn generated_web_passwords_differ() {
+        // A constant "random" default would be worse than none at all: every
+        // install would ship the same publicly known password.
+        assert_ne!(generate_web_password(), generate_web_password());
+    }
+
+    #[test]
+    fn generated_web_passwords_avoid_ambiguous_characters() {
+        let pw = generate_web_password();
+        for c in ['0', 'O', '1', 'l', 'I'] {
+            assert!(!pw.contains(c), "{pw} contains hand-transcription trap {c}");
+        }
+    }
+
+    #[test]
+    fn removed_tls_settings_do_not_break_existing_configs() {
+        // Configs written by older builds still carry these keys. Parsing must
+        // ignore them rather than refusing to start.
+        let config: Config = toml::from_str(
+            "web_https = true\nweb_tls_cert_path = \"/etc/cert.pem\"\nweb_tls_key_path = \"/etc/key.pem\"",
+        )
+        .expect("stale TLS keys should be ignored, not fatal");
+        assert_eq!(config.web_gui_port, default_web_gui_port());
     }
 
     #[test]
