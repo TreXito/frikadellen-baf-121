@@ -52,15 +52,21 @@ pub struct WebSharedState {
     pub account_index_path: std::path::PathBuf,
     /// Broadcast channel for chat messages flowing to web clients.
     pub chat_tx: broadcast::Sender<String>,
+    /// Port this panel is served on. Part of the session cookie name and of the
+    /// signed token, so panels on one machine cannot clobber each other.
+    pub panel_port: u16,
     /// Password required to access the web panel (`None` = no auth).
-    pub web_gui_password: Option<String>,
+    ///
+    /// Shared and mutable because the panel can CHANGE it. This used to be a
+    /// plain String snapshotted at startup, so a user who set a new password in
+    /// the panel was told it saved, then rejected by the login form until the
+    /// bot was restarted — indistinguishable from "the password is broken".
+    pub web_gui_password: Arc<std::sync::RwLock<Option<String>>>,
     /// PEM certificate (full chain) to present for the panel. `None` = use the
     /// self-signed certificate the bot issues itself.
     pub web_tls_cert_path: Option<String>,
     /// PEM private key matching `web_tls_cert_path`.
     pub web_tls_key_path: Option<String>,
-    /// Set of valid session tokens for authenticated clients.
-    pub valid_sessions: Arc<Mutex<HashSet<String>>>,
     /// Cached Minecraft UUID for the current account (dashes format).
     /// Resolved lazily from the Mojang API on first `/api/auctions` request.
     pub player_uuid: Arc<tokio::sync::RwLock<Option<String>>>,
@@ -212,10 +218,50 @@ struct AuctionEntry {
     lore: Option<Vec<String>>,
 }
 
+impl WebSharedState {
+    /// The panel password as it is RIGHT NOW, not as it was at startup.
+    pub fn panel_password(&self) -> Option<String> {
+        self.web_gui_password.read().ok().and_then(|p| p.clone())
+    }
+
+    /// Apply a password change made through the panel or the config file.
+    ///
+    /// Existing sessions are dropped on a real change: someone changing the
+    /// panel password expects everyone else to be signed out, and a session
+    /// minted under the old password outliving it would defeat the point.
+    pub fn set_panel_password(&self, new: Option<String>) {
+        let changed = match self.web_gui_password.read() {
+            Ok(current) => *current != new,
+            Err(_) => true,
+        };
+        if !changed {
+            return;
+        }
+        if let Ok(mut current) = self.web_gui_password.write() {
+            *current = new;
+        }
+        // No session list to purge: tokens are signed WITH the password, so
+        // changing it invalidates every outstanding one for free.
+        info!("[WebGUI] Panel password changed — it applies immediately and existing sessions are now invalid");
+    }
+}
+
 // ── Authentication middleware ─────────────────────────────────
 
-/// Extract the `baf_session` cookie value from a request.
-fn extract_session_cookie(req: &Request) -> Option<String> {
+/// The session cookie name for a panel on `port`.
+///
+/// Cookies are scoped to the HOST, never the port. Several bots on one machine
+/// therefore all shared the name `baf_session`, so signing into the panel on
+/// :8081 overwrote the cookie for the one on :8082 — and the moment the other
+/// tab polled, it 401'd and threw the user back to the login form. Users running
+/// more than one bot saw this as "I log in and get kicked out".
+fn session_cookie_name(port: u16) -> String {
+    format!("baf_session_{port}")
+}
+
+/// Extract this panel's session cookie from a request.
+fn extract_session_cookie(req: &Request, port: u16) -> Option<String> {
+    let name = session_cookie_name(port);
     req.headers()
         .get("cookie")?
         .to_str()
@@ -223,8 +269,61 @@ fn extract_session_cookie(req: &Request) -> Option<String> {
         .split(';')
         .find_map(|c| {
             let c = c.trim();
-            c.strip_prefix("baf_session=").map(|v| v.to_string())
+            c.strip_prefix(&format!("{name}="))?.to_string().into()
         })
+}
+
+/// How long a session stays valid.
+const SESSION_TTL_SECS: i64 = 7 * 24 * 3600;
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+/// Sign `expiry` for this panel, keyed by the panel password.
+fn sign_session(password: &str, port: u16, expiry: i64) -> String {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(password.as_bytes())
+        .expect("HMAC accepts any key length");
+    mac.update(format!("{port}:{expiry}").as_bytes());
+    mac.finalize()
+        .into_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// Mint a session token: `<expiry>.<signature>`.
+///
+/// Deliberately STATELESS. Tokens used to live in an in-memory set, so every
+/// restart of the bot — including the automatic ones after a kick — silently
+/// invalidated every open panel session and bounced the user back to the login
+/// form. Signing the token instead means it survives a restart, while a password
+/// change still invalidates every existing token because the key IS the password.
+fn mint_session(password: &str, port: u16) -> String {
+    let expiry = unix_now() + SESSION_TTL_SECS;
+    format!("{expiry}.{}", sign_session(password, port, expiry))
+}
+
+/// Whether `token` is a valid, unexpired session for this panel.
+fn session_is_valid(token: &str, password: &str, port: u16, now: i64) -> bool {
+    let Some((expiry_raw, signature)) = token.split_once('.') else { return false };
+    let Ok(expiry) = expiry_raw.parse::<i64>() else { return false };
+    if expiry <= now {
+        return false;
+    }
+    let expected = sign_session(password, port, expiry);
+    // Constant-time compare so the signature cannot be brute-forced byte by byte.
+    expected.len() == signature.len()
+        && expected
+            .bytes()
+            .zip(signature.bytes())
+            .fold(0u8, |acc, (a, b)| acc | (a ^ b))
+            == 0
 }
 
 /// Paths served without a session: the panel shell itself (which is just the
@@ -241,23 +340,27 @@ fn is_public_path(path: &str) -> bool {
 /// `password_set` is passed rather than the password itself because the request
 /// never carries one — only a session token minted by `/api/login`.
 fn request_is_authorized(
-    password_set: bool,
-    sessions: &HashSet<String>,
+    password: Option<&str>,
+    port: u16,
+    now: i64,
     path: &str,
     presented: &[String],
 ) -> bool {
-    if !password_set || is_public_path(path) {
+    let Some(password) = password.filter(|p| !p.is_empty()) else {
+        return true; // no password configured: nothing to enforce
+    };
+    if is_public_path(path) {
         return true;
     }
-    presented.iter().any(|t| sessions.contains(t))
+    presented.iter().any(|t| session_is_valid(t, password, port, now))
 }
 
 /// Every session token a request presents: cookie, bearer header, or `?token=`
 /// (the last one exists because browsers cannot set headers on a WebSocket).
-fn presented_tokens(req: &Request) -> Vec<String> {
+fn presented_tokens(req: &Request, port: u16) -> Vec<String> {
     let mut tokens: Vec<String> = Vec::new();
 
-    if let Some(token) = extract_session_cookie(req) {
+    if let Some(token) = extract_session_cookie(req, port) {
         tokens.push(token);
     }
 
@@ -287,15 +390,11 @@ async fn check_auth(
     req: Request,
     next: Next,
 ) -> Response {
-    let password_set = s.web_gui_password.as_deref().is_some_and(|p| !p.is_empty());
+    let password = s.panel_password();
+    let port = s.panel_port;
     let path = req.uri().path().to_string();
-    let presented = presented_tokens(&req);
-
-    // Lock and release before awaiting the inner service.
-    let allowed = {
-        let sessions = s.valid_sessions.lock().unwrap();
-        request_is_authorized(password_set, &sessions, &path, &presented)
-    };
+    let presented = presented_tokens(&req, port);
+    let allowed = request_is_authorized(password.as_deref(), port, unix_now(), &path, &presented);
 
     if allowed {
         return next.run(req).await;
@@ -516,11 +615,7 @@ pub async fn start_web_server(state: WebSharedState, port: u16) {
     let tls_cert_path = state.web_tls_cert_path.clone();
     let tls_key_path = state.web_tls_key_path.clone();
 
-    let has_password = state
-        .web_gui_password
-        .as_ref()
-        .map(|p| !p.is_empty())
-        .unwrap_or(false);
+    let has_password = state.panel_password().is_some_and(|p| !p.is_empty());
 
     let auth_state = state.clone();
     let app = Router::new()
@@ -684,9 +779,10 @@ async fn login(
     State(s): State<WebSharedState>,
     Json(payload): Json<LoginPayload>,
 ) -> impl IntoResponse {
-    let expected = match &s.web_gui_password {
-        Some(p) if !p.is_empty() => p,
-        _ => {
+    // Read the CURRENT password, not the one this process started with.
+    let expected = match s.panel_password().filter(|p| !p.is_empty()) {
+        Some(p) => p,
+        None => {
             // No password configured — login always succeeds (no cookie needed).
             // The config loader generates one when it is missing, so reaching
             // this arm means the panel was started outside the normal path.
@@ -716,17 +812,10 @@ async fn login(
     }
 
     // Generate a random session token and cap the number of active sessions
-    let token = uuid::Uuid::new_v4().to_string();
-    {
-        let mut sessions = s.valid_sessions.lock().unwrap();
-        // Limit to 64 active sessions; evict oldest when full
-        if sessions.len() >= 64 {
-            if let Some(oldest) = sessions.iter().next().cloned() {
-                sessions.remove(&oldest);
-            }
-        }
-        sessions.insert(token.clone());
-    }
+    // Signed rather than stored, so the session outlives a bot restart. The old
+    // in-memory set also capped at 64 and evicted an ARBITRARY entry (HashSet
+    // has no order), which could sign out an active user to make room.
+    let token = mint_session(&expected, s.panel_port);
 
     info!("[WebGUI] Successful login via web panel");
 
@@ -735,8 +824,11 @@ async fn login(
     // but never sticks.
     let secure = if WEB_TLS_ACTIVE.load(Ordering::Relaxed) { " Secure;" } else { "" };
     let cookie = format!(
-        "baf_session={};{} Path=/; HttpOnly; SameSite=Strict; Max-Age=604800",
-        token, secure
+        "{}={};{} Path=/; HttpOnly; SameSite=Strict; Max-Age={}",
+        session_cookie_name(s.panel_port),
+        token,
+        secure,
+        SESSION_TTL_SECS,
     );
     (
         StatusCode::OK,
@@ -1766,7 +1858,7 @@ async fn save_config_json(
     let enable_ah = s.enable_ah_flips.clone();
     let enable_bz = s.enable_bazaar_flips.clone();
     let changed: Vec<String> = patch.keys().cloned().collect();
-    match tokio::task::spawn_blocking(move || -> Result<(), String> {
+    match tokio::task::spawn_blocking(move || -> Result<Option<String>, String> {
         let existing = loader.load().map_err(|e| format!("Failed to load config: {e}"))?;
         let mut config = merge_config_patch(&existing, &patch)?;
         reject_empty_panel_password(&config)?;
@@ -1776,11 +1868,15 @@ async fn save_config_json(
         config.normalize_do_not_relist_ids();
         enable_ah.store(config.enable_ah_flips, Ordering::Relaxed);
         enable_bz.store(config.enable_bazaar_flips, Ordering::Relaxed);
-        loader.save(&config).map_err(|e| format!("Failed to save config: {e}"))
+        loader.save(&config).map_err(|e| format!("Failed to save config: {e}"))?;
+        Ok(config.web_gui_password.clone())
     })
     .await
     {
-        Ok(Ok(())) => {
+        Ok(Ok(password)) => {
+            // Without this the new password only took effect on the next
+            // restart, while the panel said it had saved.
+            s.set_panel_password(password);
             info!("[WebGUI] Config updated ({} field(s): {})", changed.len(), changed.join(", "));
             (StatusCode::OK, format!("Saved {} setting(s)", changed.len())).into_response()
         }
@@ -2048,22 +2144,23 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    fn sessions_with(token: &str) -> HashSet<String> {
-        let mut s = HashSet::new();
-        s.insert(token.to_string());
-        s
+    const TEST_PW: &str = "panel-password";
+    const TEST_PORT: u16 = 8082;
+
+    fn a_valid_token() -> String {
+        mint_session(TEST_PW, TEST_PORT)
     }
 
     #[test]
     fn unauthenticated_requests_cannot_reach_control_endpoints() {
-        let sessions = sessions_with("good-token");
+        let now = unix_now();
         for path in ["/api/config", "/api/config.json", "/api/chat/send", "/api/status"] {
             assert!(
-                !request_is_authorized(true, &sessions, path, &[]),
+                !request_is_authorized(Some(TEST_PW), TEST_PORT, now, path, &[]),
                 "{path} must require a session"
             );
             assert!(
-                !request_is_authorized(true, &sessions, path, &["wrong-token".to_string()]),
+                !request_is_authorized(Some(TEST_PW), TEST_PORT, now, path, &["wrong-token".to_string()]),
                 "{path} must reject an unknown token"
             );
         }
@@ -2071,25 +2168,89 @@ mod tests {
 
     #[test]
     fn a_valid_session_token_is_accepted_however_it_arrives() {
-        let sessions = sessions_with("good-token");
-        assert!(request_is_authorized(true, &sessions, "/api/config", &["good-token".to_string()]));
+        let now = unix_now();
+        let token = a_valid_token();
+        assert!(request_is_authorized(Some(TEST_PW), TEST_PORT, now, "/api/config", &[token.clone()]));
         // Several presented tokens: one good is enough (cookie + ?token= on a WS).
         assert!(request_is_authorized(
-            true,
-            &sessions,
+            Some(TEST_PW),
+            TEST_PORT,
+            now,
             "/api/chat/ws",
-            &["stale".to_string(), "good-token".to_string()],
+            &["stale".to_string(), token],
         ));
     }
 
     #[test]
     fn only_the_login_form_and_share_endpoints_are_public() {
-        let sessions = HashSet::new();
+        let now = unix_now();
         for path in ["/", "/api/login", "/api/profit/public", "/api/og-image.png"] {
-            assert!(request_is_authorized(true, &sessions, path, &[]), "{path} should be public");
+            assert!(request_is_authorized(Some(TEST_PW), TEST_PORT, now, path, &[]), "{path} should be public");
         }
-        assert!(!request_is_authorized(true, &sessions, "/api/profit", &[]),
+        assert!(!request_is_authorized(Some(TEST_PW), TEST_PORT, now, "/api/profit", &[]),
             "the full profit endpoint is not the public one");
+    }
+
+    /// The reported bug: sign into one bot's panel, get thrown out of another's.
+    ///
+    /// Cookies are scoped to the host and NOT the port, so every panel on a
+    /// machine shared one cookie name and the last login overwrote the rest.
+    #[test]
+    fn a_session_for_one_panel_does_not_work_on_another_on_the_same_host() {
+        let now = unix_now();
+        let token_8081 = mint_session(TEST_PW, 8081);
+
+        assert!(
+            request_is_authorized(Some(TEST_PW), 8081, now, "/api/status", &[token_8081.clone()]),
+            "the token works on the panel that issued it"
+        );
+        assert!(
+            !request_is_authorized(Some(TEST_PW), 8082, now, "/api/status", &[token_8081]),
+            "a token from :8081 must not authorise :8082, even with the same password"
+        );
+        assert_ne!(
+            session_cookie_name(8081),
+            session_cookie_name(8082),
+            "the panels must not share a cookie name, or the last login wins"
+        );
+    }
+
+    /// The other half of "logs in and gets kicked out": bots restart (including
+    /// automatically after a kick), and sessions used to live only in memory.
+    #[test]
+    fn a_session_survives_a_restart_of_the_bot() {
+        let now = unix_now();
+        let token = mint_session(TEST_PW, TEST_PORT);
+        // A restart means brand new process state — nothing is carried over but
+        // the password from config.toml. The token must still verify.
+        assert!(
+            request_is_authorized(Some(TEST_PW), TEST_PORT, now, "/api/status", &[token]),
+            "a session must outlive a restart, or every restart signs everyone out"
+        );
+    }
+
+    #[test]
+    fn changing_the_password_invalidates_existing_sessions() {
+        let now = unix_now();
+        let token = mint_session(TEST_PW, TEST_PORT);
+        assert!(!request_is_authorized(Some("a-new-password"), TEST_PORT, now, "/api/status", &[token]));
+    }
+
+    #[test]
+    fn expired_and_tampered_tokens_are_rejected() {
+        let now = unix_now();
+        // Correctly signed, but for a moment already past.
+        let expired = format!("{}.{}", now - 1, sign_session(TEST_PW, TEST_PORT, now - 1));
+        assert!(!session_is_valid(&expired, TEST_PW, TEST_PORT, now), "expired token");
+
+        // Pushing the expiry out without knowing the password must not work.
+        let token = mint_session(TEST_PW, TEST_PORT);
+        let signature = token.split_once('.').unwrap().1;
+        let forged = format!("{}.{}", now + 999_999, signature);
+        assert!(!session_is_valid(&forged, TEST_PW, TEST_PORT, now), "expiry is covered by the signature");
+
+        assert!(!session_is_valid("garbage", TEST_PW, TEST_PORT, now));
+        assert!(!session_is_valid("", TEST_PW, TEST_PORT, now));
     }
 
     #[tokio::test]
