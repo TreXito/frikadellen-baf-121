@@ -125,11 +125,29 @@ impl FlipDiagnostics {
     /// recent drop, and logs a VISIBLE (warn-level) line — but at most once per
     /// [`LOG_THROTTLE_SECS`] per reason so a busy feed doesn't flood the log.
     pub fn record_drop(&self, reason: FlipDropReason, item_name: &str) {
+        self.record_drop_detailed(reason, item_name, None);
+    }
+
+    /// As [`record_drop`](Self::record_drop), plus a caller-supplied `detail`
+    /// string appended to the log line.
+    ///
+    /// The bare reason answers "what is blocking?" but not "why is it in that
+    /// state?" — the single most common support question. A drop reason whose
+    /// underlying state is observable (COFL auth, startup) passes the machine
+    /// state here so ONE log line is enough to tell "the user must sign in"
+    /// apart from "the bot never saw the confirmation", instead of needing a
+    /// debug-level rerun to find out.
+    pub fn record_drop_detailed(
+        &self,
+        reason: FlipDropReason,
+        item_name: &str,
+        detail: Option<&str>,
+    ) {
         self.dropped_total.fetch_add(1, Ordering::Relaxed);
         self.dropped[reason.index()].fetch_add(1, Ordering::Relaxed);
 
         let now = Instant::now();
-        let should_log = if let Ok(mut inner) = self.inner.lock() {
+        let (should_log, secs_since_accepted) = if let Ok(mut inner) = self.inner.lock() {
             inner.last_drop = Some((reason, now));
             let due = match inner.last_logged {
                 Some((prev, at)) => {
@@ -140,19 +158,31 @@ impl FlipDiagnostics {
             if due {
                 inner.last_logged = Some((reason, now));
             }
-            due
+            (due, inner.last_accepted_at.map(|t| t.elapsed().as_secs()))
         } else {
-            false
+            (false, None)
         };
 
         if should_log {
             let count = self.dropped[reason.index()].load(Ordering::Relaxed);
+            // "Nothing bought in 40 minutes" is the operator's real symptom, so
+            // put it on the same line as the cause rather than making them
+            // correlate two logs.
+            let last_buy = match secs_since_accepted {
+                Some(secs) => format!("last buy {secs}s ago"),
+                None => "no buys yet this session".to_string(),
+            };
             warn!(
-                "[FlipDrop] Not buying flips — {} ({} dropped for this reason). Fix: {}. Latest: {}",
+                "[FlipDrop] Not buying flips — {} ({} dropped for this reason, {}). Fix: {}. Latest: {}{}",
                 reason.as_str(),
                 count,
+                last_buy,
                 reason.hint(),
                 item_name,
+                match detail {
+                    Some(d) if !d.is_empty() => format!(" [{d}]"),
+                    _ => String::new(),
+                },
             );
         }
     }

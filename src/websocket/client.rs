@@ -270,6 +270,33 @@ impl CoflWebSocket {
         let _ = tx.send(CoflEvent::ChatMessage(auth_prompt));
     }
 
+    /// Treat an authenticated-only COFL push (flips, bazaar recommendations) as
+    /// proof the session is authenticated.
+    ///
+    /// COFL sends `loggedIn` when a session is established, but a session the
+    /// user signed into on an EARLIER run resumes silently: COFL pushes no
+    /// sign-in link and does not re-send `loggedIn`. The explicit auth signal
+    /// therefore never arrived for returning users, `cofl_authenticated` stayed
+    /// false for the whole run, and every COFL flip was dropped with
+    /// "Coflnet is not authenticated yet" — on accounts that had been flipping
+    /// fine for weeks. COFL only routes flips/bazaar recommendations to a
+    /// session it has already authenticated, so receiving one IS the signal.
+    ///
+    /// Guarded by [`COFL_AUTH_LINK_SHOWN`]: if COFL asked us to sign in, the
+    /// session really is unauthenticated and the gate must keep holding.
+    fn note_authenticated_traffic(tx: &mpsc::UnboundedSender<CoflEvent>) {
+        if COFL_AUTH_LINK_SHOWN.load(Ordering::Relaxed) {
+            return;
+        }
+        if !COFL_LOGGED_IN.swap(true, Ordering::Relaxed) {
+            info!(
+                "[Coflnet] Session resumed — treating it as authenticated \
+                 (COFL is pushing flips and never asked us to sign in)"
+            );
+            let _ = tx.send(CoflEvent::Authenticated);
+        }
+    }
+
     fn handle_message(text: &str, tx: &mpsc::UnboundedSender<CoflEvent>) -> Result<()> {
         info!("[COFL <-] {}", text);
 
@@ -335,6 +362,9 @@ impl CoflWebSocket {
                 }
             }
             "flip" => {
+                // Sent BEFORE the flip so the main loop latches auth first and
+                // this very flip clears the gate (same ordered channel).
+                Self::note_authenticated_traffic(tx);
                 if let Ok(value) = parse_message_data::<serde_json::Value>(&msg.data) {
                     // Normalize: COFL sends itemName/startingBid nested inside "auction"
                     // but also provides "id" at the top level as the auction UUID.
@@ -347,6 +377,7 @@ impl CoflWebSocket {
                 }
             }
             "bazaarFlip" | "bzRecommend" | "placeOrder" => {
+                Self::note_authenticated_traffic(tx);
                 if let Ok(bazaar_flip) = parse_message_data::<BazaarFlipRecommendation>(&msg.data) {
                     debug!("Parsed bazaar flip: {:?}", bazaar_flip.item_name);
                     let _ = tx.send(CoflEvent::BazaarFlip(bazaar_flip));
@@ -365,6 +396,7 @@ impl CoflWebSocket {
                 }
             }
             "getbazaarflips" => {
+                Self::note_authenticated_traffic(tx);
                 // Handle array of bazaar flips
                 if let Ok(flips) = parse_message_data::<Vec<BazaarFlipRecommendation>>(&msg.data) {
                     debug!("Parsed {} bazaar flips", flips.len());
@@ -836,6 +868,64 @@ mod tests {
         assert_eq!(flip.item_name, "Top Level Item");
         assert_eq!(flip.starting_bid, 5000000);
         assert_eq!(flip.uuid.as_deref(), Some("abc123"));
+    }
+
+    /// A resumed COFL session sends no sign-in link and no `loggedIn`, so the
+    /// only evidence it is authenticated is that COFL keeps pushing flips.
+    /// Both halves live in ONE test because they share the process-global
+    /// `COFL_*` latches, which parallel tests would race over.
+    #[test]
+    fn test_cofl_flip_confirms_auth_only_when_no_signin_was_requested() {
+        let cofl_flip = serde_json::json!({
+            "type": "flip",
+            "data": serde_json::json!({
+                "id": "4f1d2446974e43dbaf644fb13cd8af62",
+                "auction": { "itemName": "Rod of the Sea", "startingBid": 15000000 },
+                "target": 29314940,
+                "finder": "SNIPER_MEDIAN"
+            }).to_string()
+        })
+        .to_string();
+
+        // ── resumed session: no sign-in link was ever shown ──────────────
+        COFL_AUTH_LINK_SHOWN.store(false, Ordering::Relaxed);
+        COFL_LOGGED_IN.store(false, Ordering::Relaxed);
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        handle_message_for_test(&cofl_flip, &tx);
+
+        // Auth must be published BEFORE the flip, so the flip that proved it
+        // clears the gate instead of being dropped as "not authenticated yet".
+        assert!(
+            matches!(rx.try_recv(), Ok(CoflEvent::Authenticated)),
+            "a COFL flip on a link-free session must confirm auth first"
+        );
+        assert!(matches!(rx.try_recv(), Ok(CoflEvent::AuctionFlip(_))));
+        assert!(COFL_LOGGED_IN.load(Ordering::Relaxed));
+
+        // A second flip must not re-announce auth.
+        handle_message_for_test(&cofl_flip, &tx);
+        assert!(matches!(rx.try_recv(), Ok(CoflEvent::AuctionFlip(_))));
+
+        // ── COFL asked us to sign in: the gate must keep holding ─────────
+        COFL_AUTH_LINK_SHOWN.store(true, Ordering::Relaxed);
+        COFL_LOGGED_IN.store(false, Ordering::Relaxed);
+        let (tx2, mut rx2) = mpsc::unbounded_channel();
+        handle_message_for_test(&cofl_flip, &tx2);
+        assert!(
+            matches!(rx2.try_recv(), Ok(CoflEvent::AuctionFlip(_))),
+            "the flip still flows; only the auth claim is withheld"
+        );
+        assert!(
+            !COFL_LOGGED_IN.load(Ordering::Relaxed),
+            "an unauthenticated session must not be latched as authenticated"
+        );
+
+        COFL_AUTH_LINK_SHOWN.store(false, Ordering::Relaxed);
+        COFL_LOGGED_IN.store(false, Ordering::Relaxed);
+    }
+
+    fn handle_message_for_test(text: &str, tx: &mpsc::UnboundedSender<CoflEvent>) {
+        CoflWebSocket::handle_message(text, tx).expect("message parses");
     }
 
     #[test]
