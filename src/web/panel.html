@@ -1524,6 +1524,7 @@ setInterval(fetchProfit, 15000);
 //   advanced: hidden until "Show advanced" — keeps the common path short
 //   wide:     spans both grid columns (long URLs, lists)
 //   secret:   masked with a reveal button (safe to screenshot)
+//   writeOnly: never shows the stored value; empty means "leave unchanged"
 //   warn:     flagged as risky to change
 
 const CFG_GROUPS = [
@@ -1637,8 +1638,9 @@ const CONFIG_SCHEMA = [
     // ── Web panel ──
     {key:'web_gui_port', group:'panel', type:'number', label:'Panel port', min:1, max:65535,
      help:'Takes effect after a restart.'},
-    {key:'web_gui_password', group:'panel', type:'text', label:'Panel password', secret:true,
-     help:'Generated randomly on first run. Cannot be emptied — this panel controls the bot. HTTPS is always on, so it is never sent in the clear.'},
+    {key:'web_gui_password', group:'panel', type:'text', label:'Panel password', secret:true, writeOnly:true,
+     ph:'unchanged — type here only to set a new one',
+     help:'Leave empty to keep the current password. The bot prints it to its console on every start. Generated randomly on first run; it cannot be emptied, because this panel controls the bot.'},
     {key:'web_tls_cert_path', group:'panel', type:'text', label:'TLS certificate path', wide:true,
      ph:'/etc/letsencrypt/live/example.com/fullchain.pem',
      help:'Your own PEM certificate, to replace the self-signed one the bot issues (that is what makes browsers say "not secure"). Use the FULL chain. Needs the key below set too. Takes effect after a restart.'},
@@ -1684,6 +1686,9 @@ const cfgEl = key => $('cfgf-' + key);
 function cfgReadField(f) {
     const el = cfgEl(f.key);
     if (!el) return undefined;
+    // Blank write-only field: report "nothing to save" rather than an empty
+    // string, so a save can never silently blank or rewrite the stored value.
+    if (f.writeOnly) return el.value === '' ? undefined : el.value;
     if (f.type === 'bool') return el.checked;
     if (f.type === 'list') {
         return el.value.split(/[\n,]/).map(s => s.trim()).filter(Boolean);
@@ -1701,6 +1706,9 @@ function cfgReadField(f) {
 function cfgWriteField(f, val) {
     const el = cfgEl(f.key);
     if (!el) return;
+    // A write-only field never displays what is stored, so leaving it alone is
+    // always the safe default and there is nothing on screen to overwrite.
+    if (f.writeOnly) { el.value = ''; return; }
     if (f.type === 'bool') el.checked = !!val;
     else if (f.type === 'list') el.value = Array.isArray(val) ? val.join('\n') : (val || '');
     else el.value = (val === null || val === undefined) ? '' : val;
@@ -1902,6 +1910,17 @@ function cfgRenderField(f) {
             input.type = f.secret ? 'password' : 'text';
         }
         if (f.ph) input.placeholder = f.ph;
+        // Browsers offer to save the panel login, then autofill that saved
+        // credential into ANY password box on the same origin. Firefox keys
+        // saved logins by host and ignores the port, so with several bots on one
+        // machine the password from one panel would be filled into another's
+        // config field and written out by the next Save — the panel password
+        // changing on its own. `new-password` is the documented way to say "this
+        // is not a login box"; the data- attributes cover 1Password/LastPass.
+        input.autocomplete = f.secret ? 'new-password' : 'off';
+        input.name = 'cfg-' + f.key;
+        input.setAttribute('data-lpignore', 'true');
+        input.setAttribute('data-1p-ignore', '');
         if (f.secret) {
             const wrap = document.createElement('div');
             wrap.className = 'cfg-inline';
