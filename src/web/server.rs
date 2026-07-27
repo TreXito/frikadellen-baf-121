@@ -54,6 +54,11 @@ pub struct WebSharedState {
     pub chat_tx: broadcast::Sender<String>,
     /// Password required to access the web panel (`None` = no auth).
     pub web_gui_password: Option<String>,
+    /// PEM certificate (full chain) to present for the panel. `None` = use the
+    /// self-signed certificate the bot issues itself.
+    pub web_tls_cert_path: Option<String>,
+    /// PEM private key matching `web_tls_cert_path`.
+    pub web_tls_key_path: Option<String>,
     /// Set of valid session tokens for authenticated clients.
     pub valid_sessions: Arc<Mutex<HashSet<String>>>,
     /// Cached Minecraft UUID for the current account (dashes format).
@@ -369,18 +374,88 @@ fn write_private_key(path: &std::path::Path, pem: &str) -> std::io::Result<()> {
     Ok(())
 }
 
-/// Load the panel's certificate, generating a self-signed one the first time.
+/// Which certificate the panel should present.
 ///
-/// There is deliberately nothing to configure here. The old cert/key path
-/// settings were a footgun: they defaulted to off, so panels shipped plaintext
-/// logins by default and the passwords went over the wire in the clear.
-async fn build_web_tls() -> anyhow::Result<axum_server::tls_rustls::RustlsConfig> {
+/// The old `web_https` flag is gone for good — TLS is unconditional, and a
+/// switch that could turn it off was the real footgun. But removing the cert
+/// PATHS along with it meant a user who had installed a real certificate got it
+/// silently ignored, saw "rcgen self signed cert" in the browser, and had
+/// nothing in the log pointing at why. Choosing a certificate is not the same
+/// decision as choosing whether to encrypt.
+#[derive(Debug, PartialEq)]
+enum PanelCert {
+    /// Both paths configured — present the user's certificate.
+    Configured { cert: String, key: String },
+    /// Nothing configured: keep issuing our own.
+    SelfSigned,
+    /// Exactly one of the two paths set, which cannot work.
+    Incomplete { have: &'static str, missing: &'static str },
+}
+
+/// Decide from the configured paths, without touching the filesystem.
+fn choose_panel_cert(cert_path: Option<&str>, key_path: Option<&str>) -> PanelCert {
+    let cert = cert_path.map(str::trim).filter(|s| !s.is_empty());
+    let key = key_path.map(str::trim).filter(|s| !s.is_empty());
+    match (cert, key) {
+        (Some(c), Some(k)) => PanelCert::Configured { cert: c.to_string(), key: k.to_string() },
+        (None, None) => PanelCert::SelfSigned,
+        (Some(_), None) => PanelCert::Incomplete { have: "web_tls_cert_path", missing: "web_tls_key_path" },
+        (None, Some(_)) => PanelCert::Incomplete { have: "web_tls_key_path", missing: "web_tls_cert_path" },
+    }
+}
+
+/// Load the panel's certificate: the configured one when there is one, and the
+/// bot's own self-signed certificate otherwise.
+///
+/// A configured certificate that fails to load falls back to self-signed so the
+/// panel still comes up — locking someone out of their own bot over a bad path
+/// is worse than a browser warning — but it says so LOUDLY. Falling back in
+/// silence is exactly what made this look like "TLS certs don't work".
+async fn build_web_tls(
+    cert_path: Option<&str>,
+    key_path: Option<&str>,
+) -> anyhow::Result<axum_server::tls_rustls::RustlsConfig> {
     use anyhow::Context;
     // Ensure a process-level crypto provider is installed (no-op if another
     // component already installed one).
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
+    match choose_panel_cert(cert_path, key_path) {
+        PanelCert::Configured { cert, key } => {
+            match axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert, &key).await {
+                Ok(config) => {
+                    info!("[WebTLS] Using the configured certificate: {} (key {})", cert, key);
+                    return Ok(config);
+                }
+                Err(e) => {
+                    error!(
+                        "[WebTLS] Could NOT load the certificate configured in web_tls_cert_path — \
+                         falling back to the bot's self-signed one, so the browser will keep warning. \
+                         cert={cert} key={key} error={e}"
+                    );
+                    error!(
+                        "[WebTLS] Check that both files exist, are readable by this process, and are PEM \
+                         (the cert should be the FULL chain, e.g. fullchain.pem, and the key the matching \
+                         private key, e.g. privkey.pem)."
+                    );
+                }
+            }
+        }
+        PanelCert::Incomplete { have, missing } => {
+            error!(
+                "[WebTLS] {have} is set but {missing} is empty — a certificate needs BOTH. \
+                 Using the bot's self-signed certificate instead."
+            );
+        }
+        PanelCert::SelfSigned => {}
+    }
+
     let (cert_file, key_file) = ensure_panel_cert(&crate::logging::get_logs_dir())?;
+    info!(
+        "[WebTLS] Using the bot's own self-signed certificate ({}). Browsers will show a warning; \
+         set web_tls_cert_path and web_tls_key_path to a real certificate to remove it.",
+        cert_file.display()
+    );
     axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert_file, &key_file)
         .await
         .context("failed to load panel certificate")
@@ -389,6 +464,10 @@ async fn build_web_tls() -> anyhow::Result<axum_server::tls_rustls::RustlsConfig
 pub async fn start_web_server(state: WebSharedState, port: u16) {
     let use_tls = !plain_http_requested();
     WEB_TLS_ACTIVE.store(use_tls, Ordering::Relaxed);
+
+    // Taken before `state` is moved into the router below.
+    let tls_cert_path = state.web_tls_cert_path.clone();
+    let tls_key_path = state.web_tls_key_path.clone();
 
     let has_password = state
         .web_gui_password
@@ -462,7 +541,7 @@ pub async fn start_web_server(state: WebSharedState, port: u16) {
                 return;
             }
         };
-        let tls_config = match build_web_tls().await {
+        let tls_config = match build_web_tls(tls_cert_path.as_deref(), tls_key_path.as_deref()).await {
             Ok(c) => c,
             Err(e) => {
                 error!("Failed to set up web TLS (panel will not start): {:#}", e);
@@ -2087,6 +2166,119 @@ mod tests {
             .filter(|k| !fields.contains(k))
             .collect();
         assert!(stale.is_empty(), "CONFIG_SCHEMA names fields that no longer exist in Config: {stale:?}");
+    }
+
+    /// A configured certificate must actually be picked up. Removing these
+    /// settings left users staring at "rcgen self signed cert" in the browser
+    /// after installing a real certificate, with nothing in the log about it.
+    #[test]
+    fn configured_cert_paths_are_used() {
+        assert_eq!(
+            choose_panel_cert(Some("/etc/le/fullchain.pem"), Some("/etc/le/privkey.pem")),
+            PanelCert::Configured {
+                cert: "/etc/le/fullchain.pem".to_string(),
+                key: "/etc/le/privkey.pem".to_string(),
+            }
+        );
+        // Whitespace-only counts as unset, matching how the config serializes
+        // "not configured" as an empty string.
+        assert_eq!(choose_panel_cert(Some("  "), Some("")), PanelCert::SelfSigned);
+        assert_eq!(choose_panel_cert(None, None), PanelCert::SelfSigned);
+    }
+
+    /// Half a certificate cannot work, and must be called out rather than
+    /// quietly behaving like nothing was configured at all.
+    #[test]
+    fn half_configured_cert_is_reported_not_ignored() {
+        assert_eq!(
+            choose_panel_cert(Some("/etc/le/fullchain.pem"), None),
+            PanelCert::Incomplete { have: "web_tls_cert_path", missing: "web_tls_key_path" }
+        );
+        assert_eq!(
+            choose_panel_cert(None, Some("/etc/le/privkey.pem")),
+            PanelCert::Incomplete { have: "web_tls_key_path", missing: "web_tls_cert_path" }
+        );
+    }
+
+    /// End-to-end: bind the real TLS stack with a configured certificate and
+    /// check the certificate the server actually PRESENTS on the wire.
+    ///
+    /// The unit tests above only cover the decision. This is the part that was
+    /// broken: the panel happily served TLS while presenting its own
+    /// "rcgen self signed cert" instead of the one the user had installed, so a
+    /// test that merely asserts "TLS came up" would have passed throughout.
+    #[tokio::test]
+    async fn the_server_presents_the_configured_certificate_on_the_wire() {
+        // A certificate with its own identity, so it cannot be confused with the
+        // panel's self-signed one.
+        let issued = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_string()])
+            .expect("generate test cert");
+        let expected_der = issued.cert.der().to_vec();
+
+        let dir = std::env::temp_dir().join(format!("baf-tls-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let cert_path = dir.join("cert.pem");
+        let key_path = dir.join("key.pem");
+        std::fs::write(&cert_path, issued.cert.pem()).expect("write cert");
+        std::fs::write(&key_path, issued.key_pair.serialize_pem()).expect("write key");
+
+        let tls = build_web_tls(
+            Some(cert_path.to_str().unwrap()),
+            Some(key_path.to_str().unwrap()),
+        )
+        .await
+        .expect("configured cert loads");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let app = Router::new().route("/", get(|| async { "ok" }));
+        tokio::spawn(async move {
+            axum_server::from_tcp_rustls(listener, tls)
+                .serve(app.into_make_service())
+                .await
+                .ok();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+
+        // Accept anything: we are inspecting which certificate is served, not
+        // validating it.
+        let served_der = tokio::task::spawn_blocking(move || {
+            let connector = native_tls::TlsConnector::builder()
+                .danger_accept_invalid_certs(true)
+                .danger_accept_invalid_hostnames(true)
+                .build()
+                .expect("connector");
+            let tcp = std::net::TcpStream::connect(addr).expect("connect");
+            let stream = connector.connect("127.0.0.1", tcp).expect("tls handshake");
+            stream
+                .peer_certificate()
+                .expect("peer cert readable")
+                .expect("server sent a certificate")
+                .to_der()
+                .expect("der")
+        })
+        .await
+        .expect("client task");
+
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(
+            served_der, expected_der,
+            "the panel served a different certificate than the one configured — \
+             this is the bug where a real certificate was ignored in favour of the self-signed one"
+        );
+    }
+
+    /// The panel must still come up when a configured certificate cannot be
+    /// loaded — being locked out of the bot is worse than a browser warning —
+    /// but see `build_web_tls`, which logs the failure at error level.
+    #[tokio::test]
+    async fn unreadable_configured_cert_falls_back_instead_of_killing_the_panel() {
+        let result = build_web_tls(
+            Some("/nonexistent/fullchain.pem"),
+            Some("/nonexistent/privkey.pem"),
+        )
+        .await;
+        assert!(result.is_ok(), "a bad cert path must not stop the panel from starting");
     }
 
     #[test]

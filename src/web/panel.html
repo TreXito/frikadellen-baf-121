@@ -1639,6 +1639,12 @@ const CONFIG_SCHEMA = [
      help:'Takes effect after a restart.'},
     {key:'web_gui_password', group:'panel', type:'text', label:'Panel password', secret:true,
      help:'Generated randomly on first run. Cannot be emptied — this panel controls the bot. HTTPS is always on, so it is never sent in the clear.'},
+    {key:'web_tls_cert_path', group:'panel', type:'text', label:'TLS certificate path', wide:true,
+     ph:'/etc/letsencrypt/live/example.com/fullchain.pem',
+     help:'Your own PEM certificate, to replace the self-signed one the bot issues (that is what makes browsers say "not secure"). Use the FULL chain. Needs the key below set too. Takes effect after a restart.'},
+    {key:'web_tls_key_path', group:'panel', type:'text', label:'TLS private key path', wide:true,
+     ph:'/etc/letsencrypt/live/example.com/privkey.pem',
+     help:'The PEM private key matching the certificate above. The bot must be able to read it.'},
 
     // ── Proxy ──
     {key:'proxy_enabled', group:'proxy', type:'bool', label:'Use a proxy',

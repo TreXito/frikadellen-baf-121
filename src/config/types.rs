@@ -260,6 +260,20 @@ pub struct Config {
     #[serde(default, with = "opt_string_as_empty")]
     pub web_gui_password: Option<String>,
 
+    /// Path to a PEM certificate (full chain) for the panel, e.g. one issued by
+    /// Let's Encrypt. Empty = the bot keeps using the self-signed certificate it
+    /// issues itself, which works but makes browsers show a warning.
+    ///
+    /// Set together with `web_tls_key_path`; setting only one is ignored.
+    /// HTTPS is always on either way — these paths only choose WHICH
+    /// certificate is presented, they can never turn TLS off.
+    #[serde(default, with = "opt_string_as_empty")]
+    pub web_tls_cert_path: Option<String>,
+
+    /// Path to the PEM private key matching `web_tls_cert_path`.
+    #[serde(default, with = "opt_string_as_empty")]
+    pub web_tls_key_path: Option<String>,
+
     // ═══════════════════════ External API keys ═════════════════════
     /// Hypixel API key for fetching active auctions. Obtain one from https://developer.hypixel.net/
     /// Leave empty to use the Coflnet API as a fallback.
@@ -523,6 +537,8 @@ impl Default for Config {
             // Web control panel
             web_gui_port: default_web_gui_port(),
             web_gui_password: None,
+            web_tls_cert_path: None,
+            web_tls_key_path: None,
             // External API keys
             hypixel_api_key: None,
             // Discord notifications
@@ -880,14 +896,33 @@ mod tests {
     }
 
     #[test]
-    fn removed_tls_settings_do_not_break_existing_configs() {
-        // Configs written by older builds still carry these keys. Parsing must
-        // ignore them rather than refusing to start.
+    fn removed_web_https_flag_does_not_break_existing_configs() {
+        // `web_https` really is gone (TLS is unconditional), so configs written
+        // by older builds must still parse rather than refusing to start...
         let config: Config = toml::from_str(
             "web_https = true\nweb_tls_cert_path = \"/etc/cert.pem\"\nweb_tls_key_path = \"/etc/key.pem\"",
         )
-        .expect("stale TLS keys should be ignored, not fatal");
+        .expect("the stale web_https key should be ignored, not fatal");
         assert_eq!(config.web_gui_port, default_web_gui_port());
+
+        // ...but the certificate PATHS are real settings again. Dropping them
+        // silently discarded the certificate people had installed and left the
+        // panel on its self-signed one.
+        assert_eq!(config.web_tls_cert_path.as_deref(), Some("/etc/cert.pem"));
+        assert_eq!(config.web_tls_key_path.as_deref(), Some("/etc/key.pem"));
+    }
+
+    #[test]
+    fn tls_paths_survive_a_config_round_trip() {
+        // The loader re-saves on every load, so a field that serializes wrong is
+        // a field the user loses on the next start.
+        let mut config = Config::default();
+        config.web_tls_cert_path = Some("/etc/le/fullchain.pem".to_string());
+        config.web_tls_key_path = Some("/etc/le/privkey.pem".to_string());
+        let toml = toml::to_string_pretty(&config).expect("serializes");
+        let parsed: Config = toml::from_str(&toml).expect("parses back");
+        assert_eq!(parsed.web_tls_cert_path.as_deref(), Some("/etc/le/fullchain.pem"));
+        assert_eq!(parsed.web_tls_key_path.as_deref(), Some("/etc/le/privkey.pem"));
     }
 
     #[test]
