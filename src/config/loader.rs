@@ -40,7 +40,7 @@ impl ConfigLoader {
             info!("Config file not found, creating default config at {:?}", self.config_path);
             let mut config = Config::default();
             if let Some(password) = config.ensure_web_gui_password() {
-                Self::announce_web_password(&password, config.web_gui_port);
+                Self::announce_web_password(&password, config.web_gui_port, true);
             }
             self.save(&config)?;
             return Ok(config);
@@ -57,8 +57,14 @@ impl ConfigLoader {
         // Copy the file aside BEFORE the save below rewrites it, so a bad
         // migration is one `mv` away from being undone.
         self.backup_before_migration(&contents, generated_password.is_some());
-        if let Some(password) = generated_password {
-            Self::announce_web_password(&password, config.web_gui_port);
+        // Always show it, whether freshly generated or not, so a forgotten
+        // password is one restart away rather than a support conversation.
+        match (&generated_password, config.web_gui_password.as_deref()) {
+            (Some(password), _) => Self::announce_web_password(password, config.web_gui_port, true),
+            (None, Some(existing)) if !existing.is_empty() => {
+                Self::announce_web_password(existing, config.web_gui_port, false)
+            }
+            _ => {}
         }
 
         // Re-save after every load so that newly added config fields
@@ -118,17 +124,35 @@ impl ConfigLoader {
     /// `warn!` rather than `info!` on purpose: this is the one line that decides
     /// whether the user can still reach their own panel, so it must survive a
     /// terse log filter and stand out in a startup scroll.
-    fn announce_web_password(password: &str, port: u16) {
+    /// Show the panel password on the console — and ONLY the console.
+    ///
+    /// Deliberately `println!` rather than `warn!`. Every warning is also
+    /// written to latest.log, which the panel offers as a download and which
+    /// users routinely paste into Discord when asking for help. This password
+    /// can pause the bot, read its chat and rewrite its config, so it must never
+    /// sit in a file that gets shared around. The console belongs to whoever
+    /// started the bot, and config.toml already holds the same value in plain
+    /// text right next to them.
+    ///
+    /// Printed on EVERY start, not just when generated: a user who scrolled past
+    /// it once had no way to recover it short of being talked through opening
+    /// config.toml ("Fuck. I forgit password."). Restarting is something they
+    /// can already do.
+    fn announce_web_password(password: &str, port: u16, generated: bool) {
         // Each line is padded to the same inner width so the box lines up for
         // any port or password length.
-        let row = |text: String| warn!("║  {:<54}  ║", text);
-        warn!("╔══════════════════════════════════════════════════════════╗");
-        row("WEB PANEL PASSWORD GENERATED".to_string());
+        let row = |text: String| println!("║  {:<54}  ║", text);
+        println!("╔══════════════════════════════════════════════════════════╗");
+        row(if generated {
+            "WEB PANEL PASSWORD GENERATED".to_string()
+        } else {
+            "WEB PANEL PASSWORD".to_string()
+        });
         row(password.to_string());
         row(format!("Open https://localhost:{port} and log in with it."));
         row("Stored in config.toml as web_gui_password — change".to_string());
         row("it there or in the panel if you want your own.".to_string());
-        warn!("╚══════════════════════════════════════════════════════════╝");
+        println!("╚══════════════════════════════════════════════════════════╝");
     }
 
     fn parse_config(contents: &str) -> Result<Config> {
@@ -246,6 +270,49 @@ mod tests {
             "the backup must be the file as it was, not the migrated version"
         );
         cleanup(&path);
+    }
+
+    /// The panel password must never reach latest.log.
+    ///
+    /// The panel can pause the bot, read its chat and rewrite its config, and
+    /// that log file is downloadable from the panel and routinely pasted into
+    /// Discord for support. Announcing the password with `warn!` put it in
+    /// there. This pins that the announcement goes to stdout only, by checking
+    /// no tracing event carries it.
+    #[test]
+    fn the_panel_password_is_never_written_to_the_log() {
+        use std::sync::{Arc, Mutex};
+        use tracing_subscriber::layer::{Context, SubscriberExt};
+        use tracing_subscriber::Layer;
+
+        struct Capture(Arc<Mutex<String>>);
+        impl<S: tracing::Subscriber> Layer<S> for Capture {
+            fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+                struct Visit<'a>(&'a mut String);
+                impl tracing::field::Visit for Visit<'_> {
+                    fn record_debug(&mut self, _f: &tracing::field::Field, v: &dyn std::fmt::Debug) {
+                        self.0.push_str(&format!("{v:?}"));
+                    }
+                }
+                if let Ok(mut buf) = self.0.lock() {
+                    event.record(&mut Visit(&mut buf));
+                }
+            }
+        }
+
+        let secret = "SuperSecretPanelPw123";
+        let captured = Arc::new(Mutex::new(String::new()));
+        let subscriber = tracing_subscriber::registry().with(Capture(captured.clone()));
+        tracing::subscriber::with_default(subscriber, || {
+            ConfigLoader::announce_web_password(secret, 8080, true);
+            ConfigLoader::announce_web_password(secret, 8080, false);
+        });
+
+        let logged = captured.lock().unwrap().clone();
+        assert!(
+            !logged.contains(secret),
+            "the panel password must not appear in any log event, got: {logged:?}"
+        );
     }
 
     #[test]
