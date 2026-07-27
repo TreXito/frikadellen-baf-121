@@ -1725,16 +1725,8 @@ async fn main() -> Result<()> {
             flip_diag: flip_diag.clone(),
         };
         let web_port = config.web_gui_port;
-        let web_tls = if config.web_https {
-            Some(frikadellen_baf::web::WebTlsOptions {
-                cert_path: config.web_tls_cert_path.clone(),
-                key_path: config.web_tls_key_path.clone(),
-            })
-        } else {
-            None
-        };
         tokio::spawn(async move {
-            frikadellen_baf::web::start_web_server_tls(web_state, web_port, web_tls).await;
+            frikadellen_baf::web::start_web_server(web_state, web_port).await;
         });
     }
 

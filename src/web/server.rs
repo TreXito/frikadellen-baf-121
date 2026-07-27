@@ -222,6 +222,59 @@ fn extract_session_cookie(req: &Request) -> Option<String> {
         })
 }
 
+/// Paths served without a session: the panel shell itself (which is just the
+/// login form until you authenticate) and the two endpoints link previews fetch.
+fn is_public_path(path: &str) -> bool {
+    matches!(
+        path,
+        "/" | "/api/login" | "/api/profit/public" | "/api/og-image.png"
+    )
+}
+
+/// The authorization decision, separated from axum so it can be tested directly.
+///
+/// `password_set` is passed rather than the password itself because the request
+/// never carries one — only a session token minted by `/api/login`.
+fn request_is_authorized(
+    password_set: bool,
+    sessions: &HashSet<String>,
+    path: &str,
+    presented: &[String],
+) -> bool {
+    if !password_set || is_public_path(path) {
+        return true;
+    }
+    presented.iter().any(|t| sessions.contains(t))
+}
+
+/// Every session token a request presents: cookie, bearer header, or `?token=`
+/// (the last one exists because browsers cannot set headers on a WebSocket).
+fn presented_tokens(req: &Request) -> Vec<String> {
+    let mut tokens: Vec<String> = Vec::new();
+
+    if let Some(token) = extract_session_cookie(req) {
+        tokens.push(token);
+    }
+
+    if let Some(auth) = req.headers().get("authorization") {
+        if let Ok(auth_str) = auth.to_str() {
+            if let Some(token) = auth_str.strip_prefix("Bearer ") {
+                tokens.push(token.to_string());
+            }
+        }
+    }
+
+    if let Some(query) = req.uri().query() {
+        for pair in query.split('&') {
+            if let Some(token) = pair.strip_prefix("token=") {
+                tokens.push(token.to_string());
+            }
+        }
+    }
+
+    tokens
+}
+
 /// Middleware logic that enforces authentication when a password is configured.
 /// Allows unauthenticated access to `GET /` (panel HTML) and `POST /api/login`.
 async fn check_auth(
@@ -229,55 +282,17 @@ async fn check_auth(
     req: Request,
     next: Next,
 ) -> Response {
-    // No password configured → skip auth entirely
-    if s.web_gui_password.as_ref().map_or(true, |p| p.is_empty()) {
-        return next.run(req).await;
-    }
-
+    let password_set = s.web_gui_password.as_deref().is_some_and(|p| !p.is_empty());
     let path = req.uri().path().to_string();
+    let presented = presented_tokens(&req);
 
-    // Always allow the panel page, login endpoint, public profit, and OG image without auth
-    if path == "/"
-        || path == "/api/login"
-        || path == "/api/profit/public"
-        || path == "/api/og-image.png"
-    {
-        return next.run(req).await;
-    }
-
-    // Collect all tokens to check
-    let mut tokens_to_check: Vec<String> = Vec::new();
-
-    // Session cookie
-    if let Some(token) = extract_session_cookie(&req) {
-        tokens_to_check.push(token);
-    }
-
-    // Authorization: Bearer <token> header
-    if let Some(auth) = req.headers().get("authorization") {
-        if let Ok(auth_str) = auth.to_str() {
-            if let Some(token) = auth_str.strip_prefix("Bearer ") {
-                tokens_to_check.push(token.to_string());
-            }
-        }
-    }
-
-    // Query parameter `token=` (for WebSocket connections)
-    if let Some(query) = req.uri().query() {
-        for pair in query.split('&') {
-            if let Some(token) = pair.strip_prefix("token=") {
-                tokens_to_check.push(token.to_string());
-            }
-        }
-    }
-
-    // Check all tokens against valid sessions (lock + release before await)
-    let is_valid = {
+    // Lock and release before awaiting the inner service.
+    let allowed = {
         let sessions = s.valid_sessions.lock().unwrap();
-        tokens_to_check.iter().any(|t| sessions.contains(t))
+        request_is_authorized(password_set, &sessions, &path, &presented)
     };
 
-    if is_valid {
+    if allowed {
         return next.run(req).await;
     }
 
@@ -286,58 +301,95 @@ async fn check_auth(
 
 // ── Start the web server ─────────────────────────────────────
 
-/// TLS options for the control panel. `None` = plain HTTP.
-pub struct WebTlsOptions {
-    pub cert_path: Option<String>,
-    pub key_path: Option<String>,
+/// Whether the panel is currently served over TLS. Read by the login handler so
+/// the session cookie is marked `Secure` exactly when that will not lock the
+/// user out (a `Secure` cookie is dropped by the browser on plain HTTP).
+static WEB_TLS_ACTIVE: AtomicBool = AtomicBool::new(false);
+
+/// Escape hatch for people who terminate TLS in front of the bot (nginx, Caddy,
+/// a Cloudflare tunnel). Everyone else gets HTTPS with no configuration at all.
+fn plain_http_requested() -> bool {
+    std::env::var("BAF_WEB_PLAIN_HTTP")
+        .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
+        .unwrap_or(false)
 }
 
-/// Build a rustls config from a provided cert/key, or generate a persisted
-/// self-signed certificate when none is configured.
-async fn build_web_tls(opts: &WebTlsOptions) -> anyhow::Result<axum_server::tls_rustls::RustlsConfig> {
+/// Best-effort local address this machine uses to reach the internet.
+///
+/// Connecting a UDP socket sends no packets — it only asks the routing table
+/// which interface would be used — so this is instant and works offline. On a
+/// VPS with a public IP bound directly to the NIC this is the address users
+/// actually type, so putting it in the certificate keeps the browser's warning
+/// down to "unknown issuer" instead of also "wrong host".
+fn primary_local_ip() -> Option<std::net::IpAddr> {
+    let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    sock.connect("1.1.1.1:80").ok()?;
+    sock.local_addr().ok().map(|a| a.ip()).filter(|ip| !ip.is_loopback())
+}
+
+/// Return the panel's certificate and key, generating them on first use.
+///
+/// The certificate is persisted and reused across restarts on purpose: the
+/// browser then only warns once, and a certificate that changes every boot is
+/// indistinguishable from someone swapping it out mid-session.
+fn ensure_panel_cert(dir: &std::path::Path) -> anyhow::Result<(std::path::PathBuf, std::path::PathBuf)> {
+    use anyhow::Context;
+    let _ = std::fs::create_dir_all(dir);
+    let cert_file = dir.join("web-cert.pem");
+    let key_file = dir.join("web-key.pem");
+    if cert_file.exists() && key_file.exists() {
+        return Ok((cert_file, key_file));
+    }
+    let mut sans = vec![
+        "localhost".to_string(),
+        "127.0.0.1".to_string(),
+        "::1".to_string(),
+    ];
+    if let Some(ip) = primary_local_ip() {
+        sans.push(ip.to_string());
+    }
+    info!("[WebTLS] Generating panel certificate for {}", sans.join(", "));
+    let signed = rcgen::generate_simple_self_signed(sans)
+        .context("failed to generate self-signed certificate")?;
+    std::fs::write(&cert_file, signed.cert.pem()).context("write panel cert")?;
+    // The key authenticates the panel; on a shared box it must not be readable
+    // by other accounts.
+    write_private_key(&key_file, &signed.key_pair.serialize_pem()).context("write panel key")?;
+    Ok((cert_file, key_file))
+}
+
+/// Write a private key with owner-only permissions where the platform has them.
+fn write_private_key(path: &std::path::Path, pem: &str) -> std::io::Result<()> {
+    std::fs::write(path, pem)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+/// Load the panel's certificate, generating a self-signed one the first time.
+///
+/// There is deliberately nothing to configure here. The old cert/key path
+/// settings were a footgun: they defaulted to off, so panels shipped plaintext
+/// logins by default and the passwords went over the wire in the clear.
+async fn build_web_tls() -> anyhow::Result<axum_server::tls_rustls::RustlsConfig> {
     use anyhow::Context;
     // Ensure a process-level crypto provider is installed (no-op if another
     // component already installed one).
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-    let cert = opts.cert_path.as_deref().filter(|p| !p.is_empty());
-    let key = opts.key_path.as_deref().filter(|p| !p.is_empty());
-    if let (Some(cert), Some(key)) = (cert, key) {
-        if std::path::Path::new(cert).exists() && std::path::Path::new(key).exists() {
-            info!("[WebTLS] Using provided certificate: {}", cert);
-            return axum_server::tls_rustls::RustlsConfig::from_pem_file(cert, key)
-                .await
-                .context("failed to load web_tls_cert_path/web_tls_key_path");
-        }
-        warn!("[WebTLS] Configured cert/key not found — falling back to self-signed");
-    }
-
-    // Self-signed: generate once and persist next to the executable so the same
-    // certificate is reused across restarts (the browser only warns once).
-    let dir = crate::logging::get_logs_dir();
-    let _ = std::fs::create_dir_all(&dir);
-    let cert_file = dir.join("web-selfsigned-cert.pem");
-    let key_file = dir.join("web-selfsigned-key.pem");
-    if !cert_file.exists() || !key_file.exists() {
-        info!("[WebTLS] Generating self-signed certificate (browser will show a one-time warning)");
-        let signed = rcgen::generate_simple_self_signed(vec![
-            "localhost".to_string(),
-            "127.0.0.1".to_string(),
-        ])
-        .context("failed to generate self-signed certificate")?;
-        std::fs::write(&cert_file, signed.cert.pem()).context("write self-signed cert")?;
-        std::fs::write(&key_file, signed.key_pair.serialize_pem()).context("write self-signed key")?;
-    }
+    let (cert_file, key_file) = ensure_panel_cert(&crate::logging::get_logs_dir())?;
     axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert_file, &key_file)
         .await
-        .context("failed to load self-signed certificate")
+        .context("failed to load panel certificate")
 }
 
 pub async fn start_web_server(state: WebSharedState, port: u16) {
-    start_web_server_tls(state, port, None).await;
-}
+    let use_tls = !plain_http_requested();
+    WEB_TLS_ACTIVE.store(use_tls, Ordering::Relaxed);
 
-pub async fn start_web_server_tls(state: WebSharedState, port: u16, tls: Option<WebTlsOptions>) {
     let has_password = state
         .web_gui_password
         .as_ref()
@@ -387,17 +439,22 @@ pub async fn start_web_server_tls(state: WebSharedState, port: u16, tls: Option<
         .with_state(state);
 
     let addr = format!("0.0.0.0:{}", port);
-    let scheme = if tls.is_some() { "https" } else { "http" };
+    let scheme = if use_tls { "https" } else { "http" };
     if has_password {
         info!("Web control panel starting on {}://{} (password protected)", scheme, addr);
     } else {
-        info!(
-            "Web control panel starting on {}://{} (no password — set web_gui_password in config.toml to protect)",
+        // Unreachable in practice: the config loader generates a password when
+        // one is missing. Kept loud in case the panel is ever started directly.
+        warn!(
+            "Web control panel starting on {}://{} WITHOUT A PASSWORD — anyone who can reach this port controls the bot",
             scheme, addr
         );
     }
+    if !use_tls {
+        warn!("[WebTLS] BAF_WEB_PLAIN_HTTP is set — the panel password will be sent unencrypted");
+    }
 
-    if let Some(opts) = tls {
+    if use_tls {
         let socket: std::net::SocketAddr = match addr.parse() {
             Ok(s) => s,
             Err(e) => {
@@ -405,7 +462,7 @@ pub async fn start_web_server_tls(state: WebSharedState, port: u16, tls: Option<
                 return;
             }
         };
-        let tls_config = match build_web_tls(&opts).await {
+        let tls_config = match build_web_tls().await {
             Ok(c) => c,
             Err(e) => {
                 error!("Failed to set up web TLS (panel will not start): {:#}", e);
@@ -504,7 +561,9 @@ async fn login(
     let expected = match &s.web_gui_password {
         Some(p) if !p.is_empty() => p,
         _ => {
-            // No password configured — login always succeeds (no cookie needed)
+            // No password configured — login always succeeds (no cookie needed).
+            // The config loader generates one when it is missing, so reaching
+            // this arm means the panel was started outside the normal path.
             return (StatusCode::OK, Json(LoginResponse { success: true })).into_response();
         }
     };
@@ -545,9 +604,13 @@ async fn login(
 
     info!("[WebGUI] Successful login via web panel");
 
+    // `Secure` only when we actually serve TLS: browsers silently drop a Secure
+    // cookie sent over plain HTTP, which would look like a login that "works"
+    // but never sticks.
+    let secure = if WEB_TLS_ACTIVE.load(Ordering::Relaxed) { " Secure;" } else { "" };
     let cookie = format!(
-        "baf_session={}; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800",
-        token
+        "baf_session={};{} Path=/; HttpOnly; SameSite=Strict; Max-Age=604800",
+        token, secure
     );
     (
         StatusCode::OK,
@@ -1441,6 +1504,18 @@ struct SaveConfigPayload {
     config_toml: String,
 }
 
+/// Refuse to save a config that leaves the panel unauthenticated.
+///
+/// Without this the loader would just mint a new random password on the next
+/// read, and the user would be locked out of a panel they thought they had
+/// opened up. Failing the save says so while they are still looking at it.
+fn reject_empty_panel_password(config: &crate::config::Config) -> Result<(), String> {
+    if config.web_gui_password.as_deref().is_some_and(|p| !p.is_empty()) {
+        return Ok(());
+    }
+    Err("Panel password cannot be empty — the panel controls the bot, so it always needs one".to_string())
+}
+
 async fn save_config(
     State(s): State<WebSharedState>,
     Json(payload): Json<SaveConfigPayload>,
@@ -1453,6 +1528,7 @@ async fn save_config(
         // Parse the TOML to validate it first
         let mut config: crate::config::Config = toml::from_str(&toml_str)
             .map_err(|e| format!("Invalid config TOML: {}", e))?;
+        reject_empty_panel_password(&config)?;
         // Preserve server-managed COFL session tokens: get_config strips them
         // before sending to the client, so the incoming TOML never contains
         // them. Restore them from the current on-disk config so saving from the
@@ -1567,6 +1643,7 @@ async fn save_config_json(
     match tokio::task::spawn_blocking(move || -> Result<(), String> {
         let existing = loader.load().map_err(|e| format!("Failed to load config: {e}"))?;
         let mut config = merge_config_patch(&existing, &patch)?;
+        reject_empty_panel_password(&config)?;
         // config_to_json cleared these; restore the real ones so saving from the
         // panel never wipes the user's authenticated COFL sessions.
         config.sessions = existing.sessions;
@@ -1797,6 +1874,157 @@ async fn handle_chat_ws(mut socket: WebSocket, state: WebSharedState) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("baf-tls-{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn panel_cert_is_generated_and_then_reused() {
+        let dir = temp_dir("gen");
+        let (cert, key) = ensure_panel_cert(&dir).expect("certificate should be generated");
+        let cert_pem = std::fs::read_to_string(&cert).expect("cert written");
+        let key_pem = std::fs::read_to_string(&key).expect("key written");
+        assert!(cert_pem.contains("BEGIN CERTIFICATE"));
+        assert!(key_pem.contains("PRIVATE KEY"));
+
+        // Reused, not regenerated: a certificate that changes on every restart
+        // trains users to click through the warning that would catch a swap.
+        let (cert2, _) = ensure_panel_cert(&dir).expect("second call should succeed");
+        assert_eq!(cert2, cert);
+        assert_eq!(std::fs::read_to_string(&cert2).unwrap(), cert_pem);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn panel_key_is_not_world_readable() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = temp_dir("perms");
+        let (_, key) = ensure_panel_cert(&dir).expect("certificate should be generated");
+        let mode = std::fs::metadata(&key).expect("key exists").permissions().mode();
+        assert_eq!(mode & 0o077, 0, "key is readable by group/other: {:o}", mode);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[tokio::test]
+    async fn generated_panel_cert_loads_into_rustls() {
+        // Proves the generated PEMs are actually a usable TLS pair, so the panel
+        // cannot start, fail to serve, and leave the user with no panel at all.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let dir = temp_dir("load");
+        let (cert, key) = ensure_panel_cert(&dir).expect("certificate should be generated");
+        axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert, &key)
+            .await
+            .expect("generated certificate should load into rustls");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn sessions_with(token: &str) -> HashSet<String> {
+        let mut s = HashSet::new();
+        s.insert(token.to_string());
+        s
+    }
+
+    #[test]
+    fn unauthenticated_requests_cannot_reach_control_endpoints() {
+        let sessions = sessions_with("good-token");
+        for path in ["/api/config", "/api/config.json", "/api/chat/send", "/api/status"] {
+            assert!(
+                !request_is_authorized(true, &sessions, path, &[]),
+                "{path} must require a session"
+            );
+            assert!(
+                !request_is_authorized(true, &sessions, path, &["wrong-token".to_string()]),
+                "{path} must reject an unknown token"
+            );
+        }
+    }
+
+    #[test]
+    fn a_valid_session_token_is_accepted_however_it_arrives() {
+        let sessions = sessions_with("good-token");
+        assert!(request_is_authorized(true, &sessions, "/api/config", &["good-token".to_string()]));
+        // Several presented tokens: one good is enough (cookie + ?token= on a WS).
+        assert!(request_is_authorized(
+            true,
+            &sessions,
+            "/api/chat/ws",
+            &["stale".to_string(), "good-token".to_string()],
+        ));
+    }
+
+    #[test]
+    fn only_the_login_form_and_share_endpoints_are_public() {
+        let sessions = HashSet::new();
+        for path in ["/", "/api/login", "/api/profit/public", "/api/og-image.png"] {
+            assert!(request_is_authorized(true, &sessions, path, &[]), "{path} should be public");
+        }
+        assert!(!request_is_authorized(true, &sessions, "/api/profit", &[]),
+            "the full profit endpoint is not the public one");
+    }
+
+    #[tokio::test]
+    async fn the_generated_certificate_actually_serves_https() {
+        // End-to-end proof of the zero-config claim: generate a certificate with
+        // no settings involved, serve with it, and complete a real TLS handshake.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let dir = temp_dir("serve");
+        let (cert, key) = ensure_panel_cert(&dir).expect("certificate should be generated");
+        let tls = axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert, &key)
+            .await
+            .expect("certificate should load");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let app = Router::new().route("/", get(|| async { "panel" }));
+        let server = tokio::spawn(async move {
+            let _ = axum_server::from_tcp_rustls(listener, tls)
+                .serve(app.into_make_service())
+                .await;
+        });
+
+        // Self-signed by design, so the client must not verify the issuer — this
+        // is the same one-time warning a browser shows.
+        let client = reqwest::Client::builder()
+            .danger_accept_invalid_certs(true)
+            .build()
+            .expect("client");
+        let body = client
+            .get(format!("https://127.0.0.1:{port}/"))
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await
+            .expect("HTTPS request should succeed")
+            .text()
+            .await
+            .expect("body");
+        assert_eq!(body, "panel");
+
+        // And plain HTTP to the TLS port must not be served as if it were fine.
+        let plain = client
+            .get(format!("http://127.0.0.1:{port}/"))
+            .timeout(std::time::Duration::from_secs(10))
+            .send()
+            .await;
+        assert!(plain.is_err(), "plaintext request to the TLS port should fail");
+
+        server.abort();
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn empty_panel_password_is_rejected_on_save() {
+        let with_password = |p: Option<&str>| crate::config::Config {
+            web_gui_password: p.map(|s| s.to_string()),
+            ..Default::default()
+        };
+        assert!(reject_empty_panel_password(&with_password(None)).is_err());
+        assert!(reject_empty_panel_password(&with_password(Some(""))).is_err());
+        assert!(reject_empty_panel_password(&with_password(Some("a-real-password"))).is_ok());
+    }
 
     /// Every `key:'…'` in the panel's CONFIG_SCHEMA.
     fn panel_schema_keys() -> std::collections::HashSet<String> {

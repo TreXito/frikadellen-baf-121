@@ -1638,13 +1638,7 @@ const CONFIG_SCHEMA = [
     {key:'web_gui_port', group:'panel', type:'number', label:'Panel port', min:1, max:65535,
      help:'Takes effect after a restart.'},
     {key:'web_gui_password', group:'panel', type:'text', label:'Panel password', secret:true,
-     help:'Empty means anyone who can reach the port can control the bot.'},
-    {key:'web_https', group:'panel', type:'bool', label:'Serve over HTTPS',
-     help:'Strongly recommended on a public IP. With no certificate paths below, a self-signed one is generated.'},
-    {key:'web_tls_cert_path', group:'panel', type:'text', label:'TLS certificate path', wide:true, advanced:true,
-     help:'PEM full chain. Empty = use the generated self-signed certificate.'},
-    {key:'web_tls_key_path', group:'panel', type:'text', label:'TLS private key path', wide:true, advanced:true,
-     help:'PEM key matching the certificate above.'},
+     help:'Generated randomly on first run. Cannot be emptied — this panel controls the bot. HTTPS is always on, so it is never sent in the clear.'},
 
     // ── Proxy ──
     {key:'proxy_enabled', group:'proxy', type:'bool', label:'Use a proxy',
