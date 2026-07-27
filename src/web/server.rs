@@ -392,6 +392,51 @@ enum PanelCert {
     Incomplete { have: &'static str, missing: &'static str },
 }
 
+/// How often to check whether the certificate on disk has been replaced.
+const CERT_RELOAD_POLL: std::time::Duration = std::time::Duration::from_secs(60);
+
+/// Watch a configured certificate and swap it in when it changes on disk.
+///
+/// Let's Encrypt only issues IP-address certificates under the mandatory
+/// `shortlived` profile — about 160 hours — so an IP certificate is REPLACED
+/// every few days. TLS is otherwise loaded once at startup, which would leave
+/// the panel serving an expired certificate from the first renewal until the
+/// whole bot was restarted. Restarting a flip bot to pick up a certificate is a
+/// real cost (lost session, lost uptime), so the renewal is picked up in place.
+///
+/// A failed reload keeps the certificate already in memory: a half-written file
+/// (the renewal is not atomic across two files) must not take the panel down —
+/// the next poll picks it up once the writer has finished.
+fn spawn_cert_reloader(
+    config: axum_server::tls_rustls::RustlsConfig,
+    cert: std::path::PathBuf,
+    key: std::path::PathBuf,
+) {
+    let stamp = |p: &std::path::Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    tokio::spawn(async move {
+        let mut seen = (stamp(&cert), stamp(&key));
+        loop {
+            tokio::time::sleep(CERT_RELOAD_POLL).await;
+            let now = (stamp(&cert), stamp(&key));
+            if now == seen || now.0.is_none() {
+                continue;
+            }
+            seen = now;
+            match config.reload_from_pem_file(&cert, &key).await {
+                Ok(()) => info!(
+                    "[WebTLS] Certificate changed on disk — reloaded {} without restarting",
+                    cert.display()
+                ),
+                Err(e) => warn!(
+                    "[WebTLS] Certificate at {} changed but could not be reloaded (still serving the \
+                     previous one, will retry): {e}",
+                    cert.display()
+                ),
+            }
+        }
+    });
+}
+
 /// Decide from the configured paths, without touching the filesystem.
 fn choose_panel_cert(cert_path: Option<&str>, key_path: Option<&str>) -> PanelCert {
     let cert = cert_path.map(str::trim).filter(|s| !s.is_empty());
@@ -425,6 +470,8 @@ async fn build_web_tls(
             match axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert, &key).await {
                 Ok(config) => {
                     info!("[WebTLS] Using the configured certificate: {} (key {})", cert, key);
+                    // Renewals replace this file; pick them up without a restart.
+                    spawn_cert_reloader(config.clone(), cert.into(), key.into());
                     return Ok(config);
                 }
                 Err(e) => {
@@ -2265,6 +2312,81 @@ mod tests {
             served_der, expected_der,
             "the panel served a different certificate than the one configured — \
              this is the bug where a real certificate was ignored in favour of the self-signed one"
+        );
+    }
+
+    /// Write a freshly generated certificate to `dir`, returning its DER.
+    fn issue_cert_into(dir: &std::path::Path, san: &str) -> Vec<u8> {
+        let issued = rcgen::generate_simple_self_signed(vec![san.to_string()])
+            .expect("generate test cert");
+        std::fs::write(dir.join("cert.pem"), issued.cert.pem()).expect("write cert");
+        std::fs::write(dir.join("key.pem"), issued.key_pair.serialize_pem()).expect("write key");
+        issued.cert.der().to_vec()
+    }
+
+    /// Fetch the certificate a TLS server presents, validating nothing.
+    async fn served_cert_der(addr: std::net::SocketAddr) -> Vec<u8> {
+        tokio::task::spawn_blocking(move || {
+            let connector = native_tls::TlsConnector::builder()
+                .danger_accept_invalid_certs(true)
+                .danger_accept_invalid_hostnames(true)
+                .build()
+                .expect("connector");
+            let tcp = std::net::TcpStream::connect(addr).expect("connect");
+            let stream = connector.connect("127.0.0.1", tcp).expect("tls handshake");
+            stream
+                .peer_certificate()
+                .expect("peer cert readable")
+                .expect("server sent a certificate")
+                .to_der()
+                .expect("der")
+        })
+        .await
+        .expect("client task")
+    }
+
+    /// A renewed certificate on disk must be served WITHOUT restarting the bot.
+    ///
+    /// Let's Encrypt IP certificates are ~160 hours by policy, so this is not an
+    /// edge case: it happens every few days, forever. Loading TLS once at
+    /// startup would mean serving an expired certificate from the first renewal
+    /// onwards until someone restarted the bot.
+    #[tokio::test]
+    async fn a_renewed_certificate_is_picked_up_without_a_restart() {
+        let dir = std::env::temp_dir().join(format!("baf-tls-renew-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let first_der = issue_cert_into(&dir, "127.0.0.1");
+
+        let cert = dir.join("cert.pem");
+        let key = dir.join("key.pem");
+        let tls = build_web_tls(cert.to_str(), key.to_str()).await.expect("loads");
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let app = Router::new().route("/", get(|| async { "ok" }));
+        let serving = tls.clone();
+        tokio::spawn(async move {
+            axum_server::from_tcp_rustls(listener, serving)
+                .serve(app.into_make_service())
+                .await
+                .ok();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+        assert_eq!(served_cert_der(addr).await, first_der, "serves the original certificate");
+
+        // Simulate the renewal: same paths, brand new certificate.
+        let renewed_der = issue_cert_into(&dir, "127.0.0.1");
+        assert_ne!(renewed_der, first_der, "the renewal must be a different certificate");
+
+        // Drive the same reload the background watcher performs, rather than
+        // sleeping out its poll interval.
+        tls.reload_from_pem_file(&cert, &key).await.expect("reload");
+
+        let after = served_cert_der(addr).await;
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(
+            after, renewed_der,
+            "after a renewal the panel must present the NEW certificate on the wire"
         );
     }
 
