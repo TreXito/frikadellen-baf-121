@@ -3045,9 +3045,24 @@ async fn main() -> Result<()> {
                     // finder-only mode (no COFL license/auth), so they bypass this gate.
                     let from_own_finder = flip.finder.as_deref() == Some("BAF_FINDER");
                     if !from_own_finder && !cofl_authenticated_ws.load(Ordering::Relaxed) {
-                        flip_diag_ws.record_drop(
+                        // Say WHY it counts as unauthenticated. `signin_link_shown`
+                        // is the discriminator that matters: true means COFL
+                        // really did reject the session and the user must open
+                        // the link; false means COFL is pushing flips to a
+                        // session it never challenged, which should have been
+                        // auto-confirmed (see note_authenticated_traffic) and is
+                        // a bug if it ever appears here.
+                        let detail = format!(
+                            "signin_link_shown={} cofl_logged_in={} finder_tag={}",
+                            frikadellen_baf::websocket::COFL_AUTH_LINK_SHOWN
+                                .load(Ordering::Relaxed),
+                            frikadellen_baf::websocket::COFL_LOGGED_IN.load(Ordering::Relaxed),
+                            flip.finder.as_deref().unwrap_or("<none>"),
+                        );
+                        flip_diag_ws.record_drop_detailed(
                             frikadellen_baf::state::FlipDropReason::CoflUnauthenticated,
                             &flip.item_name,
+                            Some(&detail),
                         );
                         continue;
                     }
