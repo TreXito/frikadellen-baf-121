@@ -517,12 +517,15 @@ impl BotClient {
     pub fn new() -> Self {
         let (event_tx, event_rx) = mpsc::unbounded_channel();
         let (command_tx, command_rx) = mpsc::unbounded_channel();
-        
+        // One cell, shared with the handlers, so a window close clears it. See
+        // `BotEventHandlers::last_window_id`.
+        let last_window_id = Arc::new(RwLock::new(0u8));
+
         Self {
             state: Arc::new(RwLock::new(BotState::GracePeriod)),
             action_counter: Arc::new(RwLock::new(1)),
-            last_window_id: Arc::new(RwLock::new(0)),
-            handlers: Arc::new(BotEventHandlers::new()),
+            last_window_id: last_window_id.clone(),
+            handlers: Arc::new(BotEventHandlers::with_shared_window_id(last_window_id)),
             event_tx,
             event_rx: Arc::new(tokio::sync::Mutex::new(event_rx)),
             command_tx,
@@ -1465,12 +1468,15 @@ impl Default for BotClientState {
     fn default() -> Self {
         let (event_tx, _) = mpsc::unbounded_channel();
         let (_, command_rx) = mpsc::unbounded_channel();
+        // Shared with the handlers so a window close clears it. See
+        // `BotEventHandlers::last_window_id`.
+        let last_window_id = Arc::new(RwLock::new(0u8));
         Self {
             bot_state: Arc::new(RwLock::new(BotState::GracePeriod)),
-            handlers: Arc::new(BotEventHandlers::new()),
+            handlers: Arc::new(BotEventHandlers::with_shared_window_id(last_window_id.clone())),
             event_tx,
             action_counter: Arc::new(RwLock::new(1)),
-            last_window_id: Arc::new(RwLock::new(0)),
+            last_window_id,
             command_rx: Arc::new(tokio::sync::Mutex::new(command_rx)),
             joined_skyblock: Arc::new(RwLock::new(false)),
             teleported_to_island: Arc::new(RwLock::new(false)),
@@ -3933,28 +3939,34 @@ async fn execute_command(
             *state.manage_orders_deadline.write() = Some(
                 tokio::time::Instant::now() + tokio::time::Duration::from_secs(10)
             );
-            let initial_wid = *state.last_window_id.read();
             send_chat_command(bot, "/bz");
             *state.bot_state.write() = BotState::ManagingOrders;
 
             // Safety: if no window opens within 5 seconds (e.g. chat throttle,
             // server lag), retry /bz once.  If still no window after another 5 s,
             // give up and return to Idle so the queue isn't blocked for 60 s.
+            //
+            // `last_window_id` now means "container open right now" (it is zeroed on
+            // every close), so `> 0` is a direct read of "the /bz window is up and the
+            // handler is working".  The previous version compared against the id
+            // captured before `/bz` was sent, which under the new semantics cannot
+            // distinguish "no window opened" from "a window opened and closed".  The
+            // handler finishing fast is already covered by the state check above:
+            // it leaves `ManagingOrders`, so no spurious retry is sent.
             {
                 let retry_state = state.bot_state.clone();
                 let retry_wid = state.last_window_id.clone();
                 let retry_bot = bot.clone();
-                let saved_wid = initial_wid;
                 tokio::spawn(async move {
                     tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                     if *retry_state.read() != BotState::ManagingOrders { return; }
-                    if *retry_wid.read() != saved_wid { return; } // window opened, handler working
+                    if *retry_wid.read() > 0 { return; } // window open, handler working
                     warn!("[ManageOrders] No window after 5 s — retrying /bz");
                     send_chat_command(&retry_bot, "/bz");
 
                     tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                     if *retry_state.read() != BotState::ManagingOrders { return; }
-                    if *retry_wid.read() != saved_wid { return; }
+                    if *retry_wid.read() > 0 { return; }
                     warn!("[ManageOrders] Still no window after retry — forcing Idle");
                     *retry_state.write() = BotState::Idle;
                 });
