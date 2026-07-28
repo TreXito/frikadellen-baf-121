@@ -20,18 +20,38 @@ pub struct BotEventHandlers {
     current_window_type: Arc<RwLock<Option<WindowType>>>,
     /// Current window ID
     current_window_id: Arc<RwLock<Option<u8>>>,
+    /// The SAME `Arc` as `BotClient`/`BotClientState`'s `last_window_id`, which is the
+    /// value every `click_window_slot` stale-guard reads.  It lives here so that a
+    /// window closing (ours via `send_raw_close`, or the server's `ContainerClose`)
+    /// resets it in the one place window tracking is already cleared.
+    ///
+    /// Before this it was written ONLY by the OpenScreen handler, so it meant "last
+    /// window ever opened", never "window currently open".  The guard could therefore
+    /// not tell a destroyed container from a live one, and a click landed on a
+    /// container the server had closed 239 ms earlier: Hypixel threw
+    /// "An exception occurred in your connection", routed the bot to Limbo, and
+    /// Watchdog issued a 30-day ban (#01E34397) for an impossible action.
+    last_window_id: Arc<RwLock<u8>>,
     /// Regex for Coflnet chat messages
     #[allow(dead_code)]
     cofl_chat_regex: Regex,
 }
 
 impl BotEventHandlers {
-    /// Create new event handlers
+    /// Create new event handlers with a standalone window-id cell.
     pub fn new() -> Self {
+        Self::with_shared_window_id(Arc::new(RwLock::new(0)))
+    }
+
+    /// Create event handlers that share `last_window_id` with the owning
+    /// `BotClient`/`BotClientState`.  Always use this on the real bot: the click
+    /// guards read that cell, so it must be the one this type clears on close.
+    pub fn with_shared_window_id(last_window_id: Arc<RwLock<u8>>) -> Self {
         Self {
             current_window_title: Arc::new(RwLock::new(None)),
             current_window_type: Arc::new(RwLock::new(None)),
             current_window_id: Arc::new(RwLock::new(None)),
+            last_window_id,
             cofl_chat_regex: Regex::new(r"\[Chat\]").unwrap(),
         }
     }
@@ -46,6 +66,7 @@ impl BotEventHandlers {
         *self.current_window_id.write() = Some(window_id);
         *self.current_window_title.write() = Some(title.to_string());
         *self.current_window_type.write() = Some(Self::classify_window(title));
+        *self.last_window_id.write() = window_id;
     }
 
     /// Handle window close event
@@ -69,6 +90,11 @@ impl BotEventHandlers {
         *self.current_window_id.write() = None;
         *self.current_window_title.write() = None;
         *self.current_window_type.write() = None;
+        // 0 = "no container open" (0 is the player's own inventory, which every
+        // click guard treats as always-valid).  Resetting it here is what makes the
+        // `click_window_slot` stale-guard able to refuse a click into a container
+        // that has already been destroyed.
+        *self.last_window_id.write() = 0;
     }
 
     /// Handle chat message
@@ -487,8 +513,40 @@ mod tests {
         let lore = vec![
             "§7Cost: §61.2M coins".to_string(),
         ];
-        
+
         let price = BotEventHandlers::parse_price_from_lore(&lore);
         assert_eq!(price, Some(1_200_000.0));
+    }
+
+    /// Regression: ban #01E34397.  `last_window_id` is the cell every
+    /// `click_window_slot` stale-guard compares against.  Closing a window MUST zero
+    /// it, otherwise the guard reads "last window ever opened", waves the click
+    /// through, and the bot clicks a container the server already destroyed.
+    #[tokio::test]
+    async fn closing_a_window_clears_the_id_the_click_guard_reads() {
+        let last_window_id = Arc::new(RwLock::new(0u8));
+        let handlers = BotEventHandlers::with_shared_window_id(last_window_id.clone());
+
+        handlers
+            .handle_window_open(25, "Generic9x4", "Co-op Auction House")
+            .await;
+        assert_eq!(*last_window_id.read(), 25, "open must publish the window id");
+
+        // The server's ContainerClose path.
+        handlers.handle_window_close().await;
+        assert_eq!(
+            *last_window_id.read(),
+            0,
+            "after close the guard must no longer believe window 25 is clickable"
+        );
+
+        // The `send_raw_close()` path closes without waiting for the server echo.
+        handlers
+            .handle_window_open(26, "Generic9x3", "Your Bids")
+            .await;
+        assert_eq!(*last_window_id.read(), 26);
+        handlers.clear_window_tracking();
+        assert_eq!(*last_window_id.read(), 0);
+        assert_eq!(handlers.current_window_id(), None);
     }
 }

@@ -38,6 +38,28 @@ impl CommandQueue {
     /// ManageOrders are never dropped because they represent revenue or are
     /// essential housekeeping.
     pub fn enqueue(&self, command_type: CommandType, priority: CommandPriority, interruptible: bool) -> Uuid {
+        // `ClaimPurchasedItem` is an argument-free bulk sweep: it opens /ah, walks to
+        // "Your Bids" and hits "Claim All", which drains EVERY pending purchase in one
+        // go.  A second queued copy therefore has nothing left to claim and only
+        // repeats the /ah -> Your Bids window churn.  On 2026-07-28 a redundant copy
+        // fired 13 ms after the first completed, opened a window the server closed
+        // 65 ms later, and clicked into it: Limbo, then a 30-day Watchdog ban
+        // (#01E34397).  Collapse duplicates onto the pending one instead of queueing.
+        // Returning the existing id keeps `await_queued_command` waiting on the real
+        // command rather than an id that was never enqueued.
+        if matches!(command_type, CommandType::ClaimPurchasedItem) {
+            let existing = self
+                .queue
+                .read()
+                .iter()
+                .find(|c| matches!(c.command_type, CommandType::ClaimPurchasedItem))
+                .map(|c| c.id);
+            if let Some(existing_id) = existing {
+                debug!("[Queue] Collapsed duplicate ClaimPurchasedItem onto pending {}", existing_id);
+                return existing_id;
+            }
+        }
+
         let id = Uuid::new_v4();
         let cmd = QueuedCommand {
             id,
