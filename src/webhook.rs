@@ -1443,6 +1443,22 @@ pub fn parse_ban_reason(reason: &str) -> ParsedBan {
     }
 }
 
+/// The temporary-ban lengths Hypixel actually hands out, ascending.
+///
+/// Security blocks are NOT on this ladder, but they also carry no duration, so
+/// they never reach the age check at all.
+///
+/// Anything below the first rung is measured against that rung, so a shorter
+/// ban than Hypixel currently issues would read as stale and be suppressed. That
+/// is the deliberate trade for not having a whole-day boundary every 24h; add
+/// the rung here if a shorter length ever shows up.
+const HYPIXEL_BAN_LADDER_SECS: [u64; 4] = [
+    30 * 86_400,
+    90 * 86_400,
+    180 * 86_400,
+    360 * 86_400,
+];
+
 /// How long after a ban was issued the notification is still worth sending.
 /// A ban is announced on EVERY join attempt for as long as it lasts, so without
 /// this the channel fills up with re-announcements of bans that are days old.
@@ -1491,27 +1507,31 @@ pub fn parse_ban_duration_secs(duration: &str) -> Option<u64> {
 
 /// How long ago a ban was issued, inferred from the time it has left.
 ///
-/// Hypixel hands out bans in whole units (30d, 90d, 365d, 6h, …) and the
-/// disconnect message counts DOWN from there, so the distance to the next whole
-/// unit above is the time that has already elapsed. `29d 23h 59m 58s` is a 30d
-/// ban issued 2 seconds ago; `358d 13h 33m 34s` is a 365d ban issued about a
-/// week ago.
+/// A ban's disconnect message counts DOWN from the length that was issued, so
+/// the smallest ladder rung at or above the time left IS that length, and the
+/// difference is how long ago the ban landed. `29d 23h 59m 58s` is a 30d ban
+/// issued 2 seconds ago; `358d 13h 33m 34s` is a 360d ban issued a day and a
+/// half ago.
 ///
-/// The unit is picked from the magnitude — days for multi-day bans, hours for
-/// same-day ones, minutes below that — so a short ban isn't measured against a
-/// day boundary it never had.
+/// Matching against the real ladder rather than a generic whole-day boundary
+/// matters: `330d` left is a 360d ban that is 30 days old, but every generic
+/// rounding rule reads it as a ban issued this instant.
+///
+/// Only temporary bans reach here. Permanent and security bans carry no
+/// duration at all and are handled by [`ban_is_recent`] before this is called.
 pub fn ban_age_secs(remaining_secs: u64) -> u64 {
+    if let Some(issued) = HYPIXEL_BAN_LADDER_SECS
+        .iter()
+        .copied()
+        .find(|rung| *rung >= remaining_secs)
+    {
+        return issued - remaining_secs;
+    }
+    // Longer than any rung we know, so Hypixel changed the ladder. Measure
+    // against the whole day above instead of treating it as brand new, and
+    // extend HYPIXEL_BAN_LADDER_SECS once the new length is confirmed.
     const DAY: u64 = 86_400;
-    const HOUR: u64 = 3_600;
-    const MINUTE: u64 = 60;
-    let unit = if remaining_secs >= DAY {
-        DAY
-    } else if remaining_secs >= HOUR {
-        HOUR
-    } else {
-        MINUTE
-    };
-    remaining_secs.div_ceil(unit) * unit - remaining_secs
+    remaining_secs.div_ceil(DAY) * DAY - remaining_secs
 }
 
 /// Whether a parsed ban was issued recently enough to be worth announcing.
@@ -1733,20 +1753,47 @@ mod tests {
     }
 
     #[test]
-    fn ban_age_is_distance_to_the_next_whole_unit() {
+    fn ban_age_is_distance_up_to_the_ladder_rung() {
         // 30d ban, 2 seconds old
         assert_eq!(ban_age_secs(parse_ban_duration_secs("29d 23h 59m 58s").unwrap()), 2);
         // 90d ban, 8 seconds old
         assert_eq!(ban_age_secs(parse_ban_duration_secs("89d 23h 59m 52s").unwrap()), 8);
-        // 365d ban, a bit over 6 days old
+        // 180d and 360d rungs, both seconds old
+        assert_eq!(ban_age_secs(parse_ban_duration_secs("179d 23h 59m 59s").unwrap()), 1);
+        assert_eq!(ban_age_secs(parse_ban_duration_secs("359d 23h 59m 55s").unwrap()), 5);
+        // 360d ban, a day and a half old
         assert_eq!(
             ban_age_secs(parse_ban_duration_secs("358d 13h 33m 34s").unwrap()),
-            10 * 3_600 + 26 * 60 + 26
+            86_400 + 10 * 3_600 + 26 * 60 + 26
         );
-        // Sub-day bans are measured against the hour, not the day
-        assert_eq!(ban_age_secs(parse_ban_duration_secs("5h 59m 30s").unwrap()), 30);
         // A ban seen the instant it lands has no elapsed time at all
         assert_eq!(ban_age_secs(parse_ban_duration_secs("30d").unwrap()), 0);
+    }
+
+    #[test]
+    fn a_whole_number_of_days_into_a_ban_is_still_stale() {
+        // Regression: a 360d ban exactly 30 days old. Any generic whole-day
+        // rounding reads this as issued right now; the ladder does not.
+        assert_eq!(
+            ban_age_secs(parse_ban_duration_secs("330d").unwrap()),
+            30 * 86_400
+        );
+    }
+
+    #[test]
+    fn a_duration_below_the_first_rung_is_measured_against_it() {
+        // Nothing shorter than 30d is on the ladder, so a sub-30d remainder is
+        // a stale 30d ban, not a fresh short one.
+        assert_eq!(
+            ban_age_secs(parse_ban_duration_secs("5h 59m 30s").unwrap()),
+            30 * 86_400 - (5 * 3_600 + 59 * 60 + 30)
+        );
+    }
+
+    #[test]
+    fn a_length_above_the_ladder_still_gets_measured() {
+        // Hypixel adding a longer ban must not make it read as brand new.
+        assert_eq!(ban_age_secs(parse_ban_duration_secs("400d 23h 59m 50s").unwrap()), 10);
     }
 
     #[test]
