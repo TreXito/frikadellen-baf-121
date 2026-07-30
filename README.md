@@ -331,7 +331,7 @@ The `config.toml` file is created automatically on first run. You can edit it wi
 | `web_gui_password` | string | random | Password for the web panel. Generated on first run; cannot be empty |
 | `enable_console_input` | boolean | `true` | Allow typing commands in the terminal |
 | `share_legendary_flips` | boolean | `true` | Share legendary/divine flips with the community |
-| `websocket_url` | string | `wss://sky.coflnet.com/modsocket` | Coflnet WebSocket URL (advanced — don't change unless you know what you're doing) |
+| `websocket_url` | string | `wss://sky.coflnet.com/modsocket` | Coflnet WebSocket URL. Correct for every region — Coflnet redirects you to your nearest server automatically, so never set a regional host (`us-sky.coflnet.com`) here (advanced — don't change unless you know what you're doing) |
 
 ### Timing & Delays
 

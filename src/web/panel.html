@@ -1595,7 +1595,7 @@ const CONFIG_SCHEMA = [
     // ── Coflnet ──
     {key:'websocket_url', group:'cofl', type:'text', label:'Coflnet websocket URL', wide:true,
      ph:'wss://sky.coflnet.com/modsocket',
-     help:'Point this at your own finder instead to run in finder-only mode.'},
+     help:'Leave as-is for Coflnet — it redirects you to your nearest regional server on its own, so there is never a reason to enter a regional host here. Point this at your own finder instead to run in finder-only mode.'},
     {key:'multisocket_urls', group:'cofl', type:'list', label:'Extra Coflnet sockets', wide:true, advanced:true,
      ph:'us-sky.coflnet.com/modsocket',
      help:'Regional modsockets connected in parallel. Flips are deduped by UUID, so whichever socket delivers one first wins. One per line.'},
