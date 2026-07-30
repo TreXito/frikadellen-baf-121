@@ -1443,6 +1443,200 @@ pub fn parse_ban_reason(reason: &str) -> ParsedBan {
     }
 }
 
+/// The temporary-ban lengths Hypixel actually hands out, ascending.
+///
+/// Security blocks are NOT on this ladder, but they also carry no duration, so
+/// they never reach the age check at all.
+///
+/// Anything below the first rung is measured against that rung, so a shorter
+/// ban than Hypixel currently issues would read as stale and be suppressed. That
+/// is the deliberate trade for not having a whole-day boundary every 24h; add
+/// the rung here if a shorter length ever shows up.
+const HYPIXEL_BAN_LADDER_SECS: [u64; 4] = [
+    30 * 86_400,
+    90 * 86_400,
+    180 * 86_400,
+    360 * 86_400,
+];
+
+/// How long after a ban was issued the notification is still worth sending.
+/// A ban is announced on EVERY join attempt for as long as it lasts, so without
+/// this the channel fills up with re-announcements of bans that are days old.
+const BAN_NOTIFY_MAX_AGE_SECS: u64 = 120;
+
+/// Runtime override for [`BAN_NOTIFY_MAX_AGE_SECS`], for testing without a rebuild.
+fn ban_notify_max_age_secs() -> u64 {
+    std::env::var("BAF_BAN_NOTIFY_MAX_AGE_SECS")
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok())
+        .unwrap_or(BAN_NOTIFY_MAX_AGE_SECS)
+}
+
+/// Parse a Hypixel ban duration such as `"29d 23h 59m 58s"` into seconds.
+/// Returns `None` when no `<number><unit>` token is present at all.
+pub fn parse_ban_duration_secs(duration: &str) -> Option<u64> {
+    let mut total: u64 = 0;
+    let mut matched = false;
+    let mut digits = String::new();
+    for c in duration.chars() {
+        if c.is_ascii_digit() {
+            digits.push(c);
+            continue;
+        }
+        if digits.is_empty() {
+            continue;
+        }
+        let unit = match c.to_ascii_lowercase() {
+            'w' => 7 * 86_400,
+            'd' => 86_400,
+            'h' => 3_600,
+            'm' => 60,
+            's' => 1,
+            // Not a unit we know — drop the number rather than misattribute it.
+            _ => {
+                digits.clear();
+                continue;
+            }
+        };
+        total = total.saturating_add(digits.parse::<u64>().ok()?.saturating_mul(unit));
+        matched = true;
+        digits.clear();
+    }
+    matched.then_some(total)
+}
+
+/// How long ago a ban was issued, inferred from the time it has left.
+///
+/// A ban's disconnect message counts DOWN from the length that was issued, so
+/// the smallest ladder rung at or above the time left IS that length, and the
+/// difference is how long ago the ban landed. `29d 23h 59m 58s` is a 30d ban
+/// issued 2 seconds ago; `358d 13h 33m 34s` is a 360d ban issued a day and a
+/// half ago.
+///
+/// Matching against the real ladder rather than a generic whole-day boundary
+/// matters: `330d` left is a 360d ban that is 30 days old, but every generic
+/// rounding rule reads it as a ban issued this instant.
+///
+/// Only temporary bans reach here. Permanent and security bans carry no
+/// duration at all and are handled by [`ban_is_recent`] before this is called.
+pub fn ban_age_secs(remaining_secs: u64) -> u64 {
+    if let Some(issued) = HYPIXEL_BAN_LADDER_SECS
+        .iter()
+        .copied()
+        .find(|rung| *rung >= remaining_secs)
+    {
+        return issued - remaining_secs;
+    }
+    // Longer than any rung we know, so Hypixel changed the ladder. Measure
+    // against the whole day above instead of treating it as brand new, and
+    // extend HYPIXEL_BAN_LADDER_SECS once the new length is confirmed.
+    const DAY: u64 = 86_400;
+    remaining_secs.div_ceil(DAY) * DAY - remaining_secs
+}
+
+/// Whether a parsed ban was issued recently enough to be worth announcing.
+///
+/// Fails OPEN: a ban with no duration (permanent, security block) or an
+/// unparseable one carries no age signal, and those are always worth sending.
+fn ban_is_recent(parsed: &ParsedBan) -> bool {
+    let Some(remaining) = parsed.duration.as_deref().and_then(parse_ban_duration_secs) else {
+        return true;
+    };
+    ban_age_secs(remaining) <= ban_notify_max_age_secs()
+}
+
+/// Identity of a ban, used to tell a repeat announcement of the SAME ban from a
+/// genuinely new one. The ban id is Hypixel's own identifier and stays constant
+/// across re-joins; the fallbacks cover messages that carry no id.
+fn ban_identity(parsed: &ParsedBan) -> String {
+    if let Some(id) = &parsed.ban_id {
+        return id.clone();
+    }
+    if parsed.is_security_ban {
+        "security".to_string()
+    } else if parsed.is_permanent {
+        "permanent".to_string()
+    } else {
+        // Last resort: the duration still separates two different temp bans.
+        parsed
+            .duration
+            .as_deref()
+            .map(|d| format!("temporary:{}", d))
+            .unwrap_or_else(|| "unknown".to_string())
+    }
+}
+
+/// Path to the ban-notification ledger, kept next to the executable alongside
+/// `session_times.json` / `profit_stats.json`.
+fn ban_notify_ledger_path() -> std::path::PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("ban_notified.json")))
+        .unwrap_or_else(|| std::path::PathBuf::from("ban_notified.json"))
+}
+
+/// Record that `ingame_name` was notified about this ban, returning `false` when
+/// it already had been.
+///
+/// The ledger has to survive a restart: the ban path terminates the process, so
+/// an account that keeps being relaunched would otherwise re-announce the same
+/// ban on every single join attempt.
+fn claim_ban_notification(ingame_name: &str, identity: &str) -> bool {
+    let path = ban_notify_ledger_path();
+    let mut ledger = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| v.as_object().cloned())
+        .unwrap_or_default();
+
+    let key = ingame_name.to_ascii_lowercase();
+    let already_sent = ledger
+        .get(&key)
+        .and_then(|v| v.get("identity"))
+        .and_then(|v| v.as_str())
+        .is_some_and(|seen| seen == identity);
+    if already_sent {
+        return false;
+    }
+
+    ledger.insert(
+        key,
+        serde_json::json!({ "identity": identity, "at": now_unix() }),
+    );
+    if let Err(e) = std::fs::write(&path, serde_json::Value::Object(ledger).to_string()) {
+        // Losing the ledger means a duplicate notification later, which is far
+        // better than swallowing the one notification that matters.
+        warn!("[BanNotify] Failed to write ban-notify ledger: {}", e);
+    }
+    true
+}
+
+/// Whether a detected ban should produce a notification.
+///
+/// Call this ONCE per detected ban, before any of the `send_webhook_banned*`
+/// calls — it consumes the per-account dedupe slot. It gates the notification
+/// only: a banned account must still stop, whether or not anyone is told.
+pub fn should_notify_ban(ingame_name: &str, reason: &str) -> bool {
+    let parsed = parse_ban_reason(reason);
+    if !ban_is_recent(&parsed) {
+        warn!(
+            "[BanNotify] Suppressing notification for {}: ban is stale ({} left)",
+            ingame_name,
+            parsed.duration.as_deref().unwrap_or("unknown duration")
+        );
+        return false;
+    }
+    let identity = ban_identity(&parsed);
+    if !claim_ban_notification(ingame_name, &identity) {
+        warn!(
+            "[BanNotify] Suppressing notification for {}: ban {} already reported",
+            ingame_name, identity
+        );
+        return false;
+    }
+    true
+}
+
 /// Send a periodic profit summary embed.
 /// Always uses the real IGN — this goes to the user's personal webhook.
 pub async fn send_webhook_profit_summary(
@@ -1547,7 +1741,125 @@ pub async fn send_webhook_visit_refused(
 
 #[cfg(test)]
 mod tests {
-    use super::parse_ban_reason;
+    use super::{ban_age_secs, ban_identity, ban_is_recent, parse_ban_duration_secs, parse_ban_reason};
+
+    #[test]
+    fn parse_duration_handles_full_and_partial_tokens() {
+        assert_eq!(parse_ban_duration_secs("29d 23h 59m 58s"), Some(2_591_998));
+        assert_eq!(parse_ban_duration_secs("5d"), Some(432_000));
+        assert_eq!(parse_ban_duration_secs("59m 30s"), Some(3_570));
+        assert_eq!(parse_ban_duration_secs("forever"), None);
+        assert_eq!(parse_ban_duration_secs(""), None);
+    }
+
+    #[test]
+    fn ban_age_is_distance_up_to_the_ladder_rung() {
+        // 30d ban, 2 seconds old
+        assert_eq!(ban_age_secs(parse_ban_duration_secs("29d 23h 59m 58s").unwrap()), 2);
+        // 90d ban, 8 seconds old
+        assert_eq!(ban_age_secs(parse_ban_duration_secs("89d 23h 59m 52s").unwrap()), 8);
+        // 180d and 360d rungs, both seconds old
+        assert_eq!(ban_age_secs(parse_ban_duration_secs("179d 23h 59m 59s").unwrap()), 1);
+        assert_eq!(ban_age_secs(parse_ban_duration_secs("359d 23h 59m 55s").unwrap()), 5);
+        // 360d ban, a day and a half old
+        assert_eq!(
+            ban_age_secs(parse_ban_duration_secs("358d 13h 33m 34s").unwrap()),
+            86_400 + 10 * 3_600 + 26 * 60 + 26
+        );
+        // A ban seen the instant it lands has no elapsed time at all
+        assert_eq!(ban_age_secs(parse_ban_duration_secs("30d").unwrap()), 0);
+    }
+
+    #[test]
+    fn a_whole_number_of_days_into_a_ban_is_still_stale() {
+        // Regression: a 360d ban exactly 30 days old. Any generic whole-day
+        // rounding reads this as issued right now; the ladder does not.
+        assert_eq!(
+            ban_age_secs(parse_ban_duration_secs("330d").unwrap()),
+            30 * 86_400
+        );
+    }
+
+    #[test]
+    fn a_duration_below_the_first_rung_is_measured_against_it() {
+        // Nothing shorter than 30d is on the ladder, so a sub-30d remainder is
+        // a stale 30d ban, not a fresh short one.
+        assert_eq!(
+            ban_age_secs(parse_ban_duration_secs("5h 59m 30s").unwrap()),
+            30 * 86_400 - (5 * 3_600 + 59 * 60 + 30)
+        );
+    }
+
+    #[test]
+    fn a_length_above_the_ladder_still_gets_measured() {
+        // Hypixel adding a longer ban must not make it read as brand new.
+        assert_eq!(ban_age_secs(parse_ban_duration_secs("400d 23h 59m 50s").unwrap()), 10);
+    }
+
+    #[test]
+    fn only_freshly_issued_bans_are_notified() {
+        let fresh = super::ParsedBan {
+            is_permanent: false,
+            is_security_ban: false,
+            duration: Some("29d 23h 59m 58s".to_string()),
+            reason: None,
+            ban_id: None,
+            appeal_url: None,
+            clean_text: String::new(),
+        };
+        assert!(ban_is_recent(&fresh));
+
+        let stale = super::ParsedBan {
+            duration: Some("358d 13h 33m 34s".to_string()),
+            ..fresh
+        };
+        assert!(!ban_is_recent(&stale));
+    }
+
+    #[test]
+    fn bans_without_a_duration_are_always_notified() {
+        let permanent = super::ParsedBan {
+            is_permanent: true,
+            is_security_ban: false,
+            duration: None,
+            reason: None,
+            ban_id: None,
+            appeal_url: None,
+            clean_text: String::new(),
+        };
+        assert!(ban_is_recent(&permanent));
+
+        // Unparseable durations fail open too
+        let odd = super::ParsedBan {
+            duration: Some("a while".to_string()),
+            ..permanent
+        };
+        assert!(ban_is_recent(&odd));
+    }
+
+    #[test]
+    fn ban_identity_prefers_the_ban_id() {
+        let with_id = super::ParsedBan {
+            is_permanent: false,
+            is_security_ban: false,
+            duration: Some("29d 23h 59m 58s".to_string()),
+            reason: None,
+            ban_id: Some("#AF4CD6A8".to_string()),
+            appeal_url: None,
+            clean_text: String::new(),
+        };
+        assert_eq!(ban_identity(&with_id), "#AF4CD6A8");
+
+        let without_id = super::ParsedBan { ban_id: None, ..with_id };
+        assert_eq!(ban_identity(&without_id), "temporary:29d 23h 59m 58s");
+
+        let permanent = super::ParsedBan {
+            is_permanent: true,
+            duration: None,
+            ..without_id
+        };
+        assert_eq!(ban_identity(&permanent), "permanent");
+    }
 
     #[test]
     fn parse_temporary_ban_message() {
