@@ -1937,16 +1937,23 @@ async fn main() -> Result<()> {
                     // Disconnected ban path so a banned account stops immediately
                     // instead of idling until the next reconnect or manual kill.
                     if is_ban_chat(&clean) {
-                        error!("Ban detected in chat: {} (sending webhook and terminating process)", clean);
-                        if let Some(webhook_url) = config_for_events.active_webhook_url() {
-                            frikadellen_baf::webhook::send_webhook_banned(
-                                &ingame_name_for_events,
-                                &clean,
-                                config_for_events.active_discord_id(),
-                                webhook_url,
-                            ).await;
+                        // Only the NOTIFICATION is gated (stale bans, and bans
+                        // already reported for this account). The exit below is
+                        // not: a banned account stops either way.
+                        if frikadellen_baf::webhook::should_notify_ban(&ingame_name_for_events, &clean) {
+                            error!("Ban detected in chat: {} (sending webhook and terminating process)", clean);
+                            if let Some(webhook_url) = config_for_events.active_webhook_url() {
+                                frikadellen_baf::webhook::send_webhook_banned(
+                                    &ingame_name_for_events,
+                                    &clean,
+                                    config_for_events.active_discord_id(),
+                                    webhook_url,
+                                ).await;
+                            }
+                            frikadellen_baf::webhook::send_webhook_banned_public(&clean).await;
+                        } else {
+                            error!("Ban detected in chat: {} (notification suppressed, terminating process)", clean);
                         }
-                        frikadellen_baf::webhook::send_webhook_banned_public(&clean).await;
                         std::process::exit(1);
                     }
 
@@ -2165,16 +2172,23 @@ async fn main() -> Result<()> {
                 frikadellen_baf::bot::BotEvent::Disconnected(reason) => {
                     warn!("Bot disconnected: {}", reason);
                     if is_ban_disconnect(&reason) {
-                        error!("Ban detected — sending webhook and terminating process");
-                        if let Some(webhook_url) = config_for_events.active_webhook_url() {
-                            frikadellen_baf::webhook::send_webhook_banned(
-                                &ingame_name_for_events,
-                                &reason,
-                                config_for_events.active_discord_id(),
-                                webhook_url,
-                            ).await;
+                        // Only the NOTIFICATION is gated (stale bans, and bans
+                        // already reported for this account). The exit below is
+                        // not: a banned account stops either way.
+                        if frikadellen_baf::webhook::should_notify_ban(&ingame_name_for_events, &reason) {
+                            error!("Ban detected — sending webhook and terminating process");
+                            if let Some(webhook_url) = config_for_events.active_webhook_url() {
+                                frikadellen_baf::webhook::send_webhook_banned(
+                                    &ingame_name_for_events,
+                                    &reason,
+                                    config_for_events.active_discord_id(),
+                                    webhook_url,
+                                ).await;
+                            }
+                            frikadellen_baf::webhook::send_webhook_banned_public(&reason).await;
+                        } else {
+                            error!("Ban detected (notification suppressed) — terminating process");
                         }
-                        frikadellen_baf::webhook::send_webhook_banned_public(&reason).await;
                         // Terminate immediately so we don't reconnect and re-send the webhook
                         std::process::exit(1);
                     }
