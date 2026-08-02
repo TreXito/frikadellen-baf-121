@@ -1573,6 +1573,8 @@ const CONFIG_SCHEMA = [
      help:'How long the bot lists its own auctions for.'},
     {key:'auction_listing_delay_ms', group:'ah', type:'number', label:'Delay between listings (ms)', min:500,
      help:'Too low and Hypixel kicks the bot for "Sending packets too fast!" during bulk listings.'},
+    {key:'only_claim_own_auctions', group:'ah', type:'bool', label:'Only claim my own auctions',
+     help:'For co-op profiles. Manage Auctions also shows what your co-op members listed, and Claim All pays their sales into this bot\'s purse. With this on the bot never presses Claim All and only claims auctions it can prove it listed (its own history, plus this account\'s auctions from the Hypixel/Coflnet API). Anything it cannot attribute is left alone.'},
 
     // ── Relist blocklist ──
     {key:'do_not_relist_ids', group:'relist', type:'list', label:'Never relist these item IDs', wide:true,

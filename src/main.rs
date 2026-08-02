@@ -1481,6 +1481,12 @@ async fn main() -> Result<()> {
     bot_client.set_command_queue(command_queue.clone());
     *bot_client.ingame_name.write() = ingame_name.clone();
 
+    // Co-op claim guard: load the persisted "we listed this" history and arm the
+    // option. The history is recorded regardless of the setting so switching it
+    // on later has something to work with straight away.
+    frikadellen_baf::auction_ownership::load_own_listings();
+    frikadellen_baf::auction_ownership::set_enabled(config.only_claim_own_auctions);
+
     // Account-status reporter for the finder feeds. Every 5s it snapshots the
     // live purse, coins locked in active listings, free inventory slots and
     // active-auction count into `finder_status`; the finder-feed writers relay
@@ -2396,6 +2402,9 @@ async fn main() -> Result<()> {
                         event_via_bed,
                         opt_received_at_ms,
                         Some(purchased_at_ms),
+                        // Opting out of sharing legendary flips also opts out of
+                        // the public cool-flips channel — both are public feeds.
+                        config_for_events.share_legendary_flips,
                     );
                     // Accumulate THEORETICAL AH profit at purchase time (target −
                     // price − AH fee), i.e. what you'd net if it sold at the COFL
@@ -4872,6 +4881,34 @@ async fn main() -> Result<()> {
                 } else {
                     debug!("[ChatBatch] Sent {} message(s) to Coflnet", batch.len());
                 }
+            }
+        });
+    }
+
+    // Keep the API-side view of this account's own auctions warm, so the claim
+    // sweep can tell our sold auctions from a co-op member's without ever
+    // blocking on HTTP with a GUI window open. Spawned unconditionally and idle
+    // while the option is off, so toggling it from the web panel takes effect
+    // immediately instead of at the next restart.
+    {
+        let bot_client_own = bot_client.clone();
+        let api_key_own = config.hypixel_api_key.clone();
+        tokio::spawn(async move {
+            loop {
+                if frikadellen_baf::auction_ownership::enabled() {
+                    let name = bot_client_own.ingame_name.read().clone();
+                    if !name.is_empty() {
+                        frikadellen_baf::auction_ownership::refresh_remote(
+                            &name,
+                            api_key_own.as_deref(),
+                        )
+                        .await;
+                    }
+                }
+                sleep(Duration::from_secs(
+                    frikadellen_baf::auction_ownership::REFRESH_INTERVAL_SECS,
+                ))
+                .await;
             }
         });
     }

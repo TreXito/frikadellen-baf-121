@@ -1872,6 +1872,7 @@ async fn save_config(
         // Update in-memory toggle flags to match the saved config
         enable_ah.store(config.enable_ah_flips, Ordering::Relaxed);
         enable_bz.store(config.enable_bazaar_flips, Ordering::Relaxed);
+        crate::auction_ownership::set_enabled(config.only_claim_own_auctions);
         // Save validated config
         loader.save(&config).map_err(|e| format!("Failed to save config: {}", e))
     }).await {
@@ -1983,6 +1984,7 @@ async fn save_config_json(
         config.normalize_do_not_relist_ids();
         enable_ah.store(config.enable_ah_flips, Ordering::Relaxed);
         enable_bz.store(config.enable_bazaar_flips, Ordering::Relaxed);
+        crate::auction_ownership::set_enabled(config.only_claim_own_auctions);
         loader.save(&config).map_err(|e| format!("Failed to save config: {e}"))?;
         Ok(config.web_gui_password.clone())
     })

@@ -349,6 +349,7 @@ The `config.toml` file is created automatically on first run. You can edit it wi
 |---|---|---|---|
 | `auction_duration_hours` | integer | `24` | Duration for new auction listings (hours) |
 | `auction_listing_delay_ms` | integer | `1500` | Delay in ms between listing items |
+| `only_claim_own_auctions` | boolean | `false` | Co-op profiles: never press "Claim All" and only claim auctions this account listed itself, leaving co-op members' sales for them |
 | `max_items_in_inventory` | integer | `12` | Maximum flip items to hold in inventory |
 
 ### Bazaar

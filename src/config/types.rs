@@ -210,6 +210,17 @@ pub struct Config {
     #[serde(default = "default_auction_duration_hours")]
     pub auction_duration_hours: u64,
 
+    /// Only claim auctions this account listed itself. On a co-op profile the
+    /// "Manage Auctions" GUI also lists what your co-op members put up, and
+    /// both "Claim All" and the blind slot sweep happily collect their coins
+    /// into *your* purse. With this on the bot never presses "Claim All" and
+    /// only clicks slots it can attribute to itself (its own listing history,
+    /// plus the account's auctions as reported by the Hypixel/Coflnet API).
+    /// Anything it cannot attribute is left for the co-op member to claim.
+    /// Default: false (claim everything, the historical behaviour).
+    #[serde(default)]
+    pub only_claim_own_auctions: bool,
+
     /// Maximum number of flip items allowed in inventory at once.
     /// Sent to COFL on startup via `/cofl set maxitemsininventory`.
     /// Default: 12.
@@ -525,6 +536,7 @@ impl Default for Config {
             bazaar_tax_rate: default_bazaar_tax_rate(),
             // Auction / inventory / runtime
             auction_duration_hours: default_auction_duration_hours(),
+            only_claim_own_auctions: false,
             max_items_in_inventory: default_max_items_in_inventory(),
             auto_cookie: 0,
             auto_cookie_prompted: false,

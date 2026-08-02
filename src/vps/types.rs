@@ -119,6 +119,7 @@ pub const FBAF_DEFAULT_SETTINGS: &str = r#"{
     "use_cofl_chat": true,
     "auto_cookie": 0,
     "auction_duration_hours": 24,
+    "only_claim_own_auctions": false,
     "max_items_in_inventory": 12,
     "proxy_enabled": false,
     "proxy_address": "",
