@@ -2048,6 +2048,40 @@ fn is_claimable_auction_slot(item: &azalea_inventory::ItemStack) -> bool {
     has_claimable && !is_active
 }
 
+/// Whether a claimable "Manage Auctions" slot was listed by *this* account.
+///
+/// Only consulted when `only_claim_own_auctions` is on. Anything we cannot
+/// positively attribute is left for its owner — see [`crate::auction_ownership`]
+/// for why an undecidable slot is skipped rather than claimed.
+fn claim_slot_is_ours(item: &azalea_inventory::ItemStack, slot: usize) -> bool {
+    use crate::auction_ownership::{ownership_of, Ownership};
+    let Some(display_name) = get_item_display_name_from_slot(item) else {
+        return false;
+    };
+    let price = extract_price_from_lore(&get_item_lore_from_slot(item));
+    match ownership_of(&display_name, price) {
+        Ownership::Ours => true,
+        Ownership::Foreign => {
+            debug!(
+                "[ClaimSold] Slot {} ('{}') is not one of ours — leaving it for the co-op",
+                slot,
+                remove_mc_colors(&display_name)
+            );
+            false
+        }
+        Ownership::Unknown => {
+            warn!(
+                "[ClaimSold] Cannot tell whether slot {} ('{}') is ours — skipping it. \
+                 No listing history yet and no auctions returned for this account; \
+                 it will resolve once the bot lists something or the API answers.",
+                slot,
+                remove_mc_colors(&display_name)
+            );
+            false
+        }
+    }
+}
+
 fn is_my_auctions_window_title(window_title: &str) -> bool {
     window_title.contains("Manage Auctions") || window_title.contains("My Auctions")
 }
@@ -2793,6 +2827,10 @@ async fn event_handler(
                 if !item.is_empty() {
                     let item_key = crate::bot::handlers::BotEventHandlers::remove_color_codes(&item).to_lowercase();
                     state.active_auction_listings.write().insert(item_key);
+                    // Persisted ownership history: this is the record that lets
+                    // `only_claim_own_auctions` tell our sold auctions apart from
+                    // a co-op member's in the shared Manage Auctions window.
+                    crate::auction_ownership::note_own_listing(&item, bid as i64);
                 }
                 // Listing succeeded — clear any stale auction-limit flag and
                 // reset the stuck-item retry counter so the next SellToAuction
@@ -4888,8 +4926,18 @@ async fn handle_window_interaction(
                 // Only scan the window slots (typically 0..27 for a 3-row GUI),
                 // not the player inventory at the bottom, to avoid false matches.
                 let window_slot_count = window_content_slot_count(slots.len());
+                // On a co-op profile this window also lists what co-op members
+                // put up, and "Claim All" would sweep their coins into our
+                // purse. With `only_claim_own_auctions` on we never press it and
+                // fall through to the per-slot scan, which checks ownership.
+                let own_only = crate::auction_ownership::enabled();
+                let claim_all = if own_only {
+                    None
+                } else {
+                    find_slot_by_name(&slots, "Claim All")
+                };
                 // Look for Claim All first
-                if let Some(i) = find_slot_by_name(&slots, "Claim All") {
+                if let Some(i) = claim_all {
                     info!("[ClaimSold] Clicking Claim All at slot {}", i);
                     click_window_slot(bot, &state.last_window_id, window_id, i as i16).await;
                     // Claim All finishes everything — close window and go idle
@@ -4899,17 +4947,32 @@ async fn handle_window_interaction(
                 } else {
                     // Look for first claimable item (only window slots)
                     let mut found = false;
+                    let mut skipped_foreign = 0usize;
                     for (i, item) in slots.iter().enumerate().take(window_slot_count) {
-                        if is_claimable_auction_slot(item) {
-                            info!("[ClaimSold] Clicking claimable item at slot {}", i);
-                            click_window_slot(bot, &state.last_window_id, window_id, i as i16).await;
-                            // Stay in ClaimingSold — Hypixel re-opens Manage Auctions after the detail
-                            found = true;
-                            break;
+                        if !is_claimable_auction_slot(item) {
+                            continue;
                         }
+                        if own_only && !claim_slot_is_ours(item, i) {
+                            skipped_foreign += 1;
+                            continue;
+                        }
+                        info!("[ClaimSold] Clicking claimable item at slot {}", i);
+                        click_window_slot(bot, &state.last_window_id, window_id, i as i16).await;
+                        // Stay in ClaimingSold — Hypixel re-opens Manage Auctions after the detail
+                        found = true;
+                        break;
                     }
                     if !found {
-                        info!("[ClaimSold] Nothing to claim, closing window and going idle");
+                        if skipped_foreign > 0 {
+                            info!(
+                                "[ClaimSold] Nothing of ours to claim — left {} claimable auction(s) \
+                                 alone, they were not listed by this account (only_claim_own_auctions \
+                                 is on). Closing window and going idle",
+                                skipped_foreign
+                            );
+                        } else {
+                            info!("[ClaimSold] Nothing to claim, closing window and going idle");
+                        }
                         send_raw_close(bot, window_id, &state.handlers);
                         state.auction_slot_blocked.store(false, Ordering::Relaxed);
                         *state.bot_state.write() = BotState::Idle;

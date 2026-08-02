@@ -83,6 +83,13 @@ impl BackendHandle {
 
     /// Report a purchase (a flip) with the full detail the backend renders as a
     /// purchase webhook in the all-flips channel.
+    ///
+    /// `share_flips` carries the user's `share_legendary_flips` opt-in. The
+    /// all-flips channel is the owner's own feed and always gets the buy, but
+    /// the public "cool flips" channel is a public feed, so the backend must not
+    /// post there for a user who opted out. It rides inside `data` because the
+    /// backend's zod schema passes that record through untouched while stripping
+    /// unknown top-level keys.
     #[allow(clippy::too_many_arguments)]
     pub fn report_purchase(
         &self,
@@ -98,6 +105,7 @@ impl BackendHandle {
         via_bed: Option<bool>,
         received_at_ms: Option<i64>,
         purchased_at_ms: Option<i64>,
+        share_flips: bool,
     ) {
         if self.tx.is_none() {
             return;
@@ -119,6 +127,7 @@ impl BackendHandle {
                 "viaBed": via_bed,
                 "receivedAt": received_at_ms,
                 "purchasedAt": purchased_at_ms,
+                "shareFlips": share_flips,
             },
         }));
     }
