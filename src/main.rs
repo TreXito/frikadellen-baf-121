@@ -2425,6 +2425,16 @@ async fn main() -> Result<()> {
                     // Send webhook: for legendary/divine flips, send the styled
                     // webhook (with ping + color) instead of the regular purchase one.
                     let is_legendary_flip = opt_profit.map_or(false, |p| p >= frikadellen_baf::webhook::LEGENDARY_PROFIT_THRESHOLD as i64);
+                    // No flip was tracked for this buy: no finder, no target, so
+                    // nothing to compute a profit from. That is what a hand-made
+                    // `/viewauction` purchase looks like from here.
+                    let is_unattributed_buy = opt_target.is_none() && opt_finder.is_none();
+                    if is_unattributed_buy {
+                        info!(
+                            "[ItemPurchased] \"{}\" for {} coins has no flip data — treating as a manual purchase",
+                            item_name, price
+                        );
+                    }
                     let opt_finder_for_flip = opt_finder.clone();
                     if is_legendary_flip {
                         if let Some(profit) = opt_profit {
@@ -2469,6 +2479,24 @@ async fn main() -> Result<()> {
                                     ).await;
                                 });
                             }
+                        }
+                    } else if is_unattributed_buy {
+                        // Bought outside the flip pipeline — a `/viewauction`
+                        // purchase done by hand is the usual case. The ordinary
+                        // purchase embed would render it as a flip with every
+                        // field blank, so it gets its own one.
+                        if let Some(webhook_url) = config_for_events.active_webhook_url() {
+                            let url = webhook_url.to_string();
+                            let name = ingame_name_for_events.clone();
+                            let item = item_name.clone();
+                            let purse = bot_client_clone.get_purse();
+                            let uuid_str = opt_auction_uuid.clone();
+                            tokio::spawn(async move {
+                                frikadellen_baf::webhook::send_webhook_manual_purchase(
+                                    &name, &item, price, purse, event_buy_speed_ms,
+                                    uuid_str.as_deref(), &url,
+                                ).await;
+                            });
                         }
                     } else {
                         // Regular purchase webhook for non-legendary flips

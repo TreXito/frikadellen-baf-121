@@ -452,6 +452,61 @@ pub async fn send_webhook_item_purchased(
     post_embed(webhook_url, payload).await;
 }
 
+/// A buy the flip pipeline knows nothing about: the "You purchased X" chat line
+/// fired but no flip was in the tracker, so there is no finder, no target and no
+/// expected profit. That is what a `/viewauction` buy done by hand looks like.
+///
+/// Sent instead of the ordinary purchase embed so a hand-bought item is obvious
+/// in the feed rather than showing up as a flip with every field blank.
+pub async fn send_webhook_manual_purchase(
+    ingame_name: &str,
+    item_name: &str,
+    price: u64,
+    purse: Option<u64>,
+    buy_speed_ms: Option<u64>,
+    auction_uuid: Option<&str>,
+    webhook_url: &str,
+) {
+    let safe_item = resolve_icon_tag(item_name, auction_uuid).await;
+    let mut fields = vec![serde_json::json!({
+        "name": "💸 Paid",
+        "value": format!("```fix\n{} coins\n```", format_number(price as f64)),
+        "inline": true
+    })];
+    if let Some(ms) = buy_speed_ms {
+        fields.push(serde_json::json!({
+            "name": "⚡ Buy Speed",
+            "value": format!("```fix\n{} ms\n```", ms),
+            "inline": true
+        }));
+    }
+    if let Some(uuid) = auction_uuid {
+        fields.push(serde_json::json!({
+            "name": "🔗 Auction",
+            "value": format!("[View](https://sky.coflnet.com/auction/{})", uuid),
+            "inline": true
+        }));
+    }
+    let payload = serde_json::json!({
+        "embeds": [{
+            "title": "🖐️ Manual Purchase",
+            "description": format!(
+                "**{}** • <t:{}:R>\n*Not from a flip — no finder, target or expected profit.*",
+                item_name, now_unix()
+            ),
+            "color": 0xe67e22u32,
+            "fields": fields,
+            "thumbnail": {"url": format!("https://sky.coflnet.com/static/icon/{}?size=64", safe_item)},
+            "footer": {
+                "text": format!("BAF • {}{}", ingame_name,
+                    purse.map(|p| format!(" • Purse: {} coins", format_purse(p))).unwrap_or_default()),
+                "icon_url": format!("https://mc-heads.net/avatar/{}/32.png", ingame_name)
+            }
+        }]
+    });
+    post_embed(webhook_url, payload).await;
+}
+
 pub async fn send_webhook_item_sold(
     ingame_name: &str,
     item_name: &str,
@@ -1036,7 +1091,10 @@ pub async fn send_webhook_auction_cancelled(
     remaining_listings: usize,
     webhook_url: &str,
 ) {
-    let safe_item = sanitize_item_name(item_name);
+    // Same tag resolution the flip webhooks use — `sanitize_item_name` derives a
+    // bogus tag for pets and reforged/starred gear, which coflnet answers with a
+    // 500 and Discord renders as a blank thumbnail.
+    let safe_item = resolve_icon_tag(item_name, None).await;
     let payload = serde_json::json!({
         "embeds": [{
             "title": "❌ Auction Cancelled",
