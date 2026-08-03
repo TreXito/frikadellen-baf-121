@@ -2692,6 +2692,29 @@ async fn event_handler(
                     state.auction_at_limit.store(false, Ordering::Relaxed);
                 }
                 state.auction_slot_blocked.store(false, Ordering::Relaxed);
+                // THIS is where a cancellation is actually confirmed. Hypixel
+                // cancels the moment "Cancel Auction" is clicked and opens NO
+                // confirm window, so the `window_title.contains("Confirm")` arm
+                // of the CancellingAuction flow never runs and the cancel
+                // watchdog logs "No follow-up window after 2s" instead — which
+                // meant `AuctionCancelled` was never emitted and no webhook was
+                // ever sent for a cancel, from the web panel or anywhere else.
+                // Emitting here covers every route into a cancellation: panel,
+                // backend command, /trex, or the user doing it by hand in game.
+                if let Some(item) = parse_cancelled_auction_message(&clean_message) {
+                    // The bid is only known when WE asked for this cancel; a
+                    // hand-cancelled auction reports 0 rather than a wrong number.
+                    let requested = state.cancel_auction_item_name.read().clone();
+                    let bid = if !requested.is_empty()
+                        && remove_mc_colors(&requested).to_lowercase()
+                            == remove_mc_colors(&item).to_lowercase()
+                    {
+                        (*state.cancel_auction_starting_bid.read()).max(0) as u64
+                    } else {
+                        0
+                    };
+                    emit_auction_cancelled(&state, item, bid, "chat confirmation");
+                }
             } else if clean_message.contains("[Auction]") && clean_message.contains("bought") && clean_message.contains("for") && clean_message.contains("coins") {
                 // "[Auction] <buyer> bought <item> for <price> coins"
                 // Always claim sold auctions. The active_auction_listings filter was
@@ -5134,10 +5157,15 @@ async fn handle_window_interaction(
                 send_raw_close(bot, window_id, &state.handlers);
                 let cancelled_name = state.cancel_auction_item_name.read().clone();
                 let cancelled_bid = *state.cancel_auction_starting_bid.read();
-                let _ = state.event_tx.send(BotEvent::AuctionCancelled {
-                    item_name: cancelled_name,
-                    starting_bid: cancelled_bid as u64,
-                });
+                // Kept for the day Hypixel does show a confirm window. In
+                // practice it does not, and the chat handler is what fires;
+                // whichever wins, the de-dupe stops a double webhook.
+                emit_auction_cancelled(
+                    &state,
+                    cancelled_name,
+                    cancelled_bid.max(0) as u64,
+                    "confirm window",
+                );
                 *state.bot_state.write() = BotState::Idle;
             }
         }
@@ -7945,6 +7973,66 @@ fn parse_purchased_message(msg: &str) -> Option<(String, u64)> {
 }
 
 /// Parse "[Auction] <buyer> bought <item> for <price> coins" → (buyer, item_name, price)
+/// Pull the item name out of Hypixel's cancel confirmation, e.g.
+/// `You canceled your auction for [Lvl 100] Hedgehog!`.
+///
+/// Deliberately anchored on "your auction for": the AH also broadcasts
+/// `<player> cancelled an auction for <item>!` for other people's cancels, and
+/// that must never be mistaken for our own.
+fn parse_cancelled_auction_message(msg: &str) -> Option<String> {
+    let idx = msg
+        .find("your auction for ")
+        .map(|i| i + "your auction for ".len())?;
+    let item = msg[idx..].trim().trim_end_matches('!').trim();
+    if item.is_empty() {
+        None
+    } else {
+        Some(item.to_string())
+    }
+}
+
+/// Last cancel we emitted an [`BotEvent::AuctionCancelled`] for, so the GUI
+/// confirm-window path and the chat confirmation cannot both fire for the same
+/// cancellation. Keyed by color-stripped lowercase item name.
+static LAST_CANCEL_EMIT: Lazy<RwLock<Option<(String, std::time::Instant)>>> =
+    Lazy::new(|| RwLock::new(None));
+
+/// Window in which a second cancel event for the same item is treated as a
+/// duplicate of the first rather than a new cancellation.
+const CANCEL_EMIT_DEDUPE_SECS: u64 = 15;
+
+/// Emit an `AuctionCancelled` event unless we just emitted one for this item.
+/// Returns whether the event was sent.
+fn emit_auction_cancelled(
+    state: &BotClientState,
+    item_name: String,
+    starting_bid: u64,
+    source: &str,
+) -> bool {
+    let key = remove_mc_colors(&item_name).to_lowercase();
+    {
+        let mut last = LAST_CANCEL_EMIT.write();
+        if let Some((prev_key, at)) = last.as_ref() {
+            if *prev_key == key
+                && at.elapsed() < std::time::Duration::from_secs(CANCEL_EMIT_DEDUPE_SECS)
+            {
+                debug!(
+                    "[CancelAuction] Duplicate cancel event for '{}' from {} — already reported",
+                    key, source
+                );
+                return false;
+            }
+        }
+        *last = Some((key, std::time::Instant::now()));
+    }
+    info!(
+        "[CancelAuction] Auction cancelled ({}): '{}' @ {} coins",
+        source, item_name, starting_bid
+    );
+    let _ = state.event_tx.send(BotEvent::AuctionCancelled { item_name, starting_bid });
+    true
+}
+
 fn parse_sold_message(msg: &str) -> Option<(String, String, u64)> {
     // "[Auction] <buyer> bought <item> for <price> coins"
     let after = msg.strip_prefix("[Auction] ")?;
@@ -8186,6 +8274,29 @@ mod tests {
         assert!(is_terminal_purchase_failure_message("You don't have the space required to claim that!"));
         assert!(is_terminal_purchase_failure_message("Your inventory is full!"));
         assert!(!is_terminal_purchase_failure_message("Putting coins in escrow..."));
+    }
+
+    #[test]
+    fn parses_the_cancel_confirmation_hypixel_actually_sends() {
+        // Real line from a prod log, alongside the AH broadcast that accompanies
+        // it — only the personal one may produce a cancel event.
+        assert_eq!(
+            parse_cancelled_auction_message("You canceled your auction for [Lvl 100] Hedgehog!")
+                .as_deref(),
+            Some("[Lvl 100] Hedgehog")
+        );
+        assert_eq!(
+            parse_cancelled_auction_message("You cancelled your auction for Hyperion!").as_deref(),
+            Some("Hyperion")
+        );
+        // Someone else's cancel, broadcast to the co-op/party: "an", not "your".
+        assert_eq!(
+            parse_cancelled_auction_message(
+                "[MVP+] sung_drip_wooooo cancelled an auction for [Lvl 100] Hedgehog!"
+            ),
+            None
+        );
+        assert_eq!(parse_cancelled_auction_message("You canceled your auction for "), None);
     }
 
     #[test]
