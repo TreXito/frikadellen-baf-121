@@ -597,6 +597,36 @@ impl Config {
         Some(generated)
     }
 
+    /// Reset a Coflnet `websocket_url` that got pinned to a regional host back
+    /// to the neutral entry point, returning the URL that was cleared.
+    ///
+    /// COFL sends every user to their nearest modsocket itself, so
+    /// `sky.coflnet.com` is the correct value in every region and a regional
+    /// host in the config is never something the user needs. Older builds
+    /// persisted COFL's redirect target here, which pinned the account to one
+    /// region for good — including regional hosts that later stopped resolving,
+    /// leaving the bot unable to connect at all.
+    ///
+    /// Only the primary socket is healed. `multisocket_urls` is where regional
+    /// hosts are a deliberate choice, and non-Coflnet URLs are the private
+    /// finder, so both are left exactly as the user set them.
+    pub fn reset_regional_websocket_url(&mut self) -> Option<String> {
+        let url = self.websocket_url.trim();
+        if url.is_empty() || !crate::websocket::client::is_cofl_url(url) {
+            return None;
+        }
+        let host = url
+            .strip_prefix("wss://")
+            .or_else(|| url.strip_prefix("ws://"))
+            .unwrap_or(url);
+        if host.split('/').next().is_some_and(|h| h == "sky.coflnet.com") {
+            return None;
+        }
+        let previous = self.websocket_url.clone();
+        self.websocket_url = default_websocket_url();
+        Some(previous)
+    }
+
     /// Normalize the finder relist blocklist before it is persisted so the
     /// generated config stays easy to read and comparisons are reliable.
     pub fn normalize_do_not_relist_ids(&mut self) {
@@ -756,6 +786,49 @@ mod tests {
     fn default_config_enables_bedtiming() {
         let config = Config::default();
         assert!(config.bedtiming_enabled());
+    }
+
+    #[test]
+    fn default_websocket_is_the_neutral_coflnet_entry_point() {
+        // Not a regional host: COFL redirects each user to their nearest
+        // modsocket, so this one value is correct everywhere.
+        assert_eq!(Config::default().websocket_url, "wss://sky.coflnet.com/modsocket");
+        assert!(Config::default().reset_regional_websocket_url().is_none());
+    }
+
+    #[test]
+    fn a_pinned_regional_socket_is_reset_to_the_default() {
+        let mut config = Config {
+            websocket_url: "wss://us-sky.coflnet.com/modsocket".to_string(),
+            ..Config::default()
+        };
+        assert_eq!(
+            config.reset_regional_websocket_url().as_deref(),
+            Some("wss://us-sky.coflnet.com/modsocket")
+        );
+        assert_eq!(config.websocket_url, "wss://sky.coflnet.com/modsocket");
+    }
+
+    #[test]
+    fn a_finder_socket_is_never_reset() {
+        // The private finder is not Coflnet and must survive the heal untouched.
+        let mut config = Config {
+            websocket_url: "ws://127.0.0.1:15101".to_string(),
+            ..Config::default()
+        };
+        assert!(config.reset_regional_websocket_url().is_none());
+        assert_eq!(config.websocket_url, "ws://127.0.0.1:15101");
+    }
+
+    #[test]
+    fn extra_regional_sockets_are_left_alone() {
+        // Regional hosts in multisocket_urls are a deliberate choice.
+        let mut config = Config {
+            multisocket_urls: vec!["wss://us-sky.coflnet.com/modsocket".to_string()],
+            ..Config::default()
+        };
+        assert!(config.reset_regional_websocket_url().is_none());
+        assert_eq!(config.multisocket_urls, vec!["wss://us-sky.coflnet.com/modsocket"]);
     }
 
     #[test]
