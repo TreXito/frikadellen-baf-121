@@ -1102,8 +1102,64 @@ fn ping_report(state: &WebSharedState) -> String {
     )
 }
 
+/// Shell binaries that are never a plausible Minecraft/Coflnet chat message.
+///
+/// Deliberately EXCLUDES words that double as English or in-game chat ("ping",
+/// "top", "cat", "ls", "cd", "df"): a false positive here silently eats a real
+/// chat message, which is worse than letting one stray command through.
+const SHELL_BINARIES: &[&str] = &[
+    "chmod", "chown", "chgrp", "screen", "tmux", "sudo", "su", "bash", "sh", "zsh", "ssh", "scp",
+    "rsync", "systemctl", "journalctl", "service", "apt", "apt-get", "yum", "dnf", "pacman",
+    "rm", "mv", "cp", "mkdir", "rmdir", "touch", "ln", "tar", "unzip", "gzip", "wget", "curl",
+    "nano", "vim", "vi", "emacs", "kill", "killall", "pkill", "htop", "nohup", "crontab",
+    "export", "unset", "chroot", "mount", "umount", "dmesg", "useradd", "usermod", "passwd",
+    "docker", "git", "npm", "node", "cargo", "python", "python3", "pip", "pip3", "java", "make",
+];
+
+/// True when the input looks like a Linux shell command rather than chat.
+///
+/// People mistake the panel's chat box for a terminal and paste things like
+/// `chmod +x ./Fri...`, `screen -r` or `tmux attach`. Those get forwarded to
+/// Coflnet as a PUBLIC chat message, which leaks the host's paths and setup.
+fn looks_like_shell_command(input: &str) -> bool {
+    let trimmed = input.trim();
+    // A path-ish prefix is unambiguous: nothing in chat starts this way.
+    for prefix in ["./", "../", "~/", "/home/", "/root/", "/usr/", "/etc/", "/mnt/", "/tmp/"] {
+        if trimmed.starts_with(prefix) {
+            return true;
+        }
+    }
+    // Otherwise judge the first token, ignoring any leading path and a `/` so
+    // `/usr/bin/tmux`, `./chmod` and a mistyped `/chmod` are all caught.
+    let first = match trimmed.split_whitespace().next() {
+        Some(t) => t,
+        None => return false,
+    };
+    let bare = first
+        .trim_start_matches('/')
+        .rsplit('/')
+        .next()
+        .unwrap_or(first)
+        .to_lowercase();
+    SHELL_BINARIES.contains(&bare.as_str())
+}
+
 async fn process_chat_input(input: &str, state: &WebSharedState) {
     let lowercase = input.to_lowercase();
+
+    // Never forward shell commands. Checked before every send branch, so this
+    // covers Coflnet chat, `/cofl <cmd>` and the in-game chat queue alike.
+    // Answered locally so the user sees why nothing was sent.
+    if looks_like_shell_command(input) {
+        let warn = format!(
+            "§f[§4BAF§f]: §cBlocked — §f\"{}\"§c looks like a Linux command, not chat. §7This box talks to Coflnet and Minecraft, not a shell.",
+            input.chars().take(40).collect::<String>()
+        );
+        warn!("[WebGUI] Blocked shell-like chat input: {}", input);
+        print_mc_chat(&warn);
+        let _ = state.chat_tx.send(warn);
+        return;
+    }
 
     // `/ping` is answered locally by the panel: it reports the bot's live ping
     // to Hypixel plus a flip-intake health line, instead of spamming Hypixel's
@@ -1411,11 +1467,38 @@ async fn cancel_all_bz_orders(
 
 // ── Session control ───────────────────────────────────────────
 
-async fn kill_session() -> impl IntoResponse {
+async fn kill_session(State(s): State<WebSharedState>) -> impl IntoResponse {
     info!("[WebGUI] Kill session requested — terminating process");
+
+    // Collect everything the notification needs BEFORE the spawn: `s` cannot be
+    // held across the exit, and reading the purse after the bot starts tearing
+    // down would report nothing.
+    let webhook_url = s
+        .config_loader
+        .load()
+        .ok()
+        .and_then(|c| c.active_webhook_url().map(|u| u.to_string()));
+    let name = s
+        .ingame_names
+        .get(s.current_account_index)
+        .cloned()
+        .unwrap_or_else(|| "unknown".to_string());
+    let purse = s.bot_client.get_purse();
+    let uptime_secs = s.previous_session_secs + s.started_at.elapsed().as_secs();
+
     // Spawn so the HTTP response is sent before exit
-    tokio::spawn(async {
+    tokio::spawn(async move {
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        if let Some(url) = webhook_url {
+            // Awaited, not fire-and-forget — see send_webhook_session_killed.
+            // Capped so an unreachable webhook can never wedge the kill button:
+            // failing to announce the shutdown must not prevent the shutdown.
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                crate::webhook::send_webhook_session_killed(&name, purse, uptime_secs, &url),
+            )
+            .await;
+        }
         std::process::exit(0);
     });
     (StatusCode::OK, "Killing session — process will terminate")
@@ -2856,5 +2939,41 @@ mod tests {
         assert!(entries[0].bin);
         assert!(entries[0].tag.is_some());
         assert_eq!(entries[0].tag.as_deref(), Some("DIAMOND_SWORD"));
+    }
+
+    #[test]
+    fn blocks_linux_commands_but_not_chat() {
+        // The exact things people have pasted into the panel's chat box.
+        for cmd in [
+            "chmod +x ./FrikadellenBAF",
+            "./Fri*",
+            "./FrikadellenBAF --headless",
+            "screen -r baf",
+            "tmux attach -t baf",
+            "sudo systemctl restart baf",
+            "rm -rf ~/baf",
+            "/usr/bin/tmux ls",
+            "~/baf/run.sh",
+            "CHMOD 777 file",
+        ] {
+            assert!(looks_like_shell_command(cmd), "should have blocked: {}", cmd);
+        }
+
+        // Real chat and real bot commands must still go through. A false
+        // positive here silently swallows a message the user meant to send.
+        for ok in [
+            "hello",
+            "/ping",
+            "/cofl profit",
+            "/baf help",
+            "gg wp",
+            "ping me when it sells",
+            "top flip today lol",
+            "cat is cute",
+            "/visit hub",
+            "selling hyperion 900m",
+        ] {
+            assert!(!looks_like_shell_command(ok), "should have allowed: {}", ok);
+        }
     }
 }

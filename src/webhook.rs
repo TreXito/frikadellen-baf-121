@@ -1115,6 +1115,45 @@ pub async fn send_webhook_auction_cancelled(
     post_embed(webhook_url, payload).await;
 }
 
+/// Notify that the session was killed from the web panel.
+///
+/// Sent from the kill handler itself and AWAITED before the process exits: a
+/// spawned "goodbye" notification races `process::exit` and normally loses, so
+/// this is the one webhook that must not be fire-and-forget.
+pub async fn send_webhook_session_killed(
+    ingame_name: &str,
+    purse: Option<u64>,
+    uptime_secs: u64,
+    webhook_url: &str,
+) {
+    let uptime = {
+        let h = uptime_secs / 3600;
+        let m = (uptime_secs % 3600) / 60;
+        if h > 0 {
+            format!("{}h {}m", h, m)
+        } else {
+            format!("{}m", m)
+        }
+    };
+    let payload = serde_json::json!({
+        "embeds": [{
+            "title": "🛑 Session Killed",
+            "description": format!("The bot was stopped from the web panel • <t:{}:R>", now_unix()),
+            "color": 0xe74c3cu32,
+            "fields": [
+                {"name": "⏱️ Session Uptime", "value": format!("```fix\n{}\n```", uptime), "inline": true},
+                {"name": "💰 Purse", "value": format!("```fix\n{}\n```",
+                    purse.map(|p| format!("{} coins", format_purse(p))).unwrap_or_else(|| "?".to_string())), "inline": true},
+            ],
+            "footer": {
+                "text": format!("BAF • {}", ingame_name),
+                "icon_url": format!("https://mc-heads.net/avatar/{}/32.png", ingame_name)
+            }
+        }]
+    });
+    post_embed(webhook_url, payload).await;
+}
+
 /// Profit threshold for a "Legendary" flip (100M coins).
 pub const LEGENDARY_PROFIT_THRESHOLD: u64 = 100_000_000;
 
