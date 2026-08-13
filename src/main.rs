@@ -1392,7 +1392,7 @@ async fn main() -> Result<()> {
                                             target: f.get("target").and_then(|x| x.as_u64()).unwrap_or(0),
                                             finder: Some("BAF_FINDER".to_string()),
                                             profit_perc: f.get("roiPct").and_then(|x| x.as_f64()),
-                                            purchase_at_ms: None,
+                                            purchase_at_ms: frikadellen_baf::types::purchase_at_from_json(f),
                                             uuid,
                                             list_at: f.get("listAt").and_then(|x| x.as_u64()),
                                         };

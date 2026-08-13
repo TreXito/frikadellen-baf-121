@@ -37,6 +37,36 @@ pub struct Flip {
     pub list_at: Option<u64>,
 }
 
+/// Read `purchaseAt` out of a RAW json flip, with the same rules as
+/// [`deserialize_optional_timestamp_millis`].
+///
+/// The finder feed is parsed field-by-field (not via serde) in both
+/// `main.rs`'s FinderWS loop and `websocket/client.rs`, and BOTH hardcoded
+/// `purchase_at_ms: None`. So the finder could send a perfect `purchaseAt` and
+/// the bot would still log "no purchaseAt" and blind-spam the whole grace
+/// window — which is exactly what happened from 2026-07-23 onward.
+pub fn purchase_at_from_json(flip: &serde_json::Value) -> Option<i64> {
+    let v = flip.get("purchaseAt")?;
+    if v.is_null() {
+        return None;
+    }
+    // Below this it is unix SECONDS, above it milliseconds.
+    const MS_CUTOFF: i64 = 1_000_000_000_000;
+    let scale = |i: i64| if i > MS_CUTOFF { i } else { i.saturating_mul(1000) };
+    if let Some(i) = v.as_i64() {
+        return Some(scale(i));
+    }
+    if let Some(s) = v.as_str() {
+        if let Ok(i) = s.parse::<i64>() {
+            return Some(scale(i));
+        }
+        return chrono::DateTime::parse_from_rfc3339(s)
+            .ok()
+            .map(|d| d.timestamp_millis());
+    }
+    None
+}
+
 fn deserialize_optional_timestamp_millis<'de, D>(
     deserializer: D,
 ) -> Result<Option<i64>, D::Error>
@@ -373,5 +403,43 @@ impl ItemStack {
             .and_then(|ea| ea.get("id"))
             .and_then(|id| id.as_str())
             .map(|s| s.to_string())
+    }
+}
+
+#[cfg(test)]
+mod purchase_at_json_tests {
+    use super::*;
+    use serde_json::json;
+
+    /// Regression: both finder-feed paths built the Flip by hand and hardcoded
+    /// `purchase_at_ms: None`, so a correct `purchaseAt` on the wire was silently
+    /// dropped and the bot blind-spammed the entire 20s grace window.
+    #[test]
+    fn reads_the_field_the_finder_actually_sends() {
+        // The finder sends epoch MILLISECONDS as a JSON integer.
+        let f = json!({"uuid": "u", "purchaseAt": 1_786_555_365_735i64});
+        assert_eq!(purchase_at_from_json(&f), Some(1_786_555_365_735));
+    }
+
+    #[test]
+    fn null_and_absent_both_mean_buy_now() {
+        assert_eq!(purchase_at_from_json(&json!({"uuid": "u"})), None);
+        assert_eq!(
+            purchase_at_from_json(&json!({"uuid": "u", "purchaseAt": serde_json::Value::Null})),
+            None
+        );
+    }
+
+    #[test]
+    fn seconds_and_rfc3339_still_work() {
+        // COFL has sent all three shapes over time.
+        assert_eq!(
+            purchase_at_from_json(&json!({"purchaseAt": 1_786_555_365i64})),
+            Some(1_786_555_365_000)
+        );
+        assert_eq!(
+            purchase_at_from_json(&json!({"purchaseAt": "2026-03-18T12:36:16.208Z"})),
+            Some(1_773_837_376_208)
+        );
     }
 }
