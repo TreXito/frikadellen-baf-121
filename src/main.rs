@@ -2026,11 +2026,13 @@ async fn main() -> Result<()> {
                     }
 
                     if let Some(profit) = parse_cofl_profit_response(&clean) {
-                        // `/cofl profit` is the REALIZED total. The panel now shows
-                        // THEORETICAL AH profit (accumulated at purchase), so we log
-                        // the realized figure for reference but do not overwrite the
-                        // theoretical total with it.
-                        tracing::info!("[CoflProfit] Realized AH total from Coflnet (not shown on panel): {} coins", profit);
+                        // `/cofl profit` is the REALIZED total. The panel shows
+                        // THEORETICAL AH profit (accumulated at purchase), so this
+                        // must NOT overwrite the theoretical total. It is kept
+                        // alongside it and reported as its own figure in the
+                        // periodic profit summary webhook.
+                        profit_tracker_events.set_realized_ah_total(profit);
+                        tracing::info!("[CoflProfit] Realized AH total from Coflnet: {} coins", profit);
                     }
 
                     // Parse `/cofl bz h` response for authoritative BZ session profit.
@@ -5420,13 +5422,40 @@ async fn main() -> Result<()> {
         let name = ingame_name.clone();
         let started = std::time::Instant::now();
         let prev_secs_summary = previous_session_secs;
+        let ws_client_summary = ws_client.clone();
         tokio::spawn(async move {
             loop {
                 sleep(Duration::from_secs(30 * 60)).await;
-                let (ah, bz) = profit_tracker_webhook.totals();
                 let uptime = prev_secs_summary + started.elapsed().as_secs();
+
+                // Refresh Coflnet's REALIZED total before reporting. It is
+                // otherwise only requested after a sale, so a quiet half-hour
+                // would report a stale number next to live theoretical totals.
+                // Finder-primary setups have no Coflnet to ask, so the realized
+                // field is simply omitted there.
+                if !ws_client_summary.is_finder() {
+                    let days = uptime as f64 / SECS_PER_DAY;
+                    if days >= 0.01 {
+                        let args = format!("{} {:.4}", name, days);
+                        let message = serde_json::json!({
+                            "type": "profit",
+                            "data": serde_json::json!(args).to_string(),
+                        })
+                        .to_string();
+                        if let Err(e) = ws_client_summary.send_message(&message).await {
+                            tracing::warn!("[CoflProfit] Summary refresh failed: {}", e);
+                        } else {
+                            // The reply arrives as a chat message on the event
+                            // loop; give it a moment to land before reading.
+                            sleep(Duration::from_secs(8)).await;
+                        }
+                    }
+                }
+
+                let (ah, bz) = profit_tracker_webhook.totals();
+                let realized = profit_tracker_webhook.realized_ah();
                 frikadellen_baf::webhook::send_webhook_profit_summary(
-                    &name, ah, bz, uptime, &webhook_url,
+                    &name, ah, bz, realized, uptime, &webhook_url,
                 )
                 .await;
             }
