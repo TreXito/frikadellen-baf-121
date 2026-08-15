@@ -42,6 +42,15 @@ struct ProfitTrackerInner {
     bz_points: Vec<ProfitPoint>,
     ah_total: i64,
     bz_total: i64,
+    /// Coflnet's REALIZED AH total for the session window (`/cofl profit`), i.e.
+    /// what actually landed in the purse from sales. `ah_total` above is the
+    /// THEORETICAL figure accrued at purchase time (target − price − fee), so
+    /// the two are deliberately separate: the realized number is only known
+    /// once Coflnet answers, and is `None` until it does.
+    realized_ah: Option<i64>,
+    /// Unix seconds when `realized_ah` was last refreshed, so consumers can say
+    /// how stale the figure is instead of presenting it as live.
+    realized_ah_at: u64,
 }
 
 fn now_unix() -> u64 {
@@ -60,6 +69,8 @@ impl ProfitTracker {
                 bz_points: vec![(now, 0)],
                 ah_total: 0,
                 bz_total: 0,
+                realized_ah: None,
+                realized_ah_at: 0,
             }),
         }
     }
@@ -114,6 +125,25 @@ impl ProfitTracker {
             .lock()
             .map(|i| i.bz_points.clone())
             .unwrap_or_default()
+    }
+
+    /// Record Coflnet's realized AH profit for the session window, as parsed
+    /// from a `/cofl profit <ign> <days>` reply.
+    pub fn set_realized_ah_total(&self, total: i64) {
+        if let Ok(mut inner) = self.inner.lock() {
+            inner.realized_ah = Some(total);
+            inner.realized_ah_at = now_unix();
+        }
+    }
+
+    /// Realized AH profit and the unix time it was last refreshed, or `None`
+    /// when Coflnet has not answered a `/cofl profit` query yet this session
+    /// (finder-primary setups never get one).
+    pub fn realized_ah(&self) -> Option<(i64, u64)> {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|i| i.realized_ah.map(|v| (v, i.realized_ah_at)))
     }
 
     /// Get totals: (ah_total, bz_total)

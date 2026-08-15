@@ -259,7 +259,12 @@ a{color:var(--accent2);text-decoration:none}
         </div>
         <div class="modal-field">
             <label>BIN Price (coins)</label>
-            <input type="number" id="li-price" min="1" placeholder="e.g. 5000000">
+            <!-- Deliberately type=text: type=number rejects "80m" outright and
+                 hands back an empty value, so shorthand could never reach the
+                 parser. inputmode keeps the numeric keypad on phones. -->
+            <input type="text" id="li-price" inputmode="decimal" autocomplete="off"
+                   placeholder="e.g. 80m, 1.5b, 250k" oninput="updateListPricePreview()">
+            <div id="li-price-preview" style="min-height:1.1em;margin-top:4px;font-size:.8rem;color:var(--text-dim)"></div>
         </div>
         <div class="modal-field">
             <label>Duration (hours)</label>
@@ -1106,12 +1111,48 @@ function renderInventory(inv) {
 // ── List-item modal ───────────────────────────────────────────
 let _listItemSlot = null;
 
+/**
+ * Parse a coin amount the way people actually say prices: "80m", "1.5b",
+ * "250k", "12 000 000" or a plain number. Returns null for anything that is
+ * not a positive amount, so the caller can reject instead of listing an item
+ * for 80 coins because the "m" was silently dropped.
+ */
+function parseCoinAmount(text) {
+    const raw = String(text ?? '').trim().toLowerCase().replace(/[,_\s]/g, '');
+    if (!raw) return null;
+    const m = raw.match(/^(\d+(?:\.\d+)?)([kmbt])?$/);
+    if (!m) return null;
+    const mult = { k: 1e3, m: 1e6, b: 1e9, t: 1e12 }[m[2]] || 1;
+    const value = Math.round(parseFloat(m[1]) * mult);
+    return Number.isFinite(value) && value > 0 ? value : null;
+}
+
+// Echo the resolved amount under the field. Shorthand is only safe if you can
+// see what it expanded to before you commit to the listing.
+function updateListPricePreview() {
+    const out = $('li-price-preview');
+    if (!out) return;
+    const typed = $('li-price').value.trim();
+    const value = parseCoinAmount(typed);
+    if (!typed) {
+        out.textContent = '';
+        out.style.color = 'var(--text-dim)';
+    } else if (value === null) {
+        out.textContent = 'Not a valid amount';
+        out.style.color = 'var(--danger)';
+    } else {
+        out.textContent = '= ' + value.toLocaleString('en-US') + ' coins';
+        out.style.color = 'var(--text-dim)';
+    }
+}
+
 function openListItemModal(slot, slotIndex) {
     const name = stripMC(slot.displayName || slot.name || '?');
     _listItemSlot = { slot, index: slotIndex };
     $('li-item-name').value = name;
     $('li-price').value = '';
     $('li-duration').value = '24';
+    updateListPricePreview();
     $('list-item-modal').classList.remove('hidden');
     setTimeout(() => $('li-price').focus(), 50);
 }
@@ -1128,10 +1169,9 @@ function closeListItemModal(evt) {
 
 async function submitListItem() {
     if (!_listItemSlot) return;
-    const priceRaw = $('li-price').value.trim().replace(/[,_]/g, '');
-    const price = parseInt(priceRaw, 10);
+    const price = parseCoinAmount($('li-price').value);
     const duration = parseInt($('li-duration').value, 10) || 24;
-    if (!price || price <= 0) { alert('Please enter a valid price.'); return; }
+    if (price === null) { alert('Please enter a valid price, e.g. 80m, 1.5b, 250k or 80000000.'); return; }
     const itemName = $('li-item-name').value;
     const itemSlot = _listItemSlot.index;
     $('list-item-modal').classList.add('hidden');

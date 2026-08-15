@@ -723,6 +723,122 @@ fn save_profit_stats(
     }
 }
 
+/// How long a bought-but-unsold flip stays in the persisted tracker. Hypixel
+/// auctions run at most 6 days, so anything older than this can never produce a
+/// sale we would still want to attribute.
+const MAX_TRACKED_FLIP_AGE_SECS: u64 = 7 * 24 * 60 * 60;
+
+/// A bought-but-unsold flip persisted in `flip_tracker.json`.
+///
+/// The in-memory tracker keys sell time off an `Instant`, which is monotonic and
+/// therefore meaningless once the process exits. Humanization rest breaks
+/// deliberately restart the process, so without this file every item bought
+/// before a break sold afterwards with no buy price, no profit, no ROI and no
+/// "Time to Sell": the sold webhook silently degraded to a bare price.
+#[derive(serde::Serialize, serde::Deserialize, Clone, Debug)]
+struct TrackedFlipEntry {
+    flip: Flip,
+    buy_price: u64,
+    /// Unix seconds when the item was bought (wall clock, re-anchored on load).
+    purchased_at: u64,
+    /// Unix seconds when the flip was received from the finder/COFL socket.
+    received_at: u64,
+}
+
+/// Load every account's persisted flip tracker.
+fn load_flip_tracker_file(
+    path: &std::path::Path,
+) -> HashMap<String, HashMap<String, TrackedFlipEntry>> {
+    let raw = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(_) => return HashMap::new(),
+    };
+    serde_json::from_str(&raw).unwrap_or_default()
+}
+
+/// Restore this account's bought-but-unsold flips into an in-memory tracker map,
+/// converting persisted wall-clock stamps back into `Instant`s so `elapsed()`
+/// keeps counting from the real purchase, not from process start.
+fn restore_flip_tracker(
+    path: &std::path::Path,
+    ign: &str,
+) -> HashMap<String, (Flip, u64, Instant, Instant)> {
+    let now = unix_now();
+    let saved = load_flip_tracker_file(path);
+    let entries = match saved.get(ign) {
+        Some(e) => e,
+        None => return HashMap::new(),
+    };
+    let mut out = HashMap::new();
+    let anchor = |ts: u64| -> Instant {
+        let age = Duration::from_secs(now.saturating_sub(ts));
+        Instant::now().checked_sub(age).unwrap_or_else(Instant::now)
+    };
+    for (key, entry) in entries {
+        if now.saturating_sub(entry.purchased_at) > MAX_TRACKED_FLIP_AGE_SECS {
+            continue;
+        }
+        out.insert(
+            key.clone(),
+            (
+                entry.flip.clone(),
+                entry.buy_price,
+                anchor(entry.purchased_at),
+                anchor(entry.received_at),
+            ),
+        );
+    }
+    if !out.is_empty() {
+        info!(
+            "[FlipTracker] Restored {} bought-but-unsold flip(s) for {}, so sell time and profit survive the restart",
+            out.len(),
+            ign
+        );
+    }
+    out
+}
+
+/// Persist this account's bought-but-unsold flips.
+///
+/// Only entries with a real buy price are written: an entry with `buy_price == 0`
+/// is a flip that was offered but never actually purchased, and keeping those
+/// would grow the file without ever producing a sale.
+fn save_flip_tracker(path: &std::path::Path, ign: &str, tracker: &FlipTrackerMap) {
+    let now = unix_now();
+    let snapshot: HashMap<String, TrackedFlipEntry> = match tracker.lock() {
+        Ok(t) => t
+            .iter()
+            .filter(|(_, (_, buy_price, _, _))| *buy_price > 0)
+            .map(|(key, (flip, buy_price, purchased, received))| {
+                (
+                    key.clone(),
+                    TrackedFlipEntry {
+                        flip: flip.clone(),
+                        buy_price: *buy_price,
+                        purchased_at: now.saturating_sub(purchased.elapsed().as_secs()),
+                        received_at: now.saturating_sub(received.elapsed().as_secs()),
+                    },
+                )
+            })
+            .collect(),
+        Err(e) => {
+            warn!("[FlipTracker] Lock failed while saving: {}", e);
+            return;
+        }
+    };
+    let mut map = load_flip_tracker_file(path);
+    if snapshot.is_empty() {
+        map.remove(ign);
+    } else {
+        map.insert(ign.to_string(), snapshot);
+    }
+    if let Ok(json) = serde_json::to_string_pretty(&map) {
+        if let Err(e) = std::fs::write(path, json) {
+            warn!("[FlipTracker] Failed to save flip tracker: {}", e);
+        }
+    }
+}
+
 /// Return the current Unix timestamp in seconds.
 fn unix_now() -> u64 {
     std::time::SystemTime::now()
@@ -1007,6 +1123,12 @@ async fn main() -> Result<()> {
         .ok()
         .and_then(|p| p.parent().map(|d| d.join("profit_stats.json")))
         .unwrap_or_else(|| std::path::PathBuf::from("profit_stats.json"));
+    // Sidecar file for bought-but-unsold flips, so "Time to Sell" / profit / ROI
+    // on the sold webhook survive a rest-break restart (see save_flip_tracker).
+    let flip_tracker_path = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("flip_tracker.json")))
+        .unwrap_or_else(|| std::path::PathBuf::from("flip_tracker.json"));
     // Did the previous process exit to take a humanization rest break? Those
     // gaps are the SAME session deliberately paused, so uptime and profit both
     // survive them however long they are. Read before `clear_rest_break_marker`
@@ -1121,7 +1243,13 @@ async fn main() -> Result<()> {
     // Flip tracker: stores pending/active AH flips for profit reporting in webhooks.
     // Key = clean item_name (lowercase), value = (flip, actual_buy_price, purchase_time).
     // buy_price starts at 0 until ItemPurchased fires and sets it to the real price.
-    let flip_tracker: FlipTrackerMap = Arc::new(Mutex::new(HashMap::new()));
+    // Bought-but-unsold flips are restored from disk: an item bought before a
+    // humanization rest break still sells after it, and the sell time is measured
+    // from the real purchase rather than from this process starting.
+    let flip_tracker: FlipTrackerMap = Arc::new(Mutex::new(restore_flip_tracker(
+        &flip_tracker_path,
+        &ingame_name,
+    )));
 
     // Coflnet connection ID — parsed from "Your connection id is XXXX" chat message.
     // Included in startup webhooks (matches TypeScript getCoflnetPremiumInfo().connectionId).
@@ -2026,11 +2154,13 @@ async fn main() -> Result<()> {
                     }
 
                     if let Some(profit) = parse_cofl_profit_response(&clean) {
-                        // `/cofl profit` is the REALIZED total. The panel now shows
-                        // THEORETICAL AH profit (accumulated at purchase), so we log
-                        // the realized figure for reference but do not overwrite the
-                        // theoretical total with it.
-                        tracing::info!("[CoflProfit] Realized AH total from Coflnet (not shown on panel): {} coins", profit);
+                        // `/cofl profit` is the REALIZED total. The panel shows
+                        // THEORETICAL AH profit (accumulated at purchase), so this
+                        // must NOT overwrite the theoretical total. It is kept
+                        // alongside it and reported as its own figure in the
+                        // periodic profit summary webhook.
+                        profit_tracker_events.set_realized_ah_total(profit);
+                        tracing::info!("[CoflProfit] Realized AH total from Coflnet: {} coins", profit);
                     }
 
                     // Parse `/cofl bz h` response for authoritative BZ session profit.
@@ -5420,13 +5550,40 @@ async fn main() -> Result<()> {
         let name = ingame_name.clone();
         let started = std::time::Instant::now();
         let prev_secs_summary = previous_session_secs;
+        let ws_client_summary = ws_client.clone();
         tokio::spawn(async move {
             loop {
                 sleep(Duration::from_secs(30 * 60)).await;
-                let (ah, bz) = profit_tracker_webhook.totals();
                 let uptime = prev_secs_summary + started.elapsed().as_secs();
+
+                // Refresh Coflnet's REALIZED total before reporting. It is
+                // otherwise only requested after a sale, so a quiet half-hour
+                // would report a stale number next to live theoretical totals.
+                // Finder-primary setups have no Coflnet to ask, so the realized
+                // field is simply omitted there.
+                if !ws_client_summary.is_finder() {
+                    let days = uptime as f64 / SECS_PER_DAY;
+                    if days >= 0.01 {
+                        let args = format!("{} {:.4}", name, days);
+                        let message = serde_json::json!({
+                            "type": "profit",
+                            "data": serde_json::json!(args).to_string(),
+                        })
+                        .to_string();
+                        if let Err(e) = ws_client_summary.send_message(&message).await {
+                            tracing::warn!("[CoflProfit] Summary refresh failed: {}", e);
+                        } else {
+                            // The reply arrives as a chat message on the event
+                            // loop; give it a moment to land before reading.
+                            sleep(Duration::from_secs(8)).await;
+                        }
+                    }
+                }
+
+                let (ah, bz) = profit_tracker_webhook.totals();
+                let realized = profit_tracker_webhook.realized_ah();
                 frikadellen_baf::webhook::send_webhook_profit_summary(
-                    &name, ah, bz, uptime, &webhook_url,
+                    &name, ah, bz, realized, uptime, &webhook_url,
                 )
                 .await;
             }
@@ -5445,12 +5602,17 @@ async fn main() -> Result<()> {
         let prev_secs_save = previous_session_secs;
         let profit_tracker_save = profit_tracker.clone();
         let profit_path_save = profit_path.clone();
+        let flip_tracker_save = flip_tracker.clone();
+        let flip_tracker_path_save = flip_tracker_path.clone();
         tokio::spawn(async move {
             loop {
                 sleep(Duration::from_secs(60)).await;
                 let total_secs = prev_secs_save + started_save.elapsed().as_secs();
                 save_session_time(&session_times_path_save, &ign_save, total_secs);
                 save_profit_stats(&profit_path_save, &ign_save, &profit_tracker_save);
+                // Same tick as profit: a kill -9 must not cost the sell-time
+                // baselines of everything currently listed.
+                save_flip_tracker(&flip_tracker_path_save, &ign_save, &flip_tracker_save);
             }
         });
     }
@@ -5486,6 +5648,8 @@ async fn main() -> Result<()> {
         let command_queue_human = command_queue.clone();
         let profit_tracker_human = profit_tracker.clone();
         let profit_path_human = profit_path.clone();
+        let flip_tracker_human = flip_tracker.clone();
+        let flip_tracker_path_human = flip_tracker_path.clone();
         let min_interval = config.humanization_min_interval_minutes.max(5); // floor at 5 min
         let max_interval = config.humanization_max_interval_minutes.max(min_interval + 1);
         let min_break = config.humanization_min_break_minutes.max(1); // floor at 1 min
@@ -5565,6 +5729,10 @@ async fn main() -> Result<()> {
             // Save profit + session time so both survive the restart/break. Session
             // time is saved right before restart so the gap is near-zero.
             save_profit_stats(&profit_path_human, &ign_human, &profit_tracker_human);
+            // Items bought before the break keep selling while we are offline
+            // (the auctions stay up), so their purchase baselines have to cross
+            // the restart or the sold webhook loses time-to-sell and ROI.
+            save_flip_tracker(&flip_tracker_path_human, &ign_human, &flip_tracker_human);
             let total_secs = prev_secs_human + started_human.elapsed().as_secs();
             save_session_time(&session_times_path_human, &ign_human, total_secs);
 
@@ -5789,7 +5957,7 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_ban_disconnect, parse_cofl_profit_response, parse_cofl_bz_h_total_profit, parse_short_number, parse_bz_list_flip_detail, should_drop_bazaar_command_during_ah_pause, should_enqueue_periodic_auction_claim, parse_island_visitor, parse_name_mention, is_direct_address, current_skyblock_area, note_maintenance, skyblock_in_maintenance, mark_activity, secs_since_activity};
+    use super::{is_ban_disconnect, parse_cofl_profit_response, parse_cofl_bz_h_total_profit, parse_short_number, parse_bz_list_flip_detail, should_drop_bazaar_command_during_ah_pause, should_enqueue_periodic_auction_claim, parse_island_visitor, parse_name_mention, is_direct_address, current_skyblock_area, note_maintenance, skyblock_in_maintenance, mark_activity, secs_since_activity, restore_flip_tracker, save_flip_tracker, FlipTrackerMap, MAX_TRACKED_FLIP_AGE_SECS};
     use frikadellen_baf::types::{BotState, CommandType};
 
     #[test]
@@ -5914,6 +6082,68 @@ mod tests {
         assert!(is_ban_disconnect("Your account has been blocked."));
         assert!(is_ban_disconnect("Find out more: https://www.hypixel.net/security-block"));
         assert!(is_ban_disconnect("Block ID: #ABC123"));
+    }
+
+    /// A rest break restarts the process, so the purchase baseline behind
+    /// "Time to Sell" / profit / ROI has to reach the next process through disk.
+    #[test]
+    fn flip_tracker_survives_a_restart_with_its_sell_time() {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+        use std::time::{Duration, Instant};
+
+        let dir = std::env::temp_dir().join(format!("baf-fliptracker-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("temp dir");
+        let path = dir.join("flip_tracker.json");
+        let _ = std::fs::remove_file(&path);
+
+        let flip = frikadellen_baf::types::Flip {
+            item_name: "Hyperion".to_string(),
+            starting_bid: 100,
+            target: 1_000,
+            finder: Some("finder".to_string()),
+            profit_perc: None,
+            purchase_at_ms: None,
+            uuid: Some("uuid-1".to_string()),
+            list_at: None,
+        };
+        // Bought 90 minutes ago and still unsold; plus an offered-but-never-bought
+        // flip, which must not be written.
+        let bought_ago = Duration::from_secs(90 * 60);
+        let then = Instant::now().checked_sub(bought_ago).expect("monotonic room");
+        let mut map = HashMap::new();
+        map.insert("hyperion".to_string(), (flip.clone(), 800u64, then, then));
+        map.insert("never bought".to_string(), (flip.clone(), 0u64, Instant::now(), Instant::now()));
+        let tracker: FlipTrackerMap = Arc::new(Mutex::new(map));
+
+        save_flip_tracker(&path, "tester", &tracker);
+        let restored = restore_flip_tracker(&path, "tester");
+
+        assert_eq!(restored.len(), 1, "only bought flips are persisted");
+        let (rflip, buy_price, purchased, _received) =
+            restored.get("hyperion").expect("bought flip restored");
+        assert_eq!(*buy_price, 800);
+        assert_eq!(rflip.uuid.as_deref(), Some("uuid-1"));
+        // The sell clock keeps running from the real purchase, not from now.
+        let elapsed = purchased.elapsed().as_secs();
+        assert!(
+            elapsed >= 90 * 60 - 5 && elapsed <= 90 * 60 + 5,
+            "restored purchase time drifted: {elapsed}s"
+        );
+
+        // Another account's flips must not leak into this one.
+        assert!(restore_flip_tracker(&path, "someone-else").is_empty());
+
+        // Anything older than an auction can possibly live is dropped.
+        let stale = format!(
+            r#"{{"tester":{{"old":{{"flip":{},"buy_price":5,"purchased_at":1,"received_at":1}}}}}}"#,
+            serde_json::to_string(&flip).expect("flip json")
+        );
+        std::fs::write(&path, stale).expect("write stale");
+        assert!(restore_flip_tracker(&path, "tester").is_empty());
+        assert!(MAX_TRACKED_FLIP_AGE_SECS >= 6 * 24 * 60 * 60);
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

@@ -1736,10 +1736,19 @@ pub fn should_notify_ban(ingame_name: &str, reason: &str) -> bool {
 
 /// Send a periodic profit summary embed.
 /// Always uses the real IGN — this goes to the user's personal webhook.
+///
+/// `ah_profit`/`bz_profit` are THEORETICAL: AH is accrued at purchase time
+/// (target − price − fee) and never revised, so it answers "what did the flips I
+/// bought promise". `realized_ah` is Coflnet's `/cofl profit` figure: coins that
+/// actually landed from sales, as `(coins, unix_secs_when_refreshed)`. Both are
+/// shown because they answer different questions and diverge whenever stock sits
+/// unsold. `None` means Coflnet has not answered yet this session (or the bot is
+/// finder-primary and there is no Coflnet to ask), and the field is omitted.
 pub async fn send_webhook_profit_summary(
     ingame_name: &str,
     ah_profit: i64,
     bz_profit: i64,
+    realized_ah: Option<(i64, u64)>,
     uptime_secs: u64,
     webhook_url: &str,
 ) {
@@ -1751,17 +1760,39 @@ pub async fn send_webhook_profit_summary(
         0.0
     };
 
+    let mut fields = vec![
+        serde_json::json!({"name": "🏛️ Auction House Profit", "value": format!("```{}```", format_number(ah_profit as f64)), "inline": true}),
+        serde_json::json!({"name": "📦 Bazaar Profit", "value": format!("```{}```", format_number(bz_profit as f64)), "inline": true}),
+        serde_json::json!({"name": "💰 Total Profit", "value": format!("```{}```", format_number(total as f64)), "inline": false}),
+        serde_json::json!({"name": "⏱️ Profit per Hour", "value": format!("```{}```", format_number(per_hour)), "inline": true}),
+    ];
+    if let Some((realized, at)) = realized_ah {
+        // Realized total lands next to the theoretical one, plus the gap between
+        // them: a large negative gap means bought stock has not sold yet.
+        let unrealized = ah_profit - realized;
+        fields.push(serde_json::json!({
+            "name": "✅ Realized Profit (sold)",
+            "value": format!("```{}```", format_number(realized as f64)),
+            "inline": true
+        }));
+        fields.push(serde_json::json!({
+            "name": "📉 Still Unrealized",
+            "value": format!("```{}```", format_number(unrealized as f64)),
+            "inline": true
+        }));
+        fields.push(serde_json::json!({
+            "name": "🕒 Realized Updated",
+            "value": format!("<t:{}:R>", at),
+            "inline": true
+        }));
+    }
+
     let payload = serde_json::json!({
         "embeds": [{
             "title": "📊 Profit Summary",
             "description": format!("<t:{}:R>", now_unix()),
             "color": 0x2ecc71u32,
-            "fields": [
-                {"name": "🏛️ Auction House Profit", "value": format!("```{}```", format_number(ah_profit as f64)), "inline": true},
-                {"name": "📦 Bazaar Profit", "value": format!("```{}```", format_number(bz_profit as f64)), "inline": true},
-                {"name": "💰 Total Profit", "value": format!("```{}```", format_number(total as f64)), "inline": false},
-                {"name": "⏱️ Profit per Hour", "value": format!("```{}```", format_number(per_hour)), "inline": true}
-            ],
+            "fields": fields,
             "footer": {
                 "text": format!("BAF • {} • Uptime: {}", ingame_name, format_duration(uptime_secs))
             }
