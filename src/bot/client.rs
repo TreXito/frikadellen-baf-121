@@ -7923,24 +7923,30 @@ async fn run_startup_workflow(
 
     // Step 2/4: Bazaar order management.
     //
-    // Only do the *destructive* startup cancel ("clean slate") when the bazaar
-    // finder is actually enabled.  When bazaar flips are disabled the user may
-    // have orders they placed manually or want to keep — cancelling them all on
-    // startup "could end bad".  In that case we run a non-destructive
-    // collect-only pass: filled orders are still claimed and open orders are
-    // discovered/tracked for the web panel, but nothing is cancelled.  Once a
-    // flip actually comes in, the order-filled path will trigger management.
+    // Only touch the bazaar at all when the bazaar finder is actually enabled.
+    // When bazaar flips are disabled the user may have orders they placed
+    // manually or want to keep — even the non-destructive collect-only pass
+    // used to claim filled orders on their behalf, which is still "managing"
+    // orders the bot has no business touching. So: skip entirely (no cancel,
+    // no claim) and leave any existing orders exactly as they are. Once bazaar
+    // flips are turned on and a flip actually comes in, the order-filled path
+    // will trigger management from there.
     let cancel_open = enable_bazaar_flips.load(Ordering::Relaxed);
-    let mode_str = if cancel_open { "cancel + collect" } else { "collect-only (bz finder disabled)" };
-    info!("[Startup] Step 2/4: Managing bazaar orders (startup: {})...", mode_str);
-    await_queued_command(
-        &queue,
-        &bot_state,
-        CommandType::ManageOrders { cancel_open, target_item: None },
-        50,
-    ).await;
-    let orders_cancelled = *manage_orders_cancelled.read();
-    info!("[Startup] Step 2/4: Order management complete — {} order(s) cancelled", orders_cancelled);
+    let orders_cancelled = if cancel_open {
+        info!("[Startup] Step 2/4: Managing bazaar orders (startup: cancel + collect)...");
+        await_queued_command(
+            &queue,
+            &bot_state,
+            CommandType::ManageOrders { cancel_open, target_item: None },
+            50,
+        ).await;
+        let cancelled = *manage_orders_cancelled.read();
+        info!("[Startup] Step 2/4: Order management complete — {} order(s) cancelled", cancelled);
+        cancelled
+    } else {
+        info!("[Startup] Step 2/4: Skipped — bazaar flips disabled, not touching bazaar orders");
+        0
+    };
 
     // Step 3/4: Claim sold items
     info!("[Startup] Step 3/4: Claiming sold items...");
