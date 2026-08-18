@@ -3851,7 +3851,15 @@ async fn main() -> Result<()> {
                                 tokio::spawn(async move {
                                     ws.switch_region(&new_url).await;
                                 });
-                                return;
+                                // NOT `return`: this arm is inside the `while let Some(event) =
+                                // ws_rx.recv().await` loop that drains every COFL event (flips,
+                                // chat, auth) for the rest of the process — `return` here would
+                                // exit that whole task, not just this command, so the FIRST
+                                // region switch would silently kill flip intake forever (the bot
+                                // prints "Switching server…" and then never processes another
+                                // event). `continue` skips only the "echo command back to
+                                // websocket" fallthrough below, which is the actual intent.
+                                continue;
                             }
 
                             // Send to websocket with command as type (JSON-stringified data)
