@@ -3841,6 +3841,12 @@ async fn main() -> Result<()> {
                                     "§f[§4BAF§f]: §bSwitching server → §e{}§7 (reconnecting)…",
                                     new_url
                                 ));
+                                // The regional host may not recognise the carried-over
+                                // session, so don't let the ongoing buy/order gates keep
+                                // trusting the connection being replaced — CoflWebSocket
+                                // resets its own auth statics, this is the mirror on the
+                                // main-loop side.
+                                cofl_authenticated_ws.store(false, Ordering::Relaxed);
                                 let ws = ws_client_clone.clone();
                                 tokio::spawn(async move {
                                     ws.switch_region(&new_url).await;

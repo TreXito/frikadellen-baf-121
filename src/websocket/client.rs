@@ -37,6 +37,16 @@ pub fn cofl_auth_url(session_id: &str) -> String {
     )
 }
 
+/// Reset the process-global COFL auth latches so a live region switch starts
+/// the new connection's auth state clean, the same way a full process restart
+/// used to for free before switches stopped restarting. See
+/// [`CoflWebSocket::switch_region`] for why leaving stale state in place is
+/// unsafe.
+fn reset_auth_state_for_region_switch() {
+    COFL_LOGGED_IN.store(false, Ordering::Relaxed);
+    COFL_AUTH_LINK_SHOWN.store(false, Ordering::Relaxed);
+}
+
 /// True when a websocket URL points at Coflnet rather than the private
 /// baf-flip-finder, identified by "coflnet" in the host or a "/modsocket" path.
 /// Anything else is the finder (e.g. ws://127.0.0.1:15101), which speaks its own
@@ -283,6 +293,16 @@ impl CoflWebSocket {
     ///
     /// The query string (player / version / SId) is carried over so the session
     /// survives the move.
+    ///
+    /// A process restart used to clear [`COFL_LOGGED_IN`] / [`COFL_AUTH_LINK_SHOWN`]
+    /// for free — that's exactly what a live reconnect no longer gets. The
+    /// regional host on the other end of the switch may not recognise the
+    /// carried-over session at all, so both flags are reset here BEFORE the
+    /// reconnect signal fires: without this, the bot keeps believing it's
+    /// authenticated from the connection being replaced, [`note_authenticated_traffic`]
+    /// never re-arms because it thinks the auth link was already shown, and a
+    /// regional host that silently doesn't recognise the session just goes
+    /// quiet — connected, but never fed another flip — with no error anywhere.
     pub async fn switch_region(&self, new_url: &str) {
         let normalized = normalize_ws_url(new_url);
         let mut full_url = self.full_url.lock().await;
@@ -292,6 +312,7 @@ impl CoflWebSocket {
             .unwrap_or_default();
         *full_url = format!("{}{}", normalized, query);
         drop(full_url);
+        reset_auth_state_for_region_switch();
         // Wakes the read task, which drops the current connection and dials the
         // URL just stored.
         let _ = self.switch_tx.send_modify(|n| *n = n.wrapping_add(1));
@@ -978,6 +999,22 @@ mod tests {
 
         COFL_AUTH_LINK_SHOWN.store(false, Ordering::Relaxed);
         COFL_LOGGED_IN.store(false, Ordering::Relaxed);
+    }
+
+    /// A region switch reconnects to a different physical COFL host that may
+    /// not recognise the carried-over session. A plain process restart used to
+    /// clear these latches for free; a live reconnect (`switch_region`) must
+    /// do it explicitly, or the bot keeps believing the OLD connection's auth
+    /// state applies to the new one and silently stops receiving flips.
+    #[test]
+    fn region_switch_resets_stale_auth_state() {
+        COFL_LOGGED_IN.store(true, Ordering::Relaxed);
+        COFL_AUTH_LINK_SHOWN.store(true, Ordering::Relaxed);
+
+        reset_auth_state_for_region_switch();
+
+        assert!(!COFL_LOGGED_IN.load(Ordering::Relaxed));
+        assert!(!COFL_AUTH_LINK_SHOWN.load(Ordering::Relaxed));
     }
 
     fn handle_message_for_test(text: &str, tx: &mpsc::UnboundedSender<CoflEvent>) {
