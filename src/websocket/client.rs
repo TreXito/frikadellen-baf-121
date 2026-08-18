@@ -2,7 +2,7 @@ use super::messages::{parse_message_data, inject_referral_id, ChatMessage, WebSo
 use crate::types::{BazaarFlipRecommendation, Flip};
 use anyhow::{Context, Result};
 use futures::{stream::SplitSink, StreamExt, SinkExt};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, watch, Mutex};
 use tokio_tungstenite::{
     connect_async_tls_with_config, tungstenite::Message, Connector, MaybeTlsStream, WebSocketStream,
 };
@@ -141,6 +141,13 @@ pub struct CoflWebSocket {
     /// this is set — on a COFL-primary deployment the finder is reached through
     /// its own dedicated feed/lister sockets instead.
     is_finder: bool,
+    /// The URL the read task reconnects to, query string included. Shared so a
+    /// COFL region switch can repoint the socket at a regional host WITHOUT
+    /// touching the user's config (see [`Self::switch_region`]).
+    full_url: Arc<Mutex<String>>,
+    /// Bumped to kick the read task off the current connection so it picks the
+    /// new [`Self::full_url`] up immediately.
+    switch_tx: watch::Sender<u64>,
 }
 
 impl CoflWebSocket {
@@ -177,13 +184,31 @@ impl CoflWebSocket {
         let write_for_task = write.clone();
         let (tx, rx) = mpsc::unbounded_channel();
         let tx_clone = tx.clone();
+        let full_url = Arc::new(Mutex::new(full_url));
+        let full_url_for_task = full_url.clone();
+        let (switch_tx, mut switch_rx) = watch::channel(0u64);
 
         // Spawn task to handle incoming messages, with automatic reconnection
         tokio::spawn(async move {
             loop {
+                // A region switch reconnects immediately; a dropped connection
+                // backs off so a server-side outage isn't hammered.
+                let mut switched = false;
                 // ── inner read loop ───────────────────────────────────────────
                 loop {
-                    match read.next().await {
+                    let message = tokio::select! {
+                        // `switch_region` bumped the URL. Abandon this connection
+                        // so the reconnect below picks the new host up. Cancelling
+                        // `read.next()` here is safe: the stream buffers partial
+                        // frames internally, so nothing is lost mid-message.
+                        _ = switch_rx.changed() => {
+                            info!("[WS] Region switch requested — dropping current connection");
+                            switched = true;
+                            break;
+                        }
+                        message = read.next() => message,
+                    };
+                    match message {
                         Some(Ok(Message::Text(text))) => {
                             if let Err(e) = Self::handle_message(&text, &tx_clone) {
                                 error!("Error handling WebSocket message: {}", e);
@@ -210,13 +235,17 @@ impl CoflWebSocket {
                 }
 
                 // ── reconnection loop ─────────────────────────────────────────
-                let _ = tx_clone.send(CoflEvent::ChatMessage(
-                    "§f[§4BAF§f]: §cWebSocket disconnected — reconnecting...".to_string(),
-                ));
+                if !switched {
+                    let _ = tx_clone.send(CoflEvent::ChatMessage(
+                        "§f[§4BAF§f]: §cWebSocket disconnected — reconnecting...".to_string(),
+                    ));
+                }
 
-                let mut backoff_secs = 5u64;
+                let mut backoff_secs = if switched { 0 } else { 5u64 };
                 loop {
                     tokio::time::sleep(tokio::time::Duration::from_secs(backoff_secs)).await;
+                    // Re-read every attempt: a switch may land while we are backing off.
+                    let full_url = full_url_for_task.lock().await.clone();
                     match connect_async_tls_with_config(&full_url, None, false, cofl_tls_connector()).await {
                         Ok((new_stream, _)) => {
                             let (new_write, new_read) = new_stream.split();
@@ -229,8 +258,8 @@ impl CoflWebSocket {
                             break;
                         }
                         Err(e) => {
+                            backoff_secs = (backoff_secs * 2).max(5).min(60);
                             error!("[WS] Reconnection failed (retry in {}s): {}", backoff_secs, e);
-                            backoff_secs = (backoff_secs * 2).min(60);
                         }
                     }
                 }
@@ -238,7 +267,34 @@ impl CoflWebSocket {
             }
         });
 
-        Ok((Self { tx, write, is_finder }, rx))
+        Ok((Self { tx, write, is_finder, full_url, switch_tx }, rx))
+    }
+
+    /// Repoint this socket at `new_url` and reconnect, WITHOUT persisting
+    /// anything.
+    ///
+    /// COFL routes a user to their nearest modsocket by pushing
+    /// `connect <host>` (its `/cofl switchregion`), so the configured URL is
+    /// only ever the entry point — the plain `sky.coflnet.com` default is
+    /// correct for every region and users never need to set a regional host
+    /// themselves. Writing the redirect target back into `config.toml` used to
+    /// pin the bot to one region permanently, which is exactly how a config
+    /// ends up stuck on a regional host that later stops resolving.
+    ///
+    /// The query string (player / version / SId) is carried over so the session
+    /// survives the move.
+    pub async fn switch_region(&self, new_url: &str) {
+        let normalized = normalize_ws_url(new_url);
+        let mut full_url = self.full_url.lock().await;
+        let query = full_url
+            .split_once('?')
+            .map(|(_, q)| format!("?{}", q))
+            .unwrap_or_default();
+        *full_url = format!("{}{}", normalized, query);
+        drop(full_url);
+        // Wakes the read task, which drops the current connection and dials the
+        // URL just stored.
+        let _ = self.switch_tx.send_modify(|n| *n = n.wrapping_add(1));
     }
 
     /// True when this socket points at the private baf-flip-finder rather than

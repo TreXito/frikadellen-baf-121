@@ -3146,7 +3146,6 @@ async fn main() -> Result<()> {
     // Spawn WebSocket message handler
     let command_queue_clone = command_queue.clone();
     let config_clone = config.clone();
-    let config_loader_ws = config_loader.clone();
     let ws_client_clone = ws_client.clone();
     let bot_client_for_ws = bot_client.clone();
     let bazaar_flips_paused_ws = bazaar_flips_paused.clone();
@@ -3812,10 +3811,18 @@ async fn main() -> Result<()> {
 
                             // Region switch: COFL's `/cofl switchregion` asks the bot to
                             // reconnect to a different modsocket via a `connect <url>`
-                            // command. This must be executed locally — persist the new
-                            // websocket URL and restart — NOT echoed back over the socket
-                            // (which silently failed and left the bot on an unreachable
-                            // regional host, e.g. an unresolvable us.sky.coflnet.com).
+                            // command. This must be executed locally — repoint the live
+                            // socket — NOT echoed back over the socket (which silently
+                            // failed and left the bot on an unreachable regional host,
+                            // e.g. an unresolvable us.sky.coflnet.com).
+                            //
+                            // Deliberately NOT written to config.toml. COFL redirects
+                            // every user to their nearest modsocket on its own, so the
+                            // plain `sky.coflnet.com` default is right for all regions
+                            // and nobody has to set a regional host by hand. Persisting
+                            // the target pinned the config to one region forever, and
+                            // re-running the redirect on the next start would only
+                            // arrive at the same place anyway.
                             if command == "connect" && !args.is_empty() {
                                 // COFL fully switched to TLS. It may hand us a
                                 // scheme-less host ("us-sky.coflnet.com/modsocket")
@@ -3831,15 +3838,13 @@ async fn main() -> Result<()> {
                                 let new_url = format!("wss://{}", host);
                                 info!("[RegionSwitch] /cofl connect → reconnecting to {}", new_url);
                                 let _ = chat_tx_ws.send(format!(
-                                    "§f[§4BAF§f]: §bSwitching server → §e{}§7 (restarting)…",
+                                    "§f[§4BAF§f]: §bSwitching server → §e{}§7 (reconnecting)…",
                                     new_url
                                 ));
-                                let mut new_config = config_clone.clone();
-                                new_config.websocket_url = new_url;
-                                if let Err(e) = config_loader_ws.save(&new_config) {
-                                    error!("[RegionSwitch] Failed to save new websocket URL: {}", e);
-                                }
-                                restart_process();
+                                let ws = ws_client_clone.clone();
+                                tokio::spawn(async move {
+                                    ws.switch_region(&new_url).await;
+                                });
                                 return;
                             }
 

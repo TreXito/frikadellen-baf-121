@@ -51,6 +51,16 @@ impl ConfigLoader {
 
         let mut config = Self::parse_config(&contents)?;
         config.normalize_do_not_relist_ids();
+        // Undo the region pinning older builds wrote here. COFL redirects to the
+        // nearest modsocket on its own, so the neutral host is correct for
+        // everyone and a stale regional one can be unreachable.
+        if let Some(previous) = config.reset_regional_websocket_url() {
+            info!(
+                "Reset regional websocket_url {:?} to {:?} — Coflnet redirects to your \
+                 nearest server automatically",
+                previous, config.websocket_url
+            );
+        }
         // Heal configs written before the panel required a password, and configs
         // where the field was blanked out. The save below persists it.
         let generated_password = config.ensure_web_gui_password();
