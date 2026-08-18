@@ -4955,11 +4955,16 @@ async fn main() -> Result<()> {
 
     // Periodic bazaar order check — collect filled orders and cancel stale ones.
     // Driven by config.bazaar_order_check_interval_seconds (default 30s).
-    if config.enable_bazaar_flips {
+    // Spawned unconditionally: the live `enable_bazaar_flips` atomic (toggled
+    // by the web panel, not just the config.toml snapshot at boot) is checked
+    // every tick below, so turning bazaar flips on/off at runtime takes effect
+    // immediately without needing a restart.
+    {
         let bot_client_orders = bot_client.clone();
         let command_queue_orders = command_queue.clone();
         let bazaar_flips_paused_orders = bazaar_flips_paused.clone();
         let bazaar_tracker_orders = bazaar_tracker.clone();
+        let enable_bazaar_flips_orders = enable_bazaar_flips.clone();
         let order_interval = config.bazaar_order_check_interval_seconds;
         let cancel_minutes_per_million = config.bazaar_order_cancel_minutes_per_million;
         tokio::spawn(async move {
@@ -4968,6 +4973,13 @@ async fn main() -> Result<()> {
             sleep(Duration::from_secs(120)).await;
             loop {
                 sleep(Duration::from_secs(order_interval)).await;
+                // Bazaar flips disabled — don't manage orders at all, not even
+                // the non-destructive collect-only pass. Any order already in
+                // the tracker is left exactly as it is until flips are re-enabled.
+                if !enable_bazaar_flips_orders.load(Ordering::Relaxed) {
+                    debug!("[BazaarOrders] Skipping periodic order check — bazaar flips disabled");
+                    continue;
+                }
                 // Skip during AH pause — ManageOrders would be deferred anyway
                 // and will be re-queued when bazaar flips resume.
                 if bazaar_flips_paused_orders.load(Ordering::Relaxed) {
