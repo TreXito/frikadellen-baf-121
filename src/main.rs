@@ -2353,9 +2353,9 @@ async fn main() -> Result<()> {
                     // Clear the bazaar order tracker for a clean slate ONLY when the
                     // startup ManageOrders cycle actually cancelled all in-game orders
                     // (i.e. bazaar flips are enabled).  When bazaar flips are disabled
-                    // the startup pass is collect-only and the user's open orders are
-                    // still in-game — clearing the tracker would wrongly empty the web
-                    // panel, so we keep the discovered orders instead.
+                    // the startup pass is skipped entirely and the user's open orders
+                    // are still in-game — clearing the tracker would wrongly empty the
+                    // web panel, so we keep whatever the tracker already holds.
                     if enable_bazaar_flips_events.load(Ordering::Relaxed) {
                         let removed = bazaar_tracker_events.clear_all_orders();
                         if removed > 0 {
@@ -3475,6 +3475,15 @@ async fn main() -> Result<()> {
                     let is_buy = order.effective_is_buy_order();
                     let side = if is_buy { "BUY" } else { "SELL" };
 
+                    // Bazaar flips off → COFL does not get to drive the orders
+                    // window either.  This is automatic management, same class
+                    // as the periodic check; only the web panel's own cancel
+                    // button (user-initiated) still goes through.
+                    if !enable_bazaar_flips_ws.load(Ordering::Relaxed) {
+                        debug!("Skipping cancelOrder — bazaar flips disabled: {}", order.item_name);
+                        continue;
+                    }
+
                     // Only act once Coflnet auth is confirmed — the order-cancel
                     // GUI flow is gated the same way flip buying is.
                     if !cofl_authenticated_ws.load(Ordering::Relaxed) {
@@ -4183,6 +4192,7 @@ async fn main() -> Result<()> {
                             let _ = chat_tx_ws.send(baf_msg);
                             let chat_tx_resume = chat_tx_ws.clone();
                             let command_queue_resume = command_queue_clone.clone();
+                            let enable_bz_resume = enable_bazaar_flips_ws.clone();
                             let pause_until = bazaar_pause_until_ws.clone();
                             tokio::spawn(async move {
                                 // Sleep until the (possibly-extended) deadline passes.
@@ -4202,7 +4212,9 @@ async fn main() -> Result<()> {
                                 print_mc_chat(&baf_msg);
                                 let _ = chat_tx_resume.send(baf_msg);
                                 info!("[BazaarFlips] Bazaar flips resumed after AH flip window");
-                                if !command_queue_resume.has_manage_orders() {
+                                if !enable_bz_resume.load(Ordering::Relaxed) {
+                                    info!("[BazaarFlips] Not queuing deferred ManageOrders — bazaar flips disabled");
+                                } else if !command_queue_resume.has_manage_orders() {
                                     info!("[BazaarFlips] Queuing deferred ManageOrders after AH flip window");
                                     command_queue_resume.enqueue(
                                         CommandType::ManageOrders { cancel_open: false, target_item: None },
@@ -4974,10 +4986,11 @@ async fn main() -> Result<()> {
 
     // Periodic bazaar order check — collect filled orders and cancel stale ones.
     // Driven by config.bazaar_order_check_interval_seconds (default 30s).
-    // Spawned unconditionally: the live `enable_bazaar_flips` atomic (toggled
-    // by the web panel, not just the config.toml snapshot at boot) is checked
-    // every tick below, so turning bazaar flips on/off at runtime takes effect
-    // immediately without needing a restart.
+    //
+    // Always spawned, then gated on the LIVE `enable_bazaar_flips` atomic each
+    // tick: the web panel can toggle bazaar flips at runtime, and a boot-time
+    // snapshot of the config would leave this timer claiming the user's orders
+    // for the rest of the session after they switched the finder off.
     {
         let bot_client_orders = bot_client.clone();
         let command_queue_orders = command_queue.clone();
@@ -4992,9 +5005,9 @@ async fn main() -> Result<()> {
             sleep(Duration::from_secs(120)).await;
             loop {
                 sleep(Duration::from_secs(order_interval)).await;
-                // Bazaar flips disabled — don't manage orders at all, not even
-                // the non-destructive collect-only pass. Any order already in
-                // the tracker is left exactly as it is until flips are re-enabled.
+                // Bazaar flips off (config or live web-panel toggle) → do not
+                // manage orders at all: no cancelling, no claiming.  The user's
+                // own / co-op orders are theirs to collect.
                 if !enable_bazaar_flips_orders.load(Ordering::Relaxed) {
                     debug!("[BazaarOrders] Skipping periodic order check — bazaar flips disabled");
                     continue;

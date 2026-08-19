@@ -7923,28 +7923,26 @@ async fn run_startup_workflow(
 
     // Step 2/4: Bazaar order management.
     //
-    // Only touch the bazaar at all when the bazaar finder is actually enabled.
-    // When bazaar flips are disabled the user may have orders they placed
-    // manually or want to keep — even the non-destructive collect-only pass
-    // used to claim filled orders on their behalf, which is still "managing"
-    // orders the bot has no business touching. So: skip entirely (no cancel,
-    // no claim) and leave any existing orders exactly as they are. Once bazaar
-    // flips are turned on and a flip actually comes in, the order-filled path
-    // will trigger management from there.
-    let cancel_open = enable_bazaar_flips.load(Ordering::Relaxed);
-    let orders_cancelled = if cancel_open {
+    // Skipped ENTIRELY when bazaar flips are disabled.  Not just the destructive
+    // "clean slate" cancel — the collect-only pass is skipped too.  A user who
+    // turned the bazaar finder off is using those orders themselves (co-op
+    // buy/sell orders, other macros), and having the bot claim filled orders out
+    // from under them fills the inventory and stops AH flips.  With bazaar flips
+    // off the bot never touches the orders window on its own; only explicit
+    // user actions (web panel buttons) still manage orders.
+    let orders_cancelled = if enable_bazaar_flips.load(Ordering::Relaxed) {
         info!("[Startup] Step 2/4: Managing bazaar orders (startup: cancel + collect)...");
         await_queued_command(
             &queue,
             &bot_state,
-            CommandType::ManageOrders { cancel_open, target_item: None },
+            CommandType::ManageOrders { cancel_open: true, target_item: None },
             50,
         ).await;
         let cancelled = *manage_orders_cancelled.read();
         info!("[Startup] Step 2/4: Order management complete — {} order(s) cancelled", cancelled);
         cancelled
     } else {
-        info!("[Startup] Step 2/4: Skipped — bazaar flips disabled, not touching bazaar orders");
+        info!("[Startup] Step 2/4: Skipped — bazaar flips disabled (no cancel, no claim)");
         0
     };
 
