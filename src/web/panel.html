@@ -1610,7 +1610,7 @@ const CONFIG_SCHEMA = [
 
     // ── Auction House ──
     {key:'auction_duration_hours', group:'ah', type:'number', label:'Listing duration (hours)', min:1, max:48,
-     help:'How long the bot lists its own auctions for.'},
+      help:'How long the bot lists its own auctions for. On COFL accounts this is also pushed to COFL (/cofl set listhours), so its listings use the same duration.'},
     {key:'auction_listing_delay_ms', group:'ah', type:'number', label:'Delay between listings (ms)', min:500,
      help:'Too low and Hypixel kicks the bot for "Sending packets too fast!" during bulk listings.'},
     {key:'only_claim_own_auctions', group:'ah', type:'bool', label:'Only claim my own auctions',

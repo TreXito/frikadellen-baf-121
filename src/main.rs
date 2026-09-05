@@ -2392,6 +2392,7 @@ async fn main() -> Result<()> {
                     {
                         let ws = ws_client_for_events.clone();
                         let max_items = config_for_events.max_items_in_inventory;
+                        let list_hours = config_for_events.auction_duration_hours;
                         tokio::spawn(async move {
                             // Small delay to let the socket settle after startup commands
                             sleep(Duration::from_secs(2)).await;
@@ -2405,6 +2406,13 @@ async fn main() -> Result<()> {
                                 error!("[Startup] Failed to send /cofl set maxitemsininventory {}: {}", max_items, e);
                             } else {
                                 info!("[Startup] Sent /cofl set maxitemsininventory {}", max_items);
+                            }
+                            // Push the configured listing duration to COFL so its
+                            // own listings (createAuction) use it. No-op on a
+                            // finder socket (set_list_hours checks is_finder).
+                            sleep(Duration::from_secs(1)).await;
+                            if let Err(e) = ws.set_list_hours(list_hours).await {
+                                error!("[Startup] Failed to send /cofl set listhours {}: {}", list_hours, e);
                             }
                         });
                     }
