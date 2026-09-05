@@ -2047,6 +2047,12 @@ async fn main() -> Result<()> {
         let mut last_mention_ping: Option<std::time::Instant> = None;
         const VISITOR_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(60);
         const MENTION_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(10);
+        // Stacked-listing refusals: the finder/COFL keep re-instructing the same
+        // stacked slot, so chat gets one warning per item per 15 minutes while
+        // the bot log records every refusal.
+        let mut last_stacked_warn: std::collections::HashMap<String, std::time::Instant> =
+            std::collections::HashMap::new();
+        const STACKED_WARN_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(900);
         while let Some(event) = bot_client_clone.next_event().await {
             match event {
                 frikadellen_baf::bot::BotEvent::Login => {
@@ -2386,6 +2392,7 @@ async fn main() -> Result<()> {
                     {
                         let ws = ws_client_for_events.clone();
                         let max_items = config_for_events.max_items_in_inventory;
+                        let list_hours = config_for_events.auction_duration_hours;
                         tokio::spawn(async move {
                             // Small delay to let the socket settle after startup commands
                             sleep(Duration::from_secs(2)).await;
@@ -2399,6 +2406,13 @@ async fn main() -> Result<()> {
                                 error!("[Startup] Failed to send /cofl set maxitemsininventory {}: {}", max_items, e);
                             } else {
                                 info!("[Startup] Sent /cofl set maxitemsininventory {}", max_items);
+                            }
+                            // Push the configured listing duration to COFL so its
+                            // own listings (createAuction) use it. No-op on a
+                            // finder socket (set_list_hours checks is_finder).
+                            sleep(Duration::from_secs(1)).await;
+                            if let Err(e) = ws.set_list_hours(list_hours).await {
+                                error!("[Startup] Failed to send /cofl set listhours {}: {}", list_hours, e);
                             }
                         });
                     }
@@ -2866,6 +2880,21 @@ async fn main() -> Result<()> {
                                 &name, &item, starting_bid, purse, remaining_listings, &url,
                             ).await;
                         });
+                    }
+                }
+                frikadellen_baf::bot::BotEvent::AuctionRefusedStacked { item_name, count } => {
+                    let now = std::time::Instant::now();
+                    let due = !last_stacked_warn
+                        .get(&item_name)
+                        .is_some_and(|t| now.duration_since(*t) < STACKED_WARN_COOLDOWN);
+                    if due {
+                        last_stacked_warn.insert(item_name.clone(), now);
+                        let baf_msg = format!(
+                            "§f[§4BAF§f]: §eWon't list §f{}§e — {}x stacked in one slot, price is for 1. Unstack it.",
+                            item_name, count
+                        );
+                        print_mc_chat(&baf_msg);
+                        let _ = chat_tx_events.send(baf_msg);
                     }
                 }
                 frikadellen_baf::bot::BotEvent::BazaarOrderCollected { item_name, is_buy_order, claimed_amount } => {

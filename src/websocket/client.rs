@@ -673,6 +673,27 @@ impl CoflWebSocket {
         Ok(())
     }
 
+    /// Push the configured listing duration to Coflnet (`/cofl set listhours`)
+    /// so COFL-driven listings (`createAuction`) use it instead of whatever
+    /// duration the account had on the Coflnet side. No-op on a finder socket:
+    /// the finder path already lists with the config duration via the local AH
+    /// flow, and it does not speak the `set` protocol.
+    pub async fn set_list_hours(&self, hours: u64) -> Result<()> {
+        if self.is_finder {
+            debug!("[CoflSet] Skipping listhours {} — primary socket is the finder, not COFL", hours);
+            return Ok(());
+        }
+        let args = format!("listhours {}", hours);
+        let data_json = serde_json::to_string(&args).unwrap_or_default();
+        let message = serde_json::json!({
+            "type": "set",
+            "data": data_json
+        }).to_string();
+        self.send_message(&message).await?;
+        info!("[CoflSet] Sent /cofl set listhours {}", hours);
+        Ok(())
+    }
+
     /// Close the COFL WebSocket connection gracefully.
     pub async fn close(&self) -> Result<()> {
         let mut write = self.write.lock().await;

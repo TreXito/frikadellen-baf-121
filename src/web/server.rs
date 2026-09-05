@@ -1940,7 +1940,7 @@ async fn save_config(
     let enable_ah = s.enable_ah_flips.clone();
     let enable_bz = s.enable_bazaar_flips.clone();
     let toml_str = payload.config_toml;
-    match tokio::task::spawn_blocking(move || -> Result<(), String> {
+    match tokio::task::spawn_blocking(move || -> Result<(bool, u64), String> {
         // Parse the TOML to validate it first
         let mut config: crate::config::Config = toml::from_str(&toml_str)
             .map_err(|e| format!("Invalid config TOML: {}", e))?;
@@ -1949,7 +1949,9 @@ async fn save_config(
         // before sending to the client, so the incoming TOML never contains
         // them. Restore them from the current on-disk config so saving from the
         // web panel does not wipe the user's authenticated sessions.
+        let mut duration_changed = false;
         if let Ok(existing) = loader.load() {
+            duration_changed = existing.auction_duration_hours != config.auction_duration_hours;
             config.sessions = existing.sessions;
         }
         // Update in-memory toggle flags to match the saved config
@@ -1957,13 +1959,24 @@ async fn save_config(
         enable_bz.store(config.enable_bazaar_flips, Ordering::Relaxed);
         crate::auction_ownership::set_enabled(config.only_claim_own_auctions);
         // Save validated config
-        loader.save(&config).map_err(|e| format!("Failed to save config: {}", e))
+        loader.save(&config).map_err(|e| format!("Failed to save config: {}", e))?;
+        Ok((duration_changed, config.auction_duration_hours))
     }).await {
-        Ok(Ok(())) => {
+        Ok(Ok((duration_changed, list_hours))) => {
             info!("[WebGUI] Config saved via web panel");
             let msg = "[BAF Web] Config saved".to_string();
             print_mc_chat(&msg);
             let _ = s.chat_tx.send(msg);
+            if duration_changed {
+                // Push the new listing duration to COFL so its own listings
+                // pick it up without a restart (no-op on a finder socket).
+                let ws = s.ws_client.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = ws.set_list_hours(list_hours).await {
+                        warn!("[WebGUI] Failed to push listhours {list_hours} to COFL: {e}");
+                    }
+                });
+            }
             StatusCode::OK.into_response()
         }
         Ok(Err(msg)) => {
@@ -2057,7 +2070,7 @@ async fn save_config_json(
     let enable_ah = s.enable_ah_flips.clone();
     let enable_bz = s.enable_bazaar_flips.clone();
     let changed: Vec<String> = patch.keys().cloned().collect();
-    match tokio::task::spawn_blocking(move || -> Result<Option<String>, String> {
+    match tokio::task::spawn_blocking(move || -> Result<(Option<String>, bool, u64), String> {
         let existing = loader.load().map_err(|e| format!("Failed to load config: {e}"))?;
         let mut config = merge_config_patch(&existing, &patch)?;
         reject_empty_panel_password(&config)?;
@@ -2065,19 +2078,30 @@ async fn save_config_json(
         // panel never wipes the user's authenticated COFL sessions.
         config.sessions = existing.sessions;
         config.normalize_do_not_relist_ids();
+        let duration_changed = existing.auction_duration_hours != config.auction_duration_hours;
         enable_ah.store(config.enable_ah_flips, Ordering::Relaxed);
         enable_bz.store(config.enable_bazaar_flips, Ordering::Relaxed);
         crate::auction_ownership::set_enabled(config.only_claim_own_auctions);
         loader.save(&config).map_err(|e| format!("Failed to save config: {e}"))?;
-        Ok(config.web_gui_password.clone())
+        Ok((config.web_gui_password.clone(), duration_changed, config.auction_duration_hours))
     })
     .await
     {
-        Ok(Ok(password)) => {
+        Ok(Ok((password, duration_changed, list_hours))) => {
             // Without this the new password only took effect on the next
             // restart, while the panel said it had saved.
             s.set_panel_password(password);
             info!("[WebGUI] Config updated ({} field(s): {})", changed.len(), changed.join(", "));
+            if duration_changed {
+                // Push the new listing duration to COFL so its own listings
+                // pick it up without a restart (no-op on a finder socket).
+                let ws = s.ws_client.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = ws.set_list_hours(list_hours).await {
+                        warn!("[WebGUI] Failed to push listhours {list_hours} to COFL: {e}");
+                    }
+                });
+            }
             (StatusCode::OK, format!("Saved {} setting(s)", changed.len())).into_response()
         }
         Ok(Err(msg)) => {
