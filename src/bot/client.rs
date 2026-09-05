@@ -501,6 +501,12 @@ pub enum BotEvent {
         item_name: String,
         starting_bid: u64,
     },
+    /// Listing refused because the resolved slot holds more than one copy while
+    /// the listing price is a per-unit price (see `refuse_stacked_listing`).
+    AuctionRefusedStacked {
+        item_name: String,
+        count: u32,
+    },
     /// Reconciliation snapshot: the set of orders visible in the in-game
     /// Bazaar Orders window.  Each entry is (item_name, is_buy_order, amount, price_per_unit).
     /// The tracker should remove any orders not in this list.
@@ -5262,6 +5268,10 @@ async fn handle_window_interaction(
                         let target_slot = target_slot
                             .filter(|&i| i >= player_start && i < slots.len() && !slots[i].is_empty());
                         if let Some(i) = target_slot {
+                            if slots[i].count() > 1 {
+                                refuse_stacked_listing(bot, state, window_id, &item_name, slots[i].count().max(0) as u32);
+                                return;
+                            }
                             info!("[Auction] Co-op AH: clicking item at slot {}", i);
                             let item_to_carry = slots[i].clone();
                             tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
@@ -5317,6 +5327,10 @@ async fn handle_window_interaction(
                             .filter(|&i| i >= player_start && i < slots.len() && !slots[i].is_empty())
                             .or_else(|| find_inventory_slot_by_name(&slots, player_start, &item_name));
                         if let Some(i) = target_slot {
+                            if slots[i].count() > 1 {
+                                refuse_stacked_listing(bot, state, window_id, &item_name, slots[i].count().max(0) as u32);
+                                return;
+                            }
                             info!("[Auction] ClickCreate→SelectBIN: clicking item at slot {}", i);
                             let item_to_carry = slots[i].clone();
                             tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
@@ -5376,6 +5390,10 @@ async fn handle_window_interaction(
                             .filter(|&i| i >= player_start && i < slots.len() && !slots[i].is_empty())
                             .or_else(|| find_inventory_slot_by_name(&slots, player_start, &item_name));
                         if let Some(i) = target_slot {
+                            if slots[i].count() > 1 {
+                                refuse_stacked_listing(bot, state, window_id, &item_name, slots[i].count().max(0) as u32);
+                                return;
+                            }
                             info!("[Auction] Clicking item at slot {}", i);
                             let item_to_carry = slots[i].clone();
                             tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
@@ -7744,6 +7762,34 @@ async fn close_window_and_reopen_bz(
         tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
         send_chat_command(bot, "/bz");
     }
+}
+
+/// Refuse to list a slot whose stack count is greater than one: warn, emit an
+/// event for the chat/panel layer, close the window and go idle.
+///
+/// Every listing price this bot uses (finder `listAt`, COFL `createAuction`)
+/// is a PER-UNIT price, while Hypixel charges the full ask for the WHOLE
+/// placed stack. Listing a count-N slot at the unit price sells N copies for
+/// the price of one (user report: two drills sold for a single drill's price,
+/// -60M). The item stays in the inventory; the operator must unstack it
+/// before the next listing attempt succeeds.
+fn refuse_stacked_listing(
+    bot: &Client,
+    state: &BotClientState,
+    window_id: u8,
+    item_name: &str,
+    count: u32,
+) {
+    warn!(
+        "[Auction] Refusing to list \"{}\" — slot holds {}x but the listing price is for 1; unstack to list",
+        item_name, count
+    );
+    let _ = state.event_tx.send(BotEvent::AuctionRefusedStacked {
+        item_name: item_name.to_string(),
+        count,
+    });
+    send_raw_close(bot, window_id, &state.handlers);
+    *state.bot_state.write() = BotState::Idle;
 }
 
 /// If the auction item preview slot (slot 13) in "Create BIN Auction" is already

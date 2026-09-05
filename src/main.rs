@@ -2047,6 +2047,12 @@ async fn main() -> Result<()> {
         let mut last_mention_ping: Option<std::time::Instant> = None;
         const VISITOR_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(60);
         const MENTION_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(10);
+        // Stacked-listing refusals: the finder/COFL keep re-instructing the same
+        // stacked slot, so chat gets one warning per item per 15 minutes while
+        // the bot log records every refusal.
+        let mut last_stacked_warn: std::collections::HashMap<String, std::time::Instant> =
+            std::collections::HashMap::new();
+        const STACKED_WARN_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(900);
         while let Some(event) = bot_client_clone.next_event().await {
             match event {
                 frikadellen_baf::bot::BotEvent::Login => {
@@ -2866,6 +2872,21 @@ async fn main() -> Result<()> {
                                 &name, &item, starting_bid, purse, remaining_listings, &url,
                             ).await;
                         });
+                    }
+                }
+                frikadellen_baf::bot::BotEvent::AuctionRefusedStacked { item_name, count } => {
+                    let now = std::time::Instant::now();
+                    let due = !last_stacked_warn
+                        .get(&item_name)
+                        .is_some_and(|t| now.duration_since(*t) < STACKED_WARN_COOLDOWN);
+                    if due {
+                        last_stacked_warn.insert(item_name.clone(), now);
+                        let baf_msg = format!(
+                            "§f[§4BAF§f]: §eWon't list §f{}§e — {}x stacked in one slot, price is for 1. Unstack it.",
+                            item_name, count
+                        );
+                        print_mc_chat(&baf_msg);
+                        let _ = chat_tx_events.send(baf_msg);
                     }
                 }
                 frikadellen_baf::bot::BotEvent::BazaarOrderCollected { item_name, is_buy_order, claimed_amount } => {
