@@ -922,6 +922,60 @@ fn pending_rest_break_secs(ign: &str) -> Option<u64> {
     (until > now).then(|| until - now)
 }
 
+/// Shared rest-break teardown: pause flip intake and the command queue, persist
+/// profit / flip tracker / session time so all three survive the restart, write
+/// the break-until marker and restart the process. The fresh process waits out
+/// the remaining break AFTER its web panel is up (see the "wait out the
+/// remaining rest break" block in main) and then reconnects. Used by BOTH the
+/// automatic humanization scheduler and the web panel's break-on-demand button.
+///
+/// Never returns: the process is replaced by `restart_process`.
+#[allow(clippy::too_many_arguments)]
+async fn take_rest_break_and_restart(
+    ign: &str,
+    break_secs: u64,
+    macro_paused: &AtomicBool,
+    flip_intake_paused: &AtomicBool,
+    command_queue: &frikadellen_baf::state::CommandQueue,
+    profit_tracker: &frikadellen_baf::profit::ProfitTracker,
+    profit_path: &std::path::Path,
+    flip_tracker: &FlipTrackerMap,
+    flip_tracker_path: &std::path::Path,
+    session_times_path: &std::path::Path,
+    total_secs: u64,
+) -> ! {
+    // A rest break must leave the account genuinely offline for the whole
+    // duration. Dropping the connection in-process and sleeping proved
+    // unreliable — the ECS client / AFK handler / reconnect loop could
+    // bring the bot back and leave it idling in the lobby (never actually
+    // "resting"). Instead we persist a break-until marker and restart NOW:
+    // the fresh process waits out the remaining break offline, with the web
+    // panel still up, before it reconnects.
+    flip_intake_paused.store(true, std::sync::atomic::Ordering::Relaxed);
+    macro_paused.store(true, std::sync::atomic::Ordering::Relaxed);
+    command_queue.clear();
+
+    // Save profit + session time so both survive the restart/break. Session
+    // time is saved right before restart so the gap is near-zero.
+    save_profit_stats(profit_path, ign, profit_tracker);
+    // Items bought before the break keep selling while we are offline
+    // (the auctions stay up), so their purchase baselines have to cross
+    // the restart or the sold webhook loses time-to-sell and ROI.
+    save_flip_tracker(flip_tracker_path, ign, flip_tracker);
+    save_session_time(session_times_path, ign, total_secs);
+
+    // Persist the break deadline, then restart. The next process start stays
+    // offline until this time and sends the "break over" webhook.
+    let until = unix_now() + break_secs;
+    write_rest_break_marker(ign, until);
+    info!(
+        "[Humanization] Rest break ({:.1}m) — saved session {}s, restarting offline until break ends",
+        break_secs as f64 / 60.0, total_secs
+    );
+    restart_process()
+}
+
+
 /// True when a rest-break marker exists for this account, i.e. the previous
 /// process exited to take a humanization break rather than being stopped by the
 /// user. Unlike `pending_rest_break_secs` this ignores whether the break window
@@ -994,6 +1048,11 @@ async fn main() -> Result<()> {
     // Load or create configuration
     let config_loader = Arc::new(ConfigLoader::new());
     let mut config = config_loader.load()?;
+
+    // Parse and store the SOCKS5 proxy (if `proxy_enabled`) for every game-
+    // adjacent connection: Minecraft + Mojang session auth + Hypixel/Mojang
+    // HTTP. Must happen before anything connects.
+    frikadellen_baf::utils::proxy::init(&config);
 
     // A config that already has an ingame name is an existing install — never
     // re-run first-run onboarding prompts (e.g. auto-cookie) on it, even when a
@@ -1166,22 +1225,14 @@ async fn main() -> Result<()> {
             ingame_name, previous_session_secs, previous_session_secs as f64 / 3600.0);
     }
 
-    // ── Honor a pending humanization rest break ─────────────────────────────
-    // A rest break restarts the process with a break-until marker; here, on the
-    // fresh start, we wait out the remaining break BEFORE connecting to Hypixel
-    // or COFL so the account is genuinely offline for the whole duration (rather
-    // than lingering in-process where it could drift back into the lobby).
-    if let Some(remaining) = pending_rest_break_secs(&ingame_name) {
-        info!(
-            "[Humanization] Resuming rest break — staying offline for {:.1}m before connecting",
-            remaining as f64 / 60.0
-        );
-        tokio::time::sleep(Duration::from_secs(remaining)).await;
-        info!("[Humanization] Rest break over — connecting");
-        if let Some(url) = config.active_webhook_url() {
-            frikadellen_baf::webhook::send_webhook_rest_break_end(&ingame_name, url).await;
-        }
-    }
+    // ── Pending humanization rest break ─────────────────────────────────────
+    // The actual WAIT happens further down, right after the web control panel
+    // has started (search for "wait out the remaining rest break"). The panel
+    // must stay reachable for the whole break: the break is a full process
+    // restart, and a panel that dies for hours with the bot is exactly what it
+    // exists to prevent. Here we only read how long is left (before deleting
+    // the marker) and clear the marker.
+    let pending_break_secs = pending_rest_break_secs(&ingame_name);
     clear_rest_break_marker();
 
     info!("Configuration loaded for player: {} (account {}/{})", ingame_name, current_account_index + 1, ingame_names.len());
@@ -1203,9 +1254,8 @@ async fn main() -> Result<()> {
     #[cfg(target_os = "linux")]
     check_ufw_port(config.web_gui_port);
 
-    if config.proxy_enabled {
-        info!("Proxy: ENABLED — address: {:?}", config.proxy_address);
-    }
+    // Proxy state was parsed and logged by `utils::proxy::init` right after
+    // the config load.
 
     // Initialize command queue
     let command_queue = CommandQueue::new();
@@ -1236,6 +1286,12 @@ async fn main() -> Result<()> {
     // Flip-intake diagnostics — records why incoming flips are dropped so the
     // panel and `/ping` can answer "why am I not getting flips?".
     let flip_diag = Arc::new(frikadellen_baf::state::FlipDiagnostics::new());
+
+    // Break-on-demand requests from the web panel: rest-break duration in
+    // minutes (0 = pick a random length from the humanization config range).
+    // Consumed by the always-on break executor spawned near the humanization
+    // scheduler, so an on-demand break works even with humanization disabled.
+    let (rest_break_tx, mut rest_break_rx) = tokio::sync::mpsc::unbounded_channel::<u64>();
 
     // Broadcast channel for chat messages → web panel clients.
     let (chat_tx, _chat_rx) = broadcast::channel::<String>(256);
@@ -1555,24 +1611,6 @@ async fn main() -> Result<()> {
         agg_rx
     };
 
-    // Send "initialized" webhook notification
-    if let Some(webhook_url) = config.active_webhook_url() {
-        let url = webhook_url.to_string();
-        let name = ingame_name.clone();
-        let ah = config.enable_ah_flips;
-        let bz = config.enable_bazaar_flips;
-        // Connection ID and premium may not be available yet at startup (COFL sends them shortly
-        // after WS connect), so we delay 3s to give COFL time to send those messages first.
-        let conn_id_init = cofl_connection_id.clone();
-        let premium_init = cofl_premium.clone();
-        tokio::spawn(async move {
-            tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-            let conn_id = conn_id_init.lock().ok().and_then(|g| g.clone());
-            let premium = premium_init.lock().ok().and_then(|g| g.clone());
-            frikadellen_baf::webhook::send_webhook_initialized(&name, ah, bz, conn_id.as_deref(), premium.as_ref().map(|(t, e)| (t.as_str(), e.as_str())), &url).await;
-        });
-    }
-
     // When multi-account is enabled, request the COFL licenses list at startup
     // searching by the current account's IGN so we get its global license index.
     // Delay slightly to let the WS authenticate first.
@@ -1857,10 +1895,64 @@ async fn main() -> Result<()> {
             bazaar_tracker: bazaar_tracker.clone(),
             config_loader: config_loader.clone(),
             flip_diag: flip_diag.clone(),
+            rest_break_tx: rest_break_tx.clone(),
         };
         let web_port = config.web_gui_port;
         tokio::spawn(async move {
             frikadellen_baf::web::start_web_server(web_state, web_port).await;
+        });
+    }
+
+    // ── Wait out the remaining rest break ───────────────────────────────────
+    // A rest break restarts the process with a break-until marker; on this
+    // fresh start we wait out the remaining break BEFORE connecting to Hypixel
+    // so the account is genuinely offline for the whole duration (rather than
+    // lingering in-process where it could drift back into the lobby). The wait
+    // sits AFTER the web panel startup so the panel stays reachable for the
+    // whole break. The flip websocket may be up during the wait, but nothing
+    // consumes its events yet — the backlog is drained below so no stale flip
+    // from before the break is ever acted on.
+    if let Some(remaining) = pending_break_secs {
+        info!(
+            "[Humanization] Resuming rest break — staying offline for {:.1}m before connecting",
+            remaining as f64 / 60.0
+        );
+        tokio::time::sleep(Duration::from_secs(remaining)).await;
+        info!("[Humanization] Rest break over — connecting");
+        if let Some(url) = config.active_webhook_url() {
+            frikadellen_baf::webhook::send_webhook_rest_break_end(&ingame_name, url).await;
+        }
+    }
+
+    // Drop flips that piled up while the process was offline for a rest break.
+    // Without this, hours of stale flips would sit in the unbounded event
+    // queue and be evaluated the moment the event loop starts.
+    if pending_break_secs.is_some() {
+        let mut stale = 0usize;
+        while ws_rx.try_recv().is_ok() {
+            stale += 1;
+        }
+        if stale > 0 {
+            info!("[Humanization] Discarded {} flips that arrived during the rest break", stale);
+        }
+    }
+
+    // Send "initialized" webhook notification (after any rest-break wait: the
+    // bot only counts as initialized once it is actually coming up).
+    if let Some(webhook_url) = config.active_webhook_url() {
+        let url = webhook_url.to_string();
+        let name = ingame_name.clone();
+        let ah = config.enable_ah_flips;
+        let bz = config.enable_bazaar_flips;
+        // Connection ID and premium may not be available yet at startup (COFL sends them shortly
+        // after WS connect), so we delay 3s to give COFL time to send those messages first.
+        let conn_id_init = cofl_connection_id.clone();
+        let premium_init = cofl_premium.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+            let conn_id = conn_id_init.lock().ok().and_then(|g| g.clone());
+            let premium = premium_init.lock().ok().and_then(|g| g.clone());
+            frikadellen_baf::webhook::send_webhook_initialized(&name, ah, bz, conn_id.as_deref(), premium.as_ref().map(|(t, e)| (t.as_str(), e.as_str())), &url).await;
         });
     }
 
@@ -3221,6 +3313,13 @@ async fn main() -> Result<()> {
                     }
                 }
                 CoflEvent::AuctionFlip(flip) => {
+                    // Finder flip feed: EVERY flip the private finder finds is
+                    // queued for the feed webhook (opt-in via config), bought
+                    // or not, before any gating. COFL flips never go there.
+                    if flip.finder.as_deref() == Some("BAF_FINDER") {
+                        frikadellen_baf::webhook::note_found_flip(&flip);
+                    }
+
                     // Skip if AH flips are disabled. This gate used to `continue`
                     // with no log at all, so a bot with AH flips toggled off
                     // silently dropped every flip and looked perfectly healthy.
@@ -5701,6 +5800,14 @@ async fn main() -> Result<()> {
         );
     }
 
+    // ── Finder flip-feed webhook flusher ──────────────────────────
+    // Opt-in: when `finder_flip_webhook_url` is set, EVERY flip the private
+    // finder finds is posted there in batches (bought or not, before any
+    // gating). Empty = feature off, nothing is queued or posted.
+    if let Some(url) = config.active_finder_flip_webhook_url() {
+        frikadellen_baf::webhook::spawn_found_flip_flusher(url.to_string());
+    }
+
     // ── Human-like rest breaks ───────────────────────────────────
     // When enabled, periodically disconnect from the server for a randomized
     // duration, then restart the process to reconnect.
@@ -5787,37 +5894,89 @@ async fn main() -> Result<()> {
             print_mc_chat(&baf_msg);
             let _ = chat_tx_human.send(baf_msg);
 
-            // A rest break must leave the account genuinely offline for the whole
-            // duration. Dropping the connection in-process and sleeping proved
-            // unreliable — the ECS client / AFK handler / reconnect loop could
-            // bring the bot back and leave it idling in the lobby (never actually
-            // "resting"). Instead we persist a break-until marker and restart NOW:
-            // the fresh process waits out the remaining break BEFORE connecting to
-            // Hypixel or COFL (see pending_rest_break_secs at startup), so nothing
-            // is connected for the entire break.
-            flip_intake_paused_human.store(true, std::sync::atomic::Ordering::Relaxed);
-            macro_paused_human.store(true, std::sync::atomic::Ordering::Relaxed);
-            command_queue_human.clear();
-
-            // Save profit + session time so both survive the restart/break. Session
-            // time is saved right before restart so the gap is near-zero.
-            save_profit_stats(&profit_path_human, &ign_human, &profit_tracker_human);
-            // Items bought before the break keep selling while we are offline
-            // (the auctions stay up), so their purchase baselines have to cross
-            // the restart or the sold webhook loses time-to-sell and ROI.
-            save_flip_tracker(&flip_tracker_path_human, &ign_human, &flip_tracker_human);
             let total_secs = prev_secs_human + started_human.elapsed().as_secs();
-            save_session_time(&session_times_path_human, &ign_human, total_secs);
+            take_rest_break_and_restart(
+                &ign_human,
+                break_secs,
+                &macro_paused_human,
+                &flip_intake_paused_human,
+                &command_queue_human,
+                &profit_tracker_human,
+                &profit_path_human,
+                &flip_tracker_human,
+                &flip_tracker_path_human,
+                &session_times_path_human,
+                total_secs,
+            )
+            .await;
+        });
+    }
 
-            // Persist the break deadline, then restart. The next process start stays
-            // offline until this time and sends the "break over" webhook.
-            let until = unix_now() + break_secs;
-            write_rest_break_marker(&ign_human, until);
-            info!(
-                "[Humanization] Rest break ({:.1}m) — saved session {}s, restarting offline until break ends",
-                break_secs as f64 / 60.0, total_secs
-            );
-            restart_process();
+    // ── Break on demand (web panel button) ──────────────────────────────────
+    // Always-on executor for break requests from the panel's Rest Break
+    // button, so a manual break works even with scheduled humanization
+    // breaks disabled. `minutes == 0` picks a random length from the
+    // humanization config range. Unlike the scheduler it does NOT defer
+    // while the macro is paused: an explicit request starts the break now.
+    {
+        let chat_tx_break = chat_tx.clone();
+        let ign_break = ingame_name.clone();
+        let webhook_url_break = config.active_webhook_url().map(|s| s.to_string());
+        let session_times_path_break = session_times_path.clone();
+        let prev_secs_break = previous_session_secs;
+        let started_break = std::time::Instant::now();
+        let macro_paused_break = macro_paused.clone();
+        let flip_intake_paused_break = flip_intake_paused.clone();
+        let command_queue_break = command_queue.clone();
+        let profit_tracker_break = profit_tracker.clone();
+        let profit_path_break = profit_path.clone();
+        let flip_tracker_break = flip_tracker.clone();
+        let flip_tracker_path_break = flip_tracker_path.clone();
+        let min_break_demand = config.humanization_min_break_minutes.max(1);
+        let max_break_demand = config.humanization_max_break_minutes.max(min_break_demand + 1);
+        tokio::spawn(async move {
+            use rand::Rng;
+            while let Some(minutes) = rest_break_rx.recv().await {
+                let break_secs = if minutes > 0 {
+                    minutes.saturating_mul(60)
+                } else {
+                    let mut rng = rand::rng();
+                    rng.random_range(min_break_demand * 60..=max_break_demand * 60)
+                };
+                info!(
+                    "[Humanization] Rest break requested from the web panel ({:.1}m)",
+                    break_secs as f64 / 60.0
+                );
+                if let Some(ref url) = webhook_url_break {
+                    frikadellen_baf::webhook::send_webhook_rest_break_start(
+                        &ign_break,
+                        break_secs,
+                        url,
+                    )
+                    .await;
+                }
+                let baf_msg = format!(
+                    "§f[§4BAF§f]: §e😴 Rest break from the panel ({:.0}m). Disconnecting...",
+                    break_secs as f64 / 60.0
+                );
+                print_mc_chat(&baf_msg);
+                let _ = chat_tx_break.send(baf_msg);
+                let total_secs = prev_secs_break + started_break.elapsed().as_secs();
+                take_rest_break_and_restart(
+                    &ign_break,
+                    break_secs,
+                    &macro_paused_break,
+                    &flip_intake_paused_break,
+                    &command_queue_break,
+                    &profit_tracker_break,
+                    &profit_path_break,
+                    &flip_tracker_break,
+                    &flip_tracker_path_break,
+                    &session_times_path_break,
+                    total_secs,
+                )
+                .await;
+            }
         });
     }
 

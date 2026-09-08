@@ -391,7 +391,10 @@ pub async fn refresh_remote(ingame_name: &str, hypixel_api_key: Option<&str>) ->
     if ingame_name.is_empty() {
         return false;
     }
-    let Ok(client) = reqwest::Client::builder().timeout(Duration::from_secs(10)).build() else {
+    let client = crate::utils::proxy::apply_to_client_builder(
+        reqwest::Client::builder().timeout(Duration::from_secs(10)),
+    );
+    let Ok(client) = client.build() else {
         return false;
     };
     let Some(uuid) = fetch_player_uuid(&client, ingame_name).await else {

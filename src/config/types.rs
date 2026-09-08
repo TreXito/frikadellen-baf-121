@@ -243,7 +243,11 @@ pub struct Config {
     pub enable_console_input: bool,
 
     // ═══════════════════════════ Proxy ═════════════════════════════
-    /// Enable proxy for both the Minecraft and WebSocket connections.
+    /// Route the game-adjacent connections through a SOCKS5 proxy: the
+    /// Minecraft connection, the Mojang session server and the direct
+    /// Mojang/Hypixel HTTP lookups. The flip websocket, Discord webhooks and
+    /// the web panel stay direct — they never reveal the game IP and the
+    /// proxy would only add latency to flips.
     #[serde(default)]
     pub proxy_enabled: bool,
 
@@ -304,6 +308,15 @@ pub struct Config {
     /// `webhook_url` for all notifications.
     #[serde(default, with = "opt_string_as_empty")]
     pub bazaar_webhook_url: Option<String>,
+
+    /// Separate Discord webhook URL that receives the finder's flip FEED: every
+    /// flip the private finder finds is posted here as a compact embed, bought
+    /// or not, so the feed can be watched in its own channel. Strictly opt-in:
+    /// leave empty to post nothing (the main `webhook_url` is never flooded
+    /// with the raw feed). Buy/sell notifications are unaffected and keep
+    /// going to `webhook_url`.
+    #[serde(default, with = "opt_string_as_empty")]
+    pub finder_flip_webhook_url: Option<String>,
 
     /// Discord user ID for pinging on legendary/divine flips and bans.
     /// Leave empty to disable pings.
@@ -556,6 +569,7 @@ impl Default for Config {
             // Discord notifications
             webhook_url: None,
             bazaar_webhook_url: None,
+            finder_flip_webhook_url: None,
             discord_id: None,
             share_legendary_flips: true,
             notify_island_visitors: true,
@@ -731,6 +745,15 @@ impl Config {
             .as_deref()
             .filter(|u| !u.is_empty())
             .or_else(|| self.active_webhook_url())
+    }
+
+    /// Returns the finder flip-feed webhook URL only if it is non-empty. Unlike
+    /// the bazaar webhook this does NOT fall back to `webhook_url`: the raw
+    /// found-flip feed must never flood the personal notification webhook.
+    pub fn active_finder_flip_webhook_url(&self) -> Option<&str> {
+        self.finder_flip_webhook_url
+            .as_deref()
+            .filter(|u| !u.is_empty())
     }
 
     /// Returns the Discord user ID only if it is non-empty.
@@ -1166,6 +1189,38 @@ bazaar_webhook_url = "https://discord.com/api/webhooks/bazaar""#
 bazaar_webhook_url = """#
         ).expect("config should parse");
         assert_eq!(config.active_bazaar_webhook_url(), Some("https://discord.com/api/webhooks/main"));
+    }
+
+    #[test]
+    fn finder_flip_webhook_url_defaults_to_none() {
+        let config: Config = toml::from_str("").expect("config should parse");
+        assert_eq!(config.finder_flip_webhook_url, None);
+        assert_eq!(config.active_finder_flip_webhook_url(), None);
+    }
+
+    #[test]
+    fn finder_flip_webhook_url_is_strictly_opt_in() {
+        // The raw found-flip feed must never fall back to the personal
+        // webhook: unset (or empty) means the feed is simply not posted.
+        let config: Config = toml::from_str(r#"webhook_url = "https://discord.com/api/webhooks/main""#)
+            .expect("config should parse");
+        assert_eq!(config.active_finder_flip_webhook_url(), None);
+        let config: Config = toml::from_str(
+            r#"webhook_url = "https://discord.com/api/webhooks/main"
+finder_flip_webhook_url = """#
+        ).expect("config should parse");
+        assert_eq!(config.active_finder_flip_webhook_url(), None);
+    }
+
+    #[test]
+    fn finder_flip_webhook_url_set_is_active() {
+        let config: Config = toml::from_str(
+            r#"webhook_url = "https://discord.com/api/webhooks/main"
+finder_flip_webhook_url = "https://discord.com/api/webhooks/finder""#
+        ).expect("config should parse");
+        assert_eq!(config.active_finder_flip_webhook_url(), Some("https://discord.com/api/webhooks/finder"));
+        // Regular webhook is unchanged
+        assert_eq!(config.active_webhook_url(), Some("https://discord.com/api/webhooks/main"));
     }
 
 }

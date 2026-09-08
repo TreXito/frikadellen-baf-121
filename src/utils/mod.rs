@@ -4,6 +4,7 @@
 
 pub mod string;
 pub mod process;
+pub mod proxy;
 
 pub use string::*;
 pub use process::*;

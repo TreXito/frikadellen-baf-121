@@ -90,6 +90,10 @@ pub struct WebSharedState {
     pub config_loader: Arc<crate::config::ConfigLoader>,
     /// Flip-intake diagnostics — surfaces why incoming flips are being dropped.
     pub flip_diag: Arc<crate::state::FlipDiagnostics>,
+    /// Break-on-demand requests from the panel: rest-break length in minutes
+    /// (0 = random within the humanization config range). Consumed by the
+    /// break executor in main.rs, which pauses, saves state and restarts.
+    pub rest_break_tx: tokio::sync::mpsc::UnboundedSender<u64>,
 }
 
 // ── JSON payloads ────────────────────────────────────────────
@@ -762,6 +766,7 @@ pub async fn start_web_server(state: WebSharedState, port: u16) {
         .route("/api/disconnect", axum::routing::post(disconnect_session))
         .route("/api/connect", axum::routing::post(connect_session))
         .route("/api/restart", axum::routing::post(restart_session))
+        .route("/api/rest_break", axum::routing::post(rest_break_now))
         .route("/api/update", axum::routing::post(update_session))
         .layer(axum::middleware::from_fn(move |req: Request, next: Next| {
             let s = auth_state.clone();
@@ -1583,6 +1588,52 @@ async fn restart_session(State(s): State<WebSharedState>) -> impl IntoResponse {
     (StatusCode::OK, "Restarting — process will restart")
 }
 
+/// Start a rest break NOW, on demand, from the panel. Runs the same sequence
+/// as the automatic humanization breaks: pause flip intake, persist profit /
+/// flip tracker / session time, write the break-until marker and restart the
+/// process offline until the break ends. The break executor in main.rs owns
+/// the sequence; this endpoint only queues the request so the HTTP response
+/// is flushed first. The web panel stays up for the whole break because the
+/// fresh process starts it before waiting the break out.
+#[derive(serde::Deserialize)]
+struct RestBreakRequest {
+    /// Break length in minutes. Omitted or 0 = random within the
+    /// humanization config range.
+    #[serde(default)]
+    minutes: Option<u64>,
+}
+
+async fn rest_break_now(
+    State(s): State<WebSharedState>,
+    Json(body): Json<RestBreakRequest>,
+) -> impl IntoResponse {
+    let minutes = body.minutes.unwrap_or(0);
+    if minutes > 0 && minutes > 7 * 24 * 60 {
+        return (
+            StatusCode::BAD_REQUEST,
+            "Break length is capped at 7 days".to_string(),
+        )
+            .into_response();
+    }
+    if s.rest_break_tx.send(minutes).is_err() {
+        error!("[WebGUI] Rest break executor is gone — cannot start break");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Break executor unavailable".to_string(),
+        )
+            .into_response();
+    }
+    let msg = match minutes {
+        0 => "Rest break starting (random length) — the bot disconnects, the panel stays up".to_string(),
+        m => format!(
+            "Rest break starting ({}m) — the bot disconnects, the panel stays up",
+            m
+        ),
+    };
+    info!("[WebGUI] {msg}");
+    (StatusCode::OK, msg).into_response()
+}
+
 /// Download the latest release (if newer) and restart into it — the same update
 /// the external loader performs, but triggered from the web GUI so the user
 /// never has to drop to a console. Returns 200 with a human-readable status:
@@ -1626,10 +1677,10 @@ async fn fetch_player_uuid(username: &str) -> Option<String> {
         "https://api.mojang.com/users/profiles/minecraft/{}",
         username
     );
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .ok()?;
+    let client = crate::utils::proxy::apply_to_client_builder(
+        reqwest::Client::builder().timeout(std::time::Duration::from_secs(5)),
+    );
+    let client = client.build().ok()?;
     let resp = client.get(&url).send().await.ok()?;
     if !resp.status().is_success() {
         return None;
@@ -1720,9 +1771,10 @@ async fn get_auctions(State(s): State<WebSharedState>) -> impl IntoResponse {
         }
     };
 
-    let client = match reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
+    let client = match crate::utils::proxy::apply_to_client_builder(
+        reqwest::Client::builder().timeout(std::time::Duration::from_secs(10)),
+    )
+    .build()
     {
         Ok(c) => c,
         Err(e) => {

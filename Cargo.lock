@@ -1659,6 +1659,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "socks5-impl",
  "thiserror 1.0.69",
  "tokio",
  "tokio-tungstenite 0.24.0",
