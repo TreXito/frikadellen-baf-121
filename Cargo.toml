@@ -31,7 +31,9 @@ native-tls = "0.2"
 futures = "0.3"
 
 # Networking
-reqwest = { version = "0.13", features = ["json", "blocking"] }
+reqwest = { version = "0.13", features = ["json", "blocking", "socks"] }
+# SOCKS5 client handshake, same crate azalea-protocol uses for `Connection::new_with_proxy`
+socks5-impl = { version = "0.8.1", features = ["client"] }
 
 # HMAC-SHA256 for signing relay notifications (keeps webhook URLs out of source)
 hmac = "0.12"

@@ -367,6 +367,7 @@ a{color:var(--accent2);text-decoration:none}
         </div>
         <div style="display:flex;gap:10px;margin-bottom:16px">
             <button class="btn btn-sm" style="background:var(--surface);color:var(--text);border:1px solid var(--border)" onclick="pingBot()">🏓 Ping</button>
+            <button class="btn btn-sm" style="background:var(--warn);color:#1a1a1a" onclick="restBreak()">😴 Rest Break</button>
             <button class="btn btn-sm" id="btn-disconnect" style="background:#e74c3c;color:#fff" onclick="toggleConnection()">🔌 Disconnect</button>
             <button class="btn btn-sm" style="background:#c0392b;color:#fff" onclick="killSession()">💀 Kill Session</button>
         </div>
@@ -786,6 +787,25 @@ async function toggleConnection() {
 async function killSession() {
     if (!confirm('Kill the bot session? The process will terminate immediately.')) return;
     await fetch('/api/kill_session', {method:'POST'});
+}
+
+async function restBreak() {
+    const input = prompt(
+        'Rest break length in minutes.\nLeave empty for a random length from the humanization config range.\nThe bot disconnects for the break; this panel stays up.',
+        ''
+    );
+    if (input === null) return;
+    const trimmed = input.trim();
+    let minutes = 0;
+    if (trimmed !== '') {
+        minutes = parseInt(trimmed, 10);
+        if (isNaN(minutes) || minutes < 1) { alert('Enter a number of minutes (or leave empty for random).'); return; }
+    }
+    try {
+        const r = await fetch('/api/rest_break', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({minutes})});
+        const text = await r.text();
+        if (r.ok) { alert(text); } else { alert('Rest break failed: ' + text); }
+    } catch(e) { alert('Rest break failed: ' + e); }
 }
 
 async function fetchInventory() {
@@ -1661,6 +1681,8 @@ const CONFIG_SCHEMA = [
      ph:'https://discord.com/api/webhooks/...'},
     {key:'bazaar_webhook_url', group:'notify', type:'text', label:'Bazaar webhook URL', wide:true, secret:true,
      help:'Optional. Falls back to the main webhook when empty.'},
+    {key:'finder_flip_webhook_url', group:'notify', type:'text', label:'Finder flip feed webhook', wide:true, secret:true,
+     help:'Optional. Every flip the finder finds is posted here as a compact embed, bought or not. Buy/sell notifications stay on the main webhook. Empty = off.'},
     {key:'discord_id', group:'notify', type:'text', label:'Discord user ID (for pings)', ph:'123456789012345678',
      help:'Who to ping on legendary flips and bans. Empty disables pings.'},
     {key:'share_legendary_flips', group:'notify', type:'bool', label:'Share legendary flips publicly',
@@ -1692,7 +1714,7 @@ const CONFIG_SCHEMA = [
 
     // ── Proxy ──
     {key:'proxy_enabled', group:'proxy', type:'bool', label:'Use a proxy',
-     help:'Applies to both the Minecraft and websocket connections.'},
+     help:'SOCKS5. Routes the Minecraft connection, Mojang session auth and the Hypixel/Mojang HTTP lookups through it. The flip websocket and Discord webhooks stay direct: they never see the game IP and the proxy would only add latency to flips.'},
     {key:'proxy_address', group:'proxy', type:'text', label:'Proxy address', ph:'host:port'},
     {key:'proxy_credentials', group:'proxy', type:'text', label:'Proxy credentials', ph:'username:password', secret:true,
      help:'Leave empty if the proxy needs no authentication.'},

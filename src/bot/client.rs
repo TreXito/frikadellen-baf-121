@@ -723,12 +723,23 @@ impl BotClient {
                         handler_state_clone.window_open_info.clone(),
                         handler_state_clone.slot_data_notify.clone(),
                     );
-                    let exit_result = ClientBuilder::new()
-                        .add_plugins(plugin)
-                        .set_handler(event_handler)
-                        .set_state(handler_state_clone.clone())
-                        .start(account.clone(), "mc.hypixel.net")
-                        .await;
+                    let exit_result = {
+                        let mut join_opts = azalea::JoinOpts::default();
+                        // Route the game connection AND the Mojang session
+                        // server through the configured SOCKS5 proxy. Without
+                        // this Hypixel (and Mojang) only ever see the default
+                        // interface's IP, which defeats per-IP separation.
+                        if let Some(proxy) = crate::utils::proxy::azalea_proxy() {
+                            info!("[Connect] Using SOCKS5 proxy {} for the Minecraft connection", proxy);
+                            join_opts = join_opts.proxy(proxy);
+                        }
+                        ClientBuilder::new()
+                            .add_plugins(plugin)
+                            .set_handler(event_handler)
+                            .set_state(handler_state_clone.clone())
+                            .start_with_opts(account.clone(), "mc.hypixel.net", join_opts)
+                            .await
+                    };
 
                     match exit_result {
                         AppExit::Success => info!("Bot client exited (disconnected)"),

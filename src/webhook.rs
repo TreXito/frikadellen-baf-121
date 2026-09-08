@@ -709,6 +709,80 @@ async fn post_bazaar_digest(webhook_url: &str, ingame_name: &str, d: &BazaarDige
     post_embed(webhook_url, payload).await;
 }
 
+// ── Finder flip feed ─────────────────────────────────────────
+// Every flip the private finder finds is queued here and flushed to the
+// dedicated `finder_flip_webhook_url` in batches: up to 10 embeds per Discord
+// message (the API cap), 2s between messages, tick every 10s. Strictly
+// opt-in: when the webhook is unset nothing is queued and no flusher runs,
+// and buy/sell notifications are completely unaffected.
+
+static FOUND_FLIP_QUEUE: Lazy<std::sync::Mutex<std::collections::VecDeque<serde_json::Value>>> =
+    Lazy::new(|| std::sync::Mutex::new(std::collections::VecDeque::new()));
+
+/// Queue one found flip for the finder flip-feed webhook. Cheap, lock-scoped,
+/// never awaited: safe to call from the websocket event loop for every flip.
+/// Caller decides the source (only the private finder's flips belong here).
+pub fn note_found_flip(flip: &crate::types::Flip) {
+    // § color codes do not render in Discord embeds.
+    let clean = crate::utils::remove_minecraft_colors(&flip.item_name);
+    let clean = clean.trim();
+    let title: String = clean.chars().take(120).collect::<String>();
+    let buy = flip.starting_bid.max(1) as f64;
+    let margin = flip
+        .profit_perc
+        .map(|p| format!("{:+.1}%", p))
+        .unwrap_or_else(|| format!("{:+.0}%", (flip.target as f64 / buy - 1.0) * 100.0));
+    let mut footer = "BAF flip feed".to_string();
+    if let Some(u) = flip.uuid.as_deref() {
+        let short: String = u.chars().take(8).collect();
+        footer.push_str(&format!(" • {}", short));
+    }
+    let embed = serde_json::json!({
+        "title": title,
+        "color": 0x3498db,
+        "fields": [
+            {"name": "💰 Buy", "value": format!("```fix\n{} coins\n```", format_number(flip.starting_bid as f64)), "inline": true},
+            {"name": "🎯 Target", "value": format!("```fix\n{} coins\n```", format_number(flip.target as f64)), "inline": true},
+            {"name": "📈 Margin", "value": format!("```fix\n{}\n```", margin), "inline": true},
+        ],
+        "footer": {"text": footer},
+        "timestamp": chrono::Utc::now().to_rfc3339(),
+    });
+    if let Ok(mut q) = FOUND_FLIP_QUEUE.lock() {
+        // Bound the queue so a dead webhook can't grow memory forever: at
+        // 10 embeds per message and a flush every 10s, 200 covers 3+ minutes
+        // of burst; older flips are the least interesting, drop them.
+        if q.len() >= 200 {
+            q.pop_front();
+        }
+        q.push_back(embed);
+    }
+}
+
+/// Spawn the finder flip-feed flusher. Every 10s, drain the queue in batches
+/// of up to 10 embeds per Discord message with a 2s gap between messages
+/// (well inside the webhook rate limit). Only call when the feed webhook is
+/// configured.
+pub fn spawn_found_flip_flusher(webhook_url: String) {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            loop {
+                let batch = match FOUND_FLIP_QUEUE.lock() {
+                    Ok(mut q) if !q.is_empty() => {
+                        let take = q.len().min(10);
+                        q.drain(..take).collect::<Vec<_>>()
+                    }
+                    _ => break,
+                };
+                let payload = serde_json::json!({ "embeds": batch });
+                post_embed(&webhook_url, payload).await;
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            }
+        }
+    });
+}
+
 /// Per-order bazaar embed. Superseded by the batched digest
 /// ([`digest_order_placed`] + [`spawn_bazaar_digest_flusher`]); retained for
 /// callers that want a single detailed embed.
