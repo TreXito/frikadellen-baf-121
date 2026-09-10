@@ -62,8 +62,12 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@nightly
+        # rustc builds after 2026-08-18 (incl. current stable) break azalea-core's
+        # FixedBitSet<const N> with E0284. Pin the last good nightly (the one that
+        # built release build-20260819) until upstream fixes it.
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: nightly-2026-08-18
           targets: ${{ matrix.target }}
 
       - name: Cache cargo registry

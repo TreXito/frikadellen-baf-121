@@ -11,7 +11,11 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      # rustc builds after 2026-08-18 (incl. current stable) break azalea-core's
+      # FixedBitSet<const N> with E0284. Pin the last good nightly until upstream fixes it.
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-08-18
       - uses: Swatinem/rust-cache@v2
       - name: cargo check
         run: cargo check --all-targets
