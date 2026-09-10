@@ -1,2 +1,7 @@
+# Pinned toolchain: rustc builds after this one fail to compile azalea-core
+# 0.16's FixedBitSet<const N: usize> with E0284 (rustc regression landed after
+# 2026-08-18, also present in stable). This is the exact nightly that produced
+# release build-20260819. Unpin once upstream fixes the const-generic inference.
 [toolchain]
-channel = "nightly"
+channel = "nightly-2026-08-19"
+components = ["rustfmt", "clippy"]

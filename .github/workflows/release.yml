@@ -67,7 +67,7 @@ jobs:
         # built release build-20260819) until upstream fixes it.
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: nightly-2026-08-18
+          toolchain: nightly-2026-08-19
           targets: ${{ matrix.target }}
 
       - name: Cache cargo registry
