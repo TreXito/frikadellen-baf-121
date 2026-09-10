@@ -1,4 +1,4 @@
-/// String utility functions
+//! String utility functions
 
 /// Items that cannot stack in Minecraft/Hypixel SkyBlock (max stack size = 1).
 /// When buying these items, the order amount must be capped to available

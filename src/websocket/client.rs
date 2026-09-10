@@ -275,7 +275,7 @@ impl CoflWebSocket {
                             break;
                         }
                         Err(e) => {
-                            backoff_secs = (backoff_secs * 2).max(5).min(60);
+                            backoff_secs = (backoff_secs * 2).clamp(5, 60);
                             error!(
                                 "[WS] Reconnection failed (retry in {}s): {}",
                                 backoff_secs, e
@@ -862,11 +862,7 @@ fn extract_license_tier(text: &str) -> String {
     if let Some(pos) = text.find(marker) {
         let after = &text[pos + marker.len()..];
         // Skip optional §m (strikethrough for expired)
-        let tier_start = if after.starts_with("\u{00a7}m") {
-            &after["\u{00a7}m".len()..]
-        } else {
-            after
-        };
+        let tier_start = after.strip_prefix("\u{00a7}m").unwrap_or(after);
         // Read tier name until space or §
         let tier: String = tier_start
             .chars()

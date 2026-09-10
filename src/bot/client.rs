@@ -881,7 +881,7 @@ impl BotClient {
         };
         // Sort entries by score descending (matches mineflayer sidebar order)
         let mut entries: Vec<(&String, &(String, u32))> = objective.iter().collect();
-        entries.sort_by(|a, b| b.1 .1.cmp(&a.1 .1));
+        entries.sort_by_key(|a| std::cmp::Reverse(a.1 .1));
         // Build a member -> (prefix+suffix) lookup from team data for proper display
         let teams = self.scoreboard_teams.read();
         let mut member_display: HashMap<String, String> = HashMap::new();
@@ -2017,11 +2017,11 @@ fn find_inventory_slot_by_name(
     let tokens: Vec<&str> = name_norm.split_whitespace().collect();
     // Phase 0: exact contains; 1: normalized contains; 2: all-tokens-present.
     for phase in 0..3u8 {
-        for i in inv_start..slots.len() {
-            if slots[i].is_empty() {
+        for (i, slot) in slots.iter().enumerate().skip(inv_start) {
+            if slot.is_empty() {
                 continue;
             }
-            let display = match get_item_display_name_from_slot(&slots[i]) {
+            let display = match get_item_display_name_from_slot(slot) {
                 Some(d) => d,
                 None => continue,
             };

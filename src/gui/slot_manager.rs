@@ -72,9 +72,9 @@ impl WindowKind {
         };
 
         match clean_title {
-            t if t == "BIN Auction View" => WindowKind::BinAuctionView,
-            t if t == "Confirm Purchase" => WindowKind::ConfirmPurchase,
-            t if t == "Auction View" => WindowKind::AuctionView,
+            "BIN Auction View" => WindowKind::BinAuctionView,
+            "Confirm Purchase" => WindowKind::ConfirmPurchase,
+            "Auction View" => WindowKind::AuctionView,
             t if t.starts_with("Bazaar") => WindowKind::Bazaar,
             t if t.contains("Manage") && t.contains("Orders") => WindowKind::ManageOrders,
             _ => WindowKind::Unknown(clean_title.to_string()),

@@ -282,8 +282,7 @@ impl BazaarOrderTracker {
             }
             let tracked = kept_counts.get(key).copied().unwrap_or(0);
             let needed = data_entries.len();
-            for idx in tracked..needed {
-                let (amount, price) = data_entries[idx];
+            for &(amount, price) in data_entries.iter().skip(tracked) {
                 // Use title case for the item name from the first matching ingame order
                 let display_name = ingame_orders
                     .iter()

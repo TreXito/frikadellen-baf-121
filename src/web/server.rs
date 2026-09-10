@@ -3245,9 +3245,11 @@ mod tests {
 
     #[test]
     fn config_patch_merges_only_the_given_fields() {
-        let mut base = crate::config::Config::default();
-        base.ingame_name = Some("Original".to_string());
-        base.bed_pre_click_ms = 30;
+        let base = crate::config::Config {
+            ingame_name: Some("Original".to_string()),
+            bed_pre_click_ms: 30,
+            ..crate::config::Config::default()
+        };
 
         let patch: serde_json::Map<String, serde_json::Value> =
             serde_json::from_str(r#"{"bed_pre_click_ms": 45}"#).unwrap();

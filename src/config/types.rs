@@ -1055,9 +1055,11 @@ mod tests {
     fn tls_paths_survive_a_config_round_trip() {
         // The loader re-saves on every load, so a field that serializes wrong is
         // a field the user loses on the next start.
-        let mut config = Config::default();
-        config.web_tls_cert_path = Some("/etc/le/fullchain.pem".to_string());
-        config.web_tls_key_path = Some("/etc/le/privkey.pem".to_string());
+        let config = Config {
+            web_tls_cert_path: Some("/etc/le/fullchain.pem".to_string()),
+            web_tls_key_path: Some("/etc/le/privkey.pem".to_string()),
+            ..Config::default()
+        };
         let toml = toml::to_string_pretty(&config).expect("serializes");
         let parsed: Config = toml::from_str(&toml).expect("parses back");
         assert_eq!(
