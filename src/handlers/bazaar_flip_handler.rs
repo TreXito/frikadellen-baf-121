@@ -1,5 +1,5 @@
 /// Bazaar flip handler
-/// 
+///
 /// Handles bazaar order placement recommendations from Coflnet:
 /// - Processes bazaar flip recommendations  
 /// - Navigates bazaar search → item detail → order creation
@@ -7,9 +7,8 @@
 /// - Clicks through confirmation windows
 /// - Handles buy/sell order types
 /// - Implements price failsafes and validation
-/// 
+///
 /// Preserves exact slot numbers, timing delays, and packet logic from TypeScript.
-
 use anyhow::{anyhow, Result};
 use parking_lot::RwLock;
 use std::sync::Arc;
@@ -39,7 +38,7 @@ const FIRST_SEARCH_RESULT_SLOT: usize = 11;
 
 /// Price failsafe thresholds
 #[allow(dead_code)]
-const PRICE_FAILSAFE_BUY_THRESHOLD: f64 = 0.9;  // Reject buy orders if sign price < 90% of order price
+const PRICE_FAILSAFE_BUY_THRESHOLD: f64 = 0.9; // Reject buy orders if sign price < 90% of order price
 #[allow(dead_code)]
 const PRICE_FAILSAFE_SELL_THRESHOLD: f64 = 1.1; // Reject sell orders if sign price > 110% of order price
 
@@ -105,7 +104,9 @@ impl BazaarFlipHandler {
         Self {
             config: Arc::new(RwLock::new(BazaarFlipConfig::default())),
             window_handler: WindowHandler::new(),
-            last_limit_warning_time: Arc::new(RwLock::new(Instant::now() - Duration::from_secs(120))),
+            last_limit_warning_time: Arc::new(RwLock::new(
+                Instant::now() - Duration::from_secs(120),
+            )),
         }
     }
 
@@ -114,7 +115,9 @@ impl BazaarFlipHandler {
         Self {
             config: Arc::new(RwLock::new(config)),
             window_handler: WindowHandler::new(),
-            last_limit_warning_time: Arc::new(RwLock::new(Instant::now() - Duration::from_secs(120))),
+            last_limit_warning_time: Arc::new(RwLock::new(
+                Instant::now() - Duration::from_secs(120),
+            )),
         }
     }
 
@@ -129,7 +132,7 @@ impl BazaarFlipHandler {
     }
 
     /// Parse bazaar flip recommendation from JSON
-    /// 
+    ///
     /// Handles structured JSON data from websocket:
     /// - { itemName: "Item", itemTag: "ITEM_ID", price: 1000, amount: 64, isSell: false }
     /// - { itemName: "Item", amount: 4, pricePerUnit: 265000, totalPrice: 1060000, isBuyOrder: true }
@@ -164,15 +167,16 @@ impl BazaarFlipHandler {
         debug!("Parsed amount: {}", amount);
 
         // Extract price per unit
-        let price_per_unit = if let Some(v) = data.get("pricePerUnit").or_else(|| data.get("unitPrice")) {
-            v.as_f64()
-                .ok_or_else(|| anyhow!("Invalid price in bazaar flip JSON"))?
-        } else if let Some(v) = data.get("price") {
-            v.as_f64()
-                .ok_or_else(|| anyhow!("Invalid price in bazaar flip JSON"))?
-        } else {
-            return Err(anyhow!("Missing price in bazaar flip JSON"));
-        };
+        let price_per_unit =
+            if let Some(v) = data.get("pricePerUnit").or_else(|| data.get("unitPrice")) {
+                v.as_f64()
+                    .ok_or_else(|| anyhow!("Invalid price in bazaar flip JSON"))?
+            } else if let Some(v) = data.get("price") {
+                v.as_f64()
+                    .ok_or_else(|| anyhow!("Invalid price in bazaar flip JSON"))?
+            } else {
+                return Err(anyhow!("Missing price in bazaar flip JSON"));
+            };
 
         debug!("Parsed price per unit: {}", price_per_unit);
 
@@ -188,9 +192,13 @@ impl BazaarFlipHandler {
         } else if let Some(v) = data.get("isSell") {
             !v.as_bool().unwrap_or(false)
         } else if let Some(v) = data.get("type") {
-            v.as_str().map(|s| s.to_lowercase() == "buy").unwrap_or(true)
+            v.as_str()
+                .map(|s| s.to_lowercase() == "buy")
+                .unwrap_or(true)
         } else if let Some(v) = data.get("orderType") {
-            v.as_str().map(|s| s.to_lowercase() == "buy").unwrap_or(true)
+            v.as_str()
+                .map(|s| s.to_lowercase() == "buy")
+                .unwrap_or(true)
         } else {
             true // Default to buy order
         };
@@ -218,7 +226,7 @@ impl BazaarFlipHandler {
     }
 
     /// Parse a bazaar flip recommendation message from Coflnet chat
-    /// 
+    ///
     /// Handles two formats:
     /// - Old: "[Coflnet]: Recommending an order of 4x Cindershade for 1.06M(1)"
     /// - New: "[Coflnet]: Recommending sell order: 2x Enchanted Coal Block at 30.1K per unit(1)"
@@ -243,9 +251,12 @@ impl BazaarFlipHandler {
             let re_order = regex::Regex::new(
                 r"(?i)Recommending\s+(?:sell|buy)\s+order:\s+(\d+)x\s+(.+?)\s+at\s+([\d.]+[KkMm]?)\s+per\s+unit"
             ).unwrap();
-            let order_match = re_order
-                .captures(&clean_message)
-                .ok_or_else(|| anyhow!("Failed to parse bazaar flip recommendation from chat message: {}", clean_message))?;
+            let order_match = re_order.captures(&clean_message).ok_or_else(|| {
+                anyhow!(
+                    "Failed to parse bazaar flip recommendation from chat message: {}",
+                    clean_message
+                )
+            })?;
 
             let amount = order_match[1].parse::<u64>()?;
             let item_name = order_match[2].trim().to_string();
@@ -327,7 +338,7 @@ impl BazaarFlipHandler {
     }
 
     /// Handle a bazaar flip recommendation
-    /// 
+    ///
     /// This is the main entry point for processing bazaar flips.
     pub async fn handle_bazaar_flip_recommendation<F>(
         &self,
@@ -350,7 +361,11 @@ impl BazaarFlipHandler {
             return Ok(());
         }
 
-        let order_type = if recommendation.is_buy_order { "BUY" } else { "SELL" };
+        let order_type = if recommendation.is_buy_order {
+            "BUY"
+        } else {
+            "SELL"
+        };
         info!(
             "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n{} ORDER - {}\nAmount: {}x\nPrice/unit: {} coins\nTotal: {} coins\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
             order_type,
@@ -361,7 +376,8 @@ impl BazaarFlipHandler {
         );
 
         // Execute bazaar flip with retries
-        self.execute_bazaar_flip(recommendation, bot_state, send_command).await
+        self.execute_bazaar_flip(recommendation, bot_state, send_command)
+            .await
     }
 
     /// Execute a bazaar flip operation
@@ -380,10 +396,16 @@ impl BazaarFlipHandler {
             *bot_state.write() = BotState::Bazaar;
 
             if attempt > 1 {
-                info!("Retry attempt {}/{} for {}", attempt, MAX_ORDER_PLACEMENT_RETRIES, recommendation.item_name);
+                info!(
+                    "Retry attempt {}/{} for {}",
+                    attempt, MAX_ORDER_PLACEMENT_RETRIES, recommendation.item_name
+                );
             }
 
-            match self.place_bazaar_order(&recommendation, &send_command).await {
+            match self
+                .place_bazaar_order(&recommendation, &send_command)
+                .await
+            {
                 Ok(()) => {
                     info!("===== BAZAAR FLIP ORDER COMPLETED =====");
                     info!("Successfully placed bazaar order!");
@@ -393,12 +415,16 @@ impl BazaarFlipHandler {
                 Err(e) => {
                     last_error = Some(e);
                     let error_message = last_error.as_ref().unwrap().to_string();
-                    
+
                     let is_timeout_error = error_message.contains("timed out");
-                    let is_retryable_error = is_timeout_error || error_message.contains("Price failsafe");
-                    
-                    error!("Error handling bazaar flip (attempt {}/{}): {}", attempt, MAX_ORDER_PLACEMENT_RETRIES, error_message);
-                    
+                    let is_retryable_error =
+                        is_timeout_error || error_message.contains("Price failsafe");
+
+                    error!(
+                        "Error handling bazaar flip (attempt {}/{}): {}",
+                        attempt, MAX_ORDER_PLACEMENT_RETRIES, error_message
+                    );
+
                     if attempt < MAX_ORDER_PLACEMENT_RETRIES && is_retryable_error {
                         let backoff_delay = RETRY_BACKOFF_BASE_MS * 2_u64.pow(attempt as u32 - 1);
                         info!("Will retry after {}ms delay...", backoff_delay);
@@ -408,7 +434,10 @@ impl BazaarFlipHandler {
                         if !is_retryable_error {
                             error!("Non-retryable error, aborting: {}", error_message);
                         } else {
-                            error!("Max retries ({}) reached, giving up", MAX_ORDER_PLACEMENT_RETRIES);
+                            error!(
+                                "Max retries ({}) reached, giving up",
+                                MAX_ORDER_PLACEMENT_RETRIES
+                            );
                         }
                         *bot_state.write() = BotState::Idle;
                         return Err(last_error.unwrap());
@@ -422,7 +451,7 @@ impl BazaarFlipHandler {
     }
 
     /// Place a bazaar order by navigating through the Hypixel bazaar interface
-    /// 
+    ///
     /// Steps:
     /// 1. Search results (if using item name instead of tag)
     /// 2. Item detail view with Create Buy Order / Create Sell Offer
@@ -442,7 +471,11 @@ impl BazaarFlipHandler {
             recommendation.item_name,
             recommendation.amount,
             recommendation.price_per_unit,
-            if recommendation.is_buy_order { "BUY" } else { "SELL" }
+            if recommendation.is_buy_order {
+                "BUY"
+            } else {
+                "SELL"
+            }
         );
 
         // Prefer itemTag over itemName for /bz command
@@ -459,9 +492,15 @@ impl BazaarFlipHandler {
         };
 
         if recommendation.item_tag.is_some() {
-            info!("Using itemTag \"{}\" for /bz command (faster, skips search results)", search_term_formatted);
+            info!(
+                "Using itemTag \"{}\" for /bz command (faster, skips search results)",
+                search_term_formatted
+            );
         } else {
-            info!("itemTag not available, using itemName \"{}\" for /bz command", search_term_formatted);
+            info!(
+                "itemTag not available, using itemName \"{}\" for /bz command",
+                search_term_formatted
+            );
         }
 
         // Set up window listener (in actual implementation)
@@ -477,19 +516,15 @@ impl BazaarFlipHandler {
         // 3. Clicking through the bazaar interface steps
         // 4. Handling sign inputs for amount and price
         // 5. Confirming the order
-        
+
         info!("[BazaarFlow] Window handling not yet implemented - this is a skeleton");
-        
+
         Ok(())
     }
 
     /// Find item in search results with exact match priority, then fuzzy fallback
     #[allow(dead_code)]
-    fn find_item_in_search_results(
-        &self,
-        slots: &[WindowSlot],
-        item_name: &str,
-    ) -> Option<usize> {
+    fn find_item_in_search_results(&self, slots: &[WindowSlot], item_name: &str) -> Option<usize> {
         let clean_target = WindowHandler::remove_minecraft_colors(item_name)
             .to_lowercase()
             .replace(['☘', '☂', '✪', '◆', '❤'], "")
@@ -516,7 +551,10 @@ impl BazaarFlipHandler {
 
             // Exact match
             if slot_name == clean_target {
-                info!("Found exact match for \"{}\" at slot {}", item_name, slot.index);
+                info!(
+                    "Found exact match for \"{}\" at slot {}",
+                    item_name, slot.index
+                );
                 return Some(slot.index);
             }
         }
@@ -525,7 +563,10 @@ impl BazaarFlipHandler {
         let target_tokens: Vec<&str> = clean_target.split_whitespace().collect();
         for (index, name) in &slot_data {
             if target_tokens.iter().all(|token| name.contains(token)) {
-                info!("Found token match for \"{}\" at slot {} ({})", item_name, index, name);
+                info!(
+                    "Found token match for \"{}\" at slot {} ({})",
+                    item_name, index, name
+                );
                 return Some(*index);
             }
         }
@@ -533,7 +574,10 @@ impl BazaarFlipHandler {
         // Phase 3: Try partial matching
         for (index, name) in &slot_data {
             if name.contains(&clean_target) || clean_target.contains(name) {
-                info!("Found partial match for \"{}\" at slot {} ({})", item_name, index, name);
+                info!(
+                    "Found partial match for \"{}\" at slot {} ({})",
+                    item_name, index, name
+                );
                 return Some(*index);
             }
         }
@@ -553,13 +597,20 @@ impl BazaarFlipHandler {
             }
 
             if let Some(slot) = best_slot {
-                info!("Found fuzzy match for \"{}\" at slot {} with distance {}", item_name, slot, best_score);
+                info!(
+                    "Found fuzzy match for \"{}\" at slot {} with distance {}",
+                    item_name, slot, best_score
+                );
                 return Some(slot);
             }
         }
 
         // No match found
-        warn!("No match for \"{}\" in search results — found: [{}]", item_name, all_slot_names.join(", "));
+        warn!(
+            "No match for \"{}\" in search results — found: [{}]",
+            item_name,
+            all_slot_names.join(", ")
+        );
         None
     }
 
@@ -590,13 +641,17 @@ impl BazaarFlipHandler {
 
         for i in 1..=len_b {
             for j in 1..=len_a {
-                let cost = if b_chars[i - 1] == a_chars[j - 1] { 0 } else { 1 };
+                let cost = if b_chars[i - 1] == a_chars[j - 1] {
+                    0
+                } else {
+                    1
+                };
                 matrix[i][j] = std::cmp::min(
                     std::cmp::min(
-                        matrix[i - 1][j] + 1,     // deletion
-                        matrix[i][j - 1] + 1,     // insertion
+                        matrix[i - 1][j] + 1, // deletion
+                        matrix[i][j - 1] + 1, // insertion
                     ),
-                    matrix[i - 1][j - 1] + cost,  // substitution
+                    matrix[i - 1][j - 1] + cost, // substitution
                 );
             }
         }
@@ -621,10 +676,12 @@ impl BazaarFlipHandler {
             // Check display name for red text (§c)
             if let Some(display_name) = &slot.display_name {
                 if display_name.contains("§c") {
-                    let clean_name = WindowHandler::remove_minecraft_colors(display_name).to_lowercase();
+                    let clean_name =
+                        WindowHandler::remove_minecraft_colors(display_name).to_lowercase();
                     for pattern in &known_error_patterns {
                         if clean_name.contains(pattern) {
-                            let full_clean_name = WindowHandler::remove_minecraft_colors(display_name);
+                            let full_clean_name =
+                                WindowHandler::remove_minecraft_colors(display_name);
                             warn!("Detected bazaar error message: {}", full_clean_name);
                             return Some(full_clean_name);
                         }
@@ -640,11 +697,19 @@ impl BazaarFlipHandler {
                             for lore_line in lore_array {
                                 if let Some(line_str) = lore_line.as_str() {
                                     if line_str.contains("§c") {
-                                        let clean_line = WindowHandler::remove_minecraft_colors(line_str).to_lowercase();
+                                        let clean_line =
+                                            WindowHandler::remove_minecraft_colors(line_str)
+                                                .to_lowercase();
                                         for pattern in &known_error_patterns {
                                             if clean_line.contains(pattern) {
-                                                let full_clean_line = WindowHandler::remove_minecraft_colors(line_str);
-                                                warn!("Detected bazaar error in lore: {}", full_clean_line);
+                                                let full_clean_line =
+                                                    WindowHandler::remove_minecraft_colors(
+                                                        line_str,
+                                                    );
+                                                warn!(
+                                                    "Detected bazaar error in lore: {}",
+                                                    full_clean_line
+                                                );
                                                 return Some(full_clean_line);
                                             }
                                         }
@@ -659,8 +724,6 @@ impl BazaarFlipHandler {
 
         None
     }
-
-
 }
 
 impl Default for BazaarFlipHandler {
@@ -675,7 +738,10 @@ mod tests {
 
     #[test]
     fn test_levenshtein_distance() {
-        assert_eq!(BazaarFlipHandler::levenshtein_distance("kitten", "sitting"), 3);
+        assert_eq!(
+            BazaarFlipHandler::levenshtein_distance("kitten", "sitting"),
+            3
+        );
         assert_eq!(BazaarFlipHandler::levenshtein_distance("hello", "hello"), 0);
         assert_eq!(BazaarFlipHandler::levenshtein_distance("", "hello"), 5);
     }
@@ -700,7 +766,8 @@ mod tests {
 
     #[test]
     fn test_parse_bazaar_flip_message_new_format_sell() {
-        let msg = "[Coflnet]: Recommending sell order: 2x Enchanted Coal Block at 30.1K per unit(1)";
+        let msg =
+            "[Coflnet]: Recommending sell order: 2x Enchanted Coal Block at 30.1K per unit(1)";
         let result = BazaarFlipHandler::parse_bazaar_flip_message(msg).unwrap();
         assert!(result.is_some());
         let rec = result.unwrap();

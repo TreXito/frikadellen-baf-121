@@ -122,11 +122,7 @@ pub async fn download_latest() -> anyhow::Result<UpdateStatus> {
         .iter()
         .find(|a| a.name == asset_name)
         .ok_or_else(|| {
-            anyhow::anyhow!(
-                "release {} has no asset named '{}'",
-                latest_tag,
-                asset_name
-            )
+            anyhow::anyhow!("release {} has no asset named '{}'", latest_tag, asset_name)
         })?;
 
     let dl = client.get(&asset.browser_download_url).send().await?;

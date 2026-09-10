@@ -64,7 +64,9 @@ impl FlipDropReason {
             FlipDropReason::AhDisabled => "enable AH flips in the panel / config",
             FlipDropReason::IntakePaused => "press Connect to resume intake",
             FlipDropReason::CoflUnauthenticated => "sign in to Coflnet (waiting for auth)",
-            FlipDropReason::StartupInProgress => "waiting for startup to finish — this usually clears on its own",
+            FlipDropReason::StartupInProgress => {
+                "waiting for startup to finish — this usually clears on its own"
+            }
             FlipDropReason::StartupState => "waiting for the bot to reach the island",
             FlipDropReason::InventoryFull => "the bot is selling to free space, then it resumes",
         }

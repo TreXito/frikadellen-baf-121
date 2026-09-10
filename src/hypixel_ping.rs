@@ -79,7 +79,10 @@ static PING_SENT_MICROS: AtomicU64 = AtomicU64::new(0);
 /// must be placed in `ServerboundPingRequest.time`.
 pub fn ping_request_started() -> u64 {
     let token = PING_COUNTER.fetch_add(1, Ordering::Relaxed) + 1;
-    PING_SENT_MICROS.store(PROCESS_START.elapsed().as_micros() as u64, Ordering::Relaxed);
+    PING_SENT_MICROS.store(
+        PROCESS_START.elapsed().as_micros() as u64,
+        Ordering::Relaxed,
+    );
     // Publish the token last so a matching pong always sees a consistent send time.
     PING_TOKEN.store(token, Ordering::Release);
     token

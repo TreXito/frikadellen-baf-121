@@ -1,7 +1,6 @@
 /// Inventory manager
-/// 
+///
 /// Manages bot inventory state and operations.
-
 use crate::types::ItemStack;
 
 /// Inventory manager

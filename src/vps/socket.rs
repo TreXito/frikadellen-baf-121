@@ -52,10 +52,7 @@ impl VpsSocket {
     /// Connect to the VPS backend and handle messages indefinitely.
     /// Reconnects automatically on disconnection with exponential backoff.
     pub async fn run(&self) {
-        let url = format!(
-            "wss://sky.coflnet.com/instances?secret={}",
-            self.secret
-        );
+        let url = format!("wss://sky.coflnet.com/instances?secret={}", self.secret);
 
         loop {
             match self.connect_and_handle(&url).await {
@@ -116,7 +113,8 @@ impl VpsSocket {
         let instances_expiry = self.instances.clone();
         let expiry_handle = tokio::spawn(async move {
             loop {
-                tokio::time::sleep(tokio::time::Duration::from_secs(EXPIRY_CHECK_INTERVAL_SECS)).await;
+                tokio::time::sleep(tokio::time::Duration::from_secs(EXPIRY_CHECK_INTERVAL_SECS))
+                    .await;
                 check_and_stop_expired(&instances_expiry).await;
             }
         });
@@ -154,20 +152,19 @@ impl VpsSocket {
     }
 
     async fn handle_message(&self, text: &str) -> Result<()> {
-        let msg: VpsMessage =
-            serde_json::from_str(text).context("Failed to parse VPS message")?;
+        let msg: VpsMessage = serde_json::from_str(text).context("Failed to parse VPS message")?;
 
         info!("[VPS] Received message type: {}", msg.msg_type);
 
         match msg.msg_type.as_str() {
             "init" => {
-                let updates: Vec<VpsStateUpdate> = serde_json::from_str(&msg.data)
-                    .context("Failed to parse init data")?;
+                let updates: Vec<VpsStateUpdate> =
+                    serde_json::from_str(&msg.data).context("Failed to parse init data")?;
                 self.handle_init(updates).await;
             }
             "configUpdate" => {
-                let update: VpsStateUpdate = serde_json::from_str(&msg.data)
-                    .context("Failed to parse configUpdate data")?;
+                let update: VpsStateUpdate =
+                    serde_json::from_str(&msg.data).context("Failed to parse configUpdate data")?;
                 self.handle_config_update(update).await;
             }
             "error" => {
@@ -190,10 +187,8 @@ impl VpsSocket {
     async fn handle_init(&self, updates: Vec<VpsStateUpdate>) {
         info!("[VPS] init: received {} instance(s)", updates.len());
 
-        let new_ids: std::collections::HashSet<String> = updates
-            .iter()
-            .map(|u| u.instance.id.clone())
-            .collect();
+        let new_ids: std::collections::HashSet<String> =
+            updates.iter().map(|u| u.instance.id.clone()).collect();
 
         let mut map = self.instances.write().await;
 
@@ -277,10 +272,7 @@ impl VpsSocket {
         let should_run = !inst.is_turned_off() && !inst.is_expired();
 
         let mut map = self.instances.write().await;
-        let was_running = map
-            .get(&instance_id)
-            .map(|mi| mi.running)
-            .unwrap_or(false);
+        let was_running = map.get(&instance_id).map(|mi| mi.running).unwrap_or(false);
 
         if was_running && !should_run {
             info!(
@@ -372,7 +364,9 @@ fn start_instance(
         instance.owner_id,
         instance.app_kind,
         instance.paid_until,
-        config.map(|c| c.to_string()).unwrap_or_else(|| "none".into()),
+        config
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "none".into()),
         extra_config.unwrap_or("none"),
     );
     // TODO: Actual process/container launch will be added here based on

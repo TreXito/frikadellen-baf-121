@@ -31,13 +31,16 @@ impl ConfigLoader {
                 PathBuf::from(".")
             }
         };
-        
+
         exe_dir.join("config.toml")
     }
 
     pub fn load(&self) -> Result<Config> {
         if !self.config_path.exists() {
-            info!("Config file not found, creating default config at {:?}", self.config_path);
+            info!(
+                "Config file not found, creating default config at {:?}",
+                self.config_path
+            );
             let mut config = Config::default();
             if let Some(password) = config.ensure_web_gui_password() {
                 Self::announce_web_password(&password, config.web_gui_port, true);
@@ -46,8 +49,8 @@ impl ConfigLoader {
             return Ok(config);
         }
 
-        let contents = fs::read_to_string(&self.config_path)
-            .context("Failed to read config file")?;
+        let contents =
+            fs::read_to_string(&self.config_path).context("Failed to read config file")?;
 
         let mut config = Self::parse_config(&contents)?;
         config.normalize_do_not_relist_ids();
@@ -81,7 +84,7 @@ impl ConfigLoader {
         // appear in the file with their default values (matches TypeScript
         // initConfigHelper: "add new default values to existing config").
         self.save(&config)?;
-        
+
         info!("Loaded configuration from {:?}", self.config_path);
         Ok(config)
     }
@@ -110,7 +113,11 @@ impl ConfigLoader {
         }
 
         let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
-        let mut name = self.config_path.file_name().unwrap_or_default().to_os_string();
+        let mut name = self
+            .config_path
+            .file_name()
+            .unwrap_or_default()
+            .to_os_string();
         name.push(format!(".bak-{stamp}"));
         let backup_path = self.config_path.with_file_name(name);
         // Never clobber an existing backup: two starts in the same second must
@@ -166,25 +173,23 @@ impl ConfigLoader {
     }
 
     fn parse_config(contents: &str) -> Result<Config> {
-        let value: toml::Value = toml::from_str(contents)
-            .context("Failed to parse config file")?;
+        let value: toml::Value = toml::from_str(contents).context("Failed to parse config file")?;
 
-        value.try_into().context("Failed to deserialize config file")
+        value
+            .try_into()
+            .context("Failed to deserialize config file")
     }
 
     pub fn save(&self, config: &Config) -> Result<()> {
         // Ensure parent directory exists
         if let Some(parent) = self.config_path.parent() {
-            fs::create_dir_all(parent)
-                .context("Failed to create config directory")?;
+            fs::create_dir_all(parent).context("Failed to create config directory")?;
         }
 
-        let toml_string = toml::to_string_pretty(config)
-            .context("Failed to serialize config")?;
-        
-        fs::write(&self.config_path, toml_string)
-            .context("Failed to write config file")?;
-        
+        let toml_string = toml::to_string_pretty(config).context("Failed to serialize config")?;
+
+        fs::write(&self.config_path, toml_string).context("Failed to write config file")?;
+
         info!("Saved configuration to {:?}", self.config_path);
         Ok(())
     }
@@ -211,7 +216,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp dir");
         let path = dir.join("config.toml");
-        (ConfigLoader { config_path: path.clone() }, path)
+        (
+            ConfigLoader {
+                config_path: path.clone(),
+            },
+            path,
+        )
     }
 
     /// Every `config.toml.bak-*` sitting next to the config.
@@ -238,12 +248,17 @@ mod tests {
     fn a_generated_config_gets_a_random_panel_password() {
         let (loader, path) = temp_loader("fresh");
         let config = loader.load().expect("fresh config should be created");
-        let password = config.web_gui_password.expect("a password should be generated");
+        let password = config
+            .web_gui_password
+            .expect("a password should be generated");
         assert!(!password.is_empty());
         // It must reach the file, not just the in-memory config — the user has
         // to be able to read it back after the startup banner scrolls past.
         let written = std::fs::read_to_string(&path).expect("config should be on disk");
-        assert!(written.contains(&password), "generated password should be persisted");
+        assert!(
+            written.contains(&password),
+            "generated password should be persisted"
+        );
         cleanup(&path);
     }
 
@@ -254,7 +269,9 @@ mod tests {
         let (loader, path) = temp_loader("unprotected");
         std::fs::write(&path, "web_gui_password = \"\"\n").expect("write config");
         let config = loader.load().expect("config should load");
-        let password = config.web_gui_password.expect("a password should be generated");
+        let password = config
+            .web_gui_password
+            .expect("a password should be generated");
         assert_eq!(password.len(), 20);
         let reloaded = loader.load().expect("config should reload");
         assert_eq!(
@@ -273,7 +290,11 @@ mod tests {
         loader.load().expect("config should load");
 
         let backups = backups_of(&path);
-        assert_eq!(backups.len(), 1, "expected exactly one backup, got {backups:?}");
+        assert_eq!(
+            backups.len(),
+            1,
+            "expected exactly one backup, got {backups:?}"
+        );
         let saved = std::fs::read_to_string(&backups[0]).expect("backup readable");
         assert_eq!(
             saved, original,
@@ -300,7 +321,11 @@ mod tests {
             fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
                 struct Visit<'a>(&'a mut String);
                 impl tracing::field::Visit for Visit<'_> {
-                    fn record_debug(&mut self, _f: &tracing::field::Field, v: &dyn std::fmt::Debug) {
+                    fn record_debug(
+                        &mut self,
+                        _f: &tracing::field::Field,
+                        v: &dyn std::fmt::Debug,
+                    ) {
                         self.0.push_str(&format!("{v:?}"));
                     }
                 }
@@ -349,7 +374,10 @@ mod tests {
         for _ in 0..3 {
             loader.load().expect("config should load");
         }
-        assert!(backups_of(&path).is_empty(), "nothing changed, so nothing to back up");
+        assert!(
+            backups_of(&path).is_empty(),
+            "nothing changed, so nothing to back up"
+        );
         cleanup(&path);
     }
 
@@ -383,7 +411,10 @@ mod tests {
             assert_eq!(config.web_gui_password.as_deref(), Some("my-own-password"));
         }
         let written = std::fs::read_to_string(&path).expect("config on disk");
-        assert!(written.contains("my-own-password"), "on-disk password should be untouched");
+        assert!(
+            written.contains("my-own-password"),
+            "on-disk password should be untouched"
+        );
         cleanup(&path);
     }
 

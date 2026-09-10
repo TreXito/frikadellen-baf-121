@@ -26,7 +26,10 @@ pub fn account_switch_marker_path() -> PathBuf {
 pub fn write_account_switch_marker(ign: &str) {
     let v = serde_json::json!({ "ign": ign });
     if let Err(e) = std::fs::write(account_switch_marker_path(), v.to_string()) {
-        tracing::warn!("[AccountSwitch] Failed to write account-switch marker: {}", e);
+        tracing::warn!(
+            "[AccountSwitch] Failed to write account-switch marker: {}",
+            e
+        );
     }
 }
 

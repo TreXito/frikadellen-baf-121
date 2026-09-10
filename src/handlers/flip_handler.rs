@@ -1,5 +1,5 @@
 /// Auction flip handler
-/// 
+///
 /// Handles auction house flip recommendations from Coflnet:
 /// - Processes flip recommendations with bed spam support
 /// - Navigates to BIN Auction View window
@@ -7,9 +7,8 @@
 /// - Clicks confirm button (slot 11)
 /// - Tracks purchase timing
 /// - Implements skip logic (pre-click optimization)
-/// 
+///
 /// Preserves exact slot numbers and timing from TypeScript implementation.
-
 use anyhow::{anyhow, Result};
 use parking_lot::RwLock;
 use std::sync::Arc;
@@ -242,16 +241,19 @@ impl FlipHandler {
     }
 
     /// Send a confirm click packet for faster window confirmation
-    /// 
+    ///
     /// This sends a transaction packet to acknowledge the window operation.
     /// Must be sent BEFORE any slot clicking for proper anti-cheat behavior.
     pub fn confirm_click(&self, window_id: u8) -> i16 {
         let mut counter = self.action_counter.write();
         let action = *counter;
         *counter += 1;
-        
-        info!("Sending confirm click for window {} (action {})", window_id, action);
-        
+
+        info!(
+            "Sending confirm click for window {} (action {})",
+            window_id, action
+        );
+
         // NOTE: Actual packet sending would happen here through the bot client
         // In the TypeScript version, this is:
         // bot._client.write('transaction', {
@@ -259,14 +261,14 @@ impl FlipHandler {
         //     action: actionCounter,
         //     accepted: true
         // })
-        
+
         action
     }
 
     /// Click a slot using low-level packets for faster response
-    /// 
+    ///
     /// Mouse button 2 = middle click, mode 3 = special inventory interaction
-    /// 
+    ///
     /// # Arguments
     /// * `slot` - Slot number to click
     /// * `window_id` - Window ID
@@ -275,12 +277,12 @@ impl FlipHandler {
         let mut counter = self.action_counter.write();
         let action = *counter;
         *counter += 1;
-        
+
         info!(
             "Clicking slot {} in window {} with item ID {} (action {})",
             slot, window_id, item_id, action
         );
-        
+
         // NOTE: Actual packet sending would happen here through the bot client
         // In the TypeScript version, this is:
         // bot._client.write('window_click', {
@@ -291,14 +293,14 @@ impl FlipHandler {
         //     item: { "blockId": itemId },
         //     action: actionCounter
         // })
-        
+
         action
     }
 
     /// Handle a flip recommendation
-    /// 
+    ///
     /// This is the main entry point for processing auction flips.
-    /// 
+    ///
     /// # Arguments
     /// * `flip` - The flip recommendation
     /// * `bot_state` - Current bot state (checked for interruption)
@@ -338,13 +340,19 @@ impl FlipHandler {
             if state == BotState::Idle {
                 break;
             }
-            
+
             if wait_start.elapsed() > Duration::from_secs(MAX_WAIT_SECS) {
-                warn!("Timeout waiting {}s for Idle state (stuck in {:?}), aborting flip: {}", MAX_WAIT_SECS, state, flip.item_name);
+                warn!(
+                    "Timeout waiting {}s for Idle state (stuck in {:?}), aborting flip: {}",
+                    MAX_WAIT_SECS, state, flip.item_name
+                );
                 *self.current_flip.write() = None;
-                return Err(anyhow!("Timeout waiting for bot to become idle (stuck in {:?})", state));
+                return Err(anyhow!(
+                    "Timeout waiting for bot to become idle (stuck in {:?})",
+                    state
+                ));
             }
-            
+
             // TODO: Check if we can interrupt the current operation
             warn!("Bot busy with {:?}, retrying in 1.1s", state);
             sleep(Duration::from_millis(1100)).await;
@@ -354,7 +362,7 @@ impl FlipHandler {
         *bot_state.write() = BotState::Purchasing;
 
         let _profit = flip.target - flip.starting_bid;
-        
+
         info!(
             "Trying to purchase flip: {} for {} coins (Target: {})",
             flip.item_name,
@@ -363,7 +371,16 @@ impl FlipHandler {
         );
 
         // Send the /viewauction command
-        let uuid = flip.uuid.as_deref().filter(|s| !s.is_empty()).ok_or_else(|| anyhow!("Cannot purchase auction for '{}': missing UUID", flip.item_name))?;
+        let uuid = flip
+            .uuid
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| {
+                anyhow!(
+                    "Cannot purchase auction for '{}': missing UUID",
+                    flip.item_name
+                )
+            })?;
         let command = format!("/viewauction {}", uuid);
         send_command(&command)?;
 
@@ -375,9 +392,9 @@ impl FlipHandler {
     }
 
     /// Handle BIN Auction View window
-    /// 
+    ///
     /// This is called when the "BIN Auction View" window opens.
-    /// 
+    ///
     /// # Arguments
     /// * `window_id` - The window ID
     /// * `next_window_id` - The next expected window ID (for skip optimization)
@@ -405,33 +422,33 @@ impl FlipHandler {
 
         // Wait for item to load in slot 31
         let slot_31 = slots.iter().find(|s| s.index == 31);
-        
+
         let item_name = slot_31.map(|s| s.name.as_str()).unwrap_or("");
 
         match item_name {
             "gold_nugget" => {
                 info!("Found gold nugget, clicking purchase button (slot 31)");
-                
+
                 // Send low-level click packet for slot 31
                 self.click_slot(31, window_id, 371);
-                
+
                 // Redundant click in case first packet was lost
                 // (In actual implementation, this would be clickWindow from mineflayer)
-                
+
                 if should_skip {
                     // SKIP: pre-click Confirm (slot 11) on the NEXT window in the same tick
                     info!("Using skip optimization - pre-clicking confirm button");
                     self.click_slot(11, next_window_id, 159);
                     *self.recently_skipped.write() = true;
-                    
+
                     if let Some(flip) = self.current_flip.read().as_ref() {
                         self.log_skip_reason(flip, profit);
                     }
-                    
+
                     // RETURN here — the window listener will handle Confirm Purchase
                     return Ok(());
                 }
-                
+
                 // Only reached if skip was NOT used
                 *self.recently_skipped.write() = false;
                 Ok(())
@@ -472,9 +489,9 @@ impl FlipHandler {
     }
 
     /// Handle Confirm Purchase window
-    /// 
+    ///
     /// This is called when the "Confirm Purchase" window opens.
-    /// 
+    ///
     /// # Arguments
     /// * `window_id` - The window ID
     /// * `first_gui_time` - Time when BIN Auction View opened
@@ -502,7 +519,7 @@ impl FlipHandler {
         // Safety retry loop: runs REGARDLESS of recently_skipped
         // If skip pre-click worked, window is already gone and loop doesn't execute
         // If skip pre-click failed (packet lost), this catches it
-        
+
         // NOTE: In actual implementation, this would check if window is still open
         // For now, we just do a few retries
         for _ in 0..3 {
@@ -515,18 +532,14 @@ impl FlipHandler {
     }
 
     /// Initialize bed spam prevention
-    /// 
+    ///
     /// Continuously clicks slot 31 until gold_nugget appears or max failures reached.
-    pub async fn init_bed_spam<F>(
-        &self,
-        window_id: u8,
-        check_slot: F,
-    ) -> Result<()>
+    pub async fn init_bed_spam<F>(&self, window_id: u8, check_slot: F) -> Result<()>
     where
         F: Fn() -> Option<String>,
     {
         info!("Starting bed spam prevention...");
-        
+
         let click_delay = self.window_handler.bed_spam_click_delay();
         let max_failed = self.window_handler.bed_spam_max_failed_clicks();
         let mut failed_clicks = 0;
@@ -538,7 +551,7 @@ impl FlipHandler {
             }
 
             let slot_name = check_slot();
-            
+
             if let Some(name) = slot_name {
                 if name == "gold_nugget" {
                     info!("Bed spam: gold_nugget appeared, clicking");
@@ -580,7 +593,7 @@ mod tests {
     #[test]
     fn test_should_skip_flip() {
         let handler = FlipHandler::new();
-        
+
         // No skip config
         let flip = Flip {
             item_name: "Test Item".to_string(),
@@ -593,7 +606,7 @@ mod tests {
             list_at: None,
         };
         assert!(!handler.should_skip_flip(&flip, 1000));
-        
+
         // With always skip
         handler.update_config(FlipConfig {
             enabled: true,

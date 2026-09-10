@@ -19,8 +19,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use tracing::{debug, error, info, warn};
 
-use crate::bot::BotClient;
 use crate::bazaar_tracker::BazaarOrderTracker;
+use crate::bot::BotClient;
 use crate::logging::print_mc_chat;
 use crate::state::CommandQueue;
 use crate::types::{CommandPriority, CommandType};
@@ -182,7 +182,9 @@ struct ProfitResponse {
 }
 
 /// Default auction duration used when the client doesn't provide one.
-fn default_auction_duration() -> u64 { 24 }
+fn default_auction_duration() -> u64 {
+    24
+}
 
 /// Public (unauthenticated) profit summary — no IGN, no account info.
 /// Used by the login page and OpenGraph embeds.
@@ -315,8 +317,12 @@ fn mint_session(password: &str, port: u16) -> String {
 
 /// Whether `token` is a valid, unexpired session for this panel.
 fn session_is_valid(token: &str, password: &str, port: u16, now: i64) -> bool {
-    let Some((expiry_raw, signature)) = token.split_once('.') else { return false };
-    let Ok(expiry) = expiry_raw.parse::<i64>() else { return false };
+    let Some((expiry_raw, signature)) = token.split_once('.') else {
+        return false;
+    };
+    let Ok(expiry) = expiry_raw.parse::<i64>() else {
+        return false;
+    };
     if expiry <= now {
         return false;
     }
@@ -356,7 +362,9 @@ fn request_is_authorized(
     if is_public_path(path) {
         return true;
     }
-    presented.iter().any(|t| session_is_valid(t, password, port, now))
+    presented
+        .iter()
+        .any(|t| session_is_valid(t, password, port, now))
 }
 
 /// Every session token a request presents: cookie, bearer header, or `?token=`
@@ -389,11 +397,7 @@ fn presented_tokens(req: &Request, port: u16) -> Vec<String> {
 
 /// Middleware logic that enforces authentication when a password is configured.
 /// Allows unauthenticated access to `GET /` (panel HTML) and `POST /api/login`.
-async fn check_auth(
-    s: WebSharedState,
-    req: Request,
-    next: Next,
-) -> Response {
+async fn check_auth(s: WebSharedState, req: Request, next: Next) -> Response {
     let password = s.panel_password();
     let port = s.panel_port;
     let path = req.uri().path().to_string();
@@ -432,7 +436,10 @@ fn plain_http_requested() -> bool {
 fn primary_local_ip() -> Option<std::net::IpAddr> {
     let sock = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
     sock.connect("1.1.1.1:80").ok()?;
-    sock.local_addr().ok().map(|a| a.ip()).filter(|ip| !ip.is_loopback())
+    sock.local_addr()
+        .ok()
+        .map(|a| a.ip())
+        .filter(|ip| !ip.is_loopback())
 }
 
 /// Return the panel's certificate and key, generating them on first use.
@@ -440,7 +447,9 @@ fn primary_local_ip() -> Option<std::net::IpAddr> {
 /// The certificate is persisted and reused across restarts on purpose: the
 /// browser then only warns once, and a certificate that changes every boot is
 /// indistinguishable from someone swapping it out mid-session.
-fn ensure_panel_cert(dir: &std::path::Path) -> anyhow::Result<(std::path::PathBuf, std::path::PathBuf)> {
+fn ensure_panel_cert(
+    dir: &std::path::Path,
+) -> anyhow::Result<(std::path::PathBuf, std::path::PathBuf)> {
     use anyhow::Context;
     let _ = std::fs::create_dir_all(dir);
     let cert_file = dir.join("web-cert.pem");
@@ -456,7 +465,10 @@ fn ensure_panel_cert(dir: &std::path::Path) -> anyhow::Result<(std::path::PathBu
     if let Some(ip) = primary_local_ip() {
         sans.push(ip.to_string());
     }
-    info!("[WebTLS] Generating panel certificate for {}", sans.join(", "));
+    info!(
+        "[WebTLS] Generating panel certificate for {}",
+        sans.join(", ")
+    );
     let signed = rcgen::generate_simple_self_signed(sans)
         .context("failed to generate self-signed certificate")?;
     std::fs::write(&cert_file, signed.cert.pem()).context("write panel cert")?;
@@ -492,7 +504,10 @@ enum PanelCert {
     /// Nothing configured: keep issuing our own.
     SelfSigned,
     /// Exactly one of the two paths set, which cannot work.
-    Incomplete { have: &'static str, missing: &'static str },
+    Incomplete {
+        have: &'static str,
+        missing: &'static str,
+    },
 }
 
 /// How often to check whether the certificate on disk has been replaced.
@@ -545,10 +560,19 @@ fn choose_panel_cert(cert_path: Option<&str>, key_path: Option<&str>) -> PanelCe
     let cert = cert_path.map(str::trim).filter(|s| !s.is_empty());
     let key = key_path.map(str::trim).filter(|s| !s.is_empty());
     match (cert, key) {
-        (Some(c), Some(k)) => PanelCert::Configured { cert: c.to_string(), key: k.to_string() },
+        (Some(c), Some(k)) => PanelCert::Configured {
+            cert: c.to_string(),
+            key: k.to_string(),
+        },
         (None, None) => PanelCert::SelfSigned,
-        (Some(_), None) => PanelCert::Incomplete { have: "web_tls_cert_path", missing: "web_tls_key_path" },
-        (None, Some(_)) => PanelCert::Incomplete { have: "web_tls_key_path", missing: "web_tls_cert_path" },
+        (Some(_), None) => PanelCert::Incomplete {
+            have: "web_tls_cert_path",
+            missing: "web_tls_key_path",
+        },
+        (None, Some(_)) => PanelCert::Incomplete {
+            have: "web_tls_key_path",
+            missing: "web_tls_cert_path",
+        },
     }
 }
 
@@ -572,7 +596,10 @@ async fn build_web_tls(
         PanelCert::Configured { cert, key } => {
             match axum_server::tls_rustls::RustlsConfig::from_pem_file(&cert, &key).await {
                 Ok(config) => {
-                    info!("[WebTLS] Using the configured certificate: {} (key {})", cert, key);
+                    info!(
+                        "[WebTLS] Using the configured certificate: {} (key {})",
+                        cert, key
+                    );
                     // Renewals replace this file; pick them up without a restart.
                     spawn_cert_reloader(config.clone(), cert.into(), key.into());
                     return Ok(config);
@@ -610,7 +637,6 @@ async fn build_web_tls(
         .await
         .context("failed to load panel certificate")
 }
-
 
 /// Accepts a connection only if it is really TLS; a plain HTTP request gets a
 /// redirect to the https:// URL instead of a dead socket.
@@ -691,7 +717,10 @@ async fn send_https_redirect(stream: &mut tokio::net::TcpStream) {
     let host = request
         .lines()
         .skip(1)
-        .find_map(|line| line.split_once(':').filter(|(k, _)| k.eq_ignore_ascii_case("host")))
+        .find_map(|line| {
+            line.split_once(':')
+                .filter(|(k, _)| k.eq_ignore_ascii_case("host"))
+        })
         .map(|(_, v)| v.trim());
 
     let response = match host {
@@ -709,7 +738,8 @@ async fn send_https_redirect(stream: &mut tokio::net::TcpStream) {
         // No usable Host header to build a URL from: say what to do in plain
         // words rather than leaving a blank page.
         _ => {
-            let body = "The bot panel is HTTPS-only. Use https:// instead of http:// in the address bar.";
+            let body =
+                "The bot panel is HTTPS-only. Use https:// instead of http:// in the address bar.";
             format!(
                 "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain; charset=utf-8\r\n\
                  Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
@@ -744,22 +774,34 @@ pub async fn start_web_server(state: WebSharedState, port: u16) {
         .route("/api/game-view", get(get_game_view))
         .route("/api/toggle_ah", axum::routing::post(toggle_ah))
         .route("/api/toggle_bazaar", axum::routing::post(toggle_bazaar))
-        .route("/api/toggle_anonymize", axum::routing::post(toggle_anonymize))
+        .route(
+            "/api/toggle_anonymize",
+            axum::routing::post(toggle_anonymize),
+        )
         .route("/api/chat/send", axum::routing::post(send_chat))
         .route("/api/chat/ws", get(chat_ws_handler))
         .route("/api/switch_account", axum::routing::post(switch_account))
         .route("/api/cancel_auction", axum::routing::post(cancel_auction))
         .route("/api/list_item", axum::routing::post(list_item))
         .route("/api/claim_purchases", axum::routing::post(claim_purchases))
-        .route("/api/collect_bz_orders", axum::routing::post(collect_bz_orders))
+        .route(
+            "/api/collect_bz_orders",
+            axum::routing::post(collect_bz_orders),
+        )
         .route("/api/claim_bz_orders", axum::routing::post(claim_bz_orders))
         .route("/api/cancel_bz_order", axum::routing::post(cancel_bz_order))
-        .route("/api/cancel_all_bz_orders", axum::routing::post(cancel_all_bz_orders))
+        .route(
+            "/api/cancel_all_bz_orders",
+            axum::routing::post(cancel_all_bz_orders),
+        )
         .route("/api/auctions", get(get_auctions))
         .route("/api/bazaar_orders", get(get_bazaar_orders))
         .route("/api/queue", get(get_queue_status))
         .route("/api/config", get(get_config).post(save_config))
-        .route("/api/config.json", get(get_config_json).post(save_config_json))
+        .route(
+            "/api/config.json",
+            get(get_config_json).post(save_config_json),
+        )
         .route("/api/logs/latest", get(download_latest_log))
         .route("/api/profit", get(get_profit))
         .route("/api/kill_session", axum::routing::post(kill_session))
@@ -768,16 +810,21 @@ pub async fn start_web_server(state: WebSharedState, port: u16) {
         .route("/api/restart", axum::routing::post(restart_session))
         .route("/api/rest_break", axum::routing::post(rest_break_now))
         .route("/api/update", axum::routing::post(update_session))
-        .layer(axum::middleware::from_fn(move |req: Request, next: Next| {
-            let s = auth_state.clone();
-            async move { check_auth(s, req, next).await }
-        }))
+        .layer(axum::middleware::from_fn(
+            move |req: Request, next: Next| {
+                let s = auth_state.clone();
+                async move { check_auth(s, req, next).await }
+            },
+        ))
         .with_state(state);
 
     let addr = format!("0.0.0.0:{}", port);
     let scheme = if use_tls { "https" } else { "http" };
     if has_password {
-        info!("Web control panel starting on {}://{} (password protected)", scheme, addr);
+        info!(
+            "Web control panel starting on {}://{} (password protected)",
+            scheme, addr
+        );
     } else {
         // Unreachable in practice: the config loader generates a password when
         // one is missing. Kept loud in case the panel is ever started directly.
@@ -798,13 +845,14 @@ pub async fn start_web_server(state: WebSharedState, port: u16) {
                 return;
             }
         };
-        let tls_config = match build_web_tls(tls_cert_path.as_deref(), tls_key_path.as_deref()).await {
-            Ok(c) => c,
-            Err(e) => {
-                error!("Failed to set up web TLS (panel will not start): {:#}", e);
-                return;
-            }
-        };
+        let tls_config =
+            match build_web_tls(tls_cert_path.as_deref(), tls_key_path.as_deref()).await {
+                Ok(c) => c,
+                Err(e) => {
+                    error!("Failed to set up web TLS (panel will not start): {:#}", e);
+                    return;
+                }
+            };
         // A sniffing acceptor in front of rustls, so a plain http:// request is
         // answered with a redirect instead of a dropped connection.
         let acceptor = axum_server::tls_rustls::RustlsAcceptor::new(tls_config)
@@ -866,7 +914,11 @@ async fn index_page(State(s): State<WebSharedState>) -> Html<String> {
     let total = ah_total + bz_total;
     let uptime = s.previous_session_secs + s.started_at.elapsed().as_secs();
     let hours = uptime as f64 / 3600.0;
-    let per_hour = if hours > 0.0 { total as f64 / hours } else { 0.0 };
+    let per_hour = if hours > 0.0 {
+        total as f64 / hours
+    } else {
+        0.0
+    };
 
     let og_title = "Frikadellen BAF — Control Panel";
     let og_description = format!(
@@ -889,8 +941,7 @@ async fn index_page(State(s): State<WebSharedState>) -> Html<String> {
          <meta name=\"theme-color\" content=\"#6c5ce7\">",
     );
 
-    let html = include_str!("panel.html")
-        .replacen("<!-- OG_META_TAGS -->", &og_tags, 1);
+    let html = include_str!("panel.html").replacen("<!-- OG_META_TAGS -->", &og_tags, 1);
 
     Html(html)
 }
@@ -942,7 +993,11 @@ async fn login(
     // `Secure` only when we actually serve TLS: browsers silently drop a Secure
     // cookie sent over plain HTTP, which would look like a login that "works"
     // but never sticks.
-    let secure = if WEB_TLS_ACTIVE.load(Ordering::Relaxed) { " Secure;" } else { "" };
+    let secure = if WEB_TLS_ACTIVE.load(Ordering::Relaxed) {
+        " Secure;"
+    } else {
+        ""
+    };
     let cookie = format!(
         "{}={};{} Path=/; HttpOnly; SameSite=Strict; Max-Age={}",
         session_cookie_name(s.panel_port),
@@ -966,11 +1021,17 @@ async fn get_status(State(s): State<WebSharedState>) -> Json<StatusResponse> {
     let (current_account, accounts) = if anonymize {
         let hidden = "Hidden".to_string();
         let anon_accounts: Vec<String> = s.ingame_names.iter().map(|_| hidden.clone()).collect();
-        let anon_current = anon_accounts.get(s.current_account_index).cloned().unwrap_or_default();
+        let anon_current = anon_accounts
+            .get(s.current_account_index)
+            .cloned()
+            .unwrap_or_default();
         (anon_current, anon_accounts)
     } else {
         (
-            s.ingame_names.get(s.current_account_index).cloned().unwrap_or_default(),
+            s.ingame_names
+                .get(s.current_account_index)
+                .cloned()
+                .unwrap_or_default(),
             s.ingame_names.clone(),
         )
     };
@@ -992,9 +1053,10 @@ async fn get_status(State(s): State<WebSharedState>) -> Json<StatusResponse> {
         inventory_full: s.bot_client.is_inventory_full(),
         flips_accepted: s.flip_diag.accepted_total(),
         flips_dropped: s.flip_diag.dropped_total(),
-        flip_drop_reason: s.flip_diag.last_drop().map(|(r, secs_ago)| {
-            format!("{} ({}) — {}s ago", r.as_str(), r.hint(), secs_ago)
-        }),
+        flip_drop_reason: s
+            .flip_diag
+            .last_drop()
+            .map(|(r, secs_ago)| format!("{} ({}) — {}s ago", r.as_str(), r.hint(), secs_ago)),
     })
 }
 
@@ -1026,7 +1088,11 @@ async fn get_inventory(State(s): State<WebSharedState>) -> impl IntoResponse {
 async fn get_game_view(State(s): State<WebSharedState>) -> impl IntoResponse {
     match s.bot_client.get_cached_window_json() {
         Some(json) => (StatusCode::OK, json),
-        None => (StatusCode::OK, r#"{"open":false,"botState":"Unknown","windowId":null,"title":null,"slots":[]}"#.to_string()),
+        None => (
+            StatusCode::OK,
+            r#"{"open":false,"botState":"Unknown","windowId":null,"title":null,"slots":[]}"#
+                .to_string(),
+        ),
     }
 }
 
@@ -1036,7 +1102,14 @@ async fn toggle_ah(
 ) -> impl IntoResponse {
     s.enable_ah_flips.store(payload.enabled, Ordering::Relaxed);
     info!("[WebGUI] AH flips set to {} via web panel", payload.enabled);
-    let msg = format!("[BAF Web] AH flips {}", if payload.enabled { "enabled" } else { "disabled" });
+    let msg = format!(
+        "[BAF Web] AH flips {}",
+        if payload.enabled {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
     print_mc_chat(&msg);
     let _ = s.chat_tx.send(msg);
     // Persist to config file
@@ -1044,7 +1117,10 @@ async fn toggle_ah(
     let loader = s.config_loader.clone();
     tokio::task::spawn_blocking(move || {
         if let Err(e) = loader.update_property(|c| c.enable_ah_flips = enabled) {
-            error!("[WebGUI] Failed to persist AH flips toggle to config: {}", e);
+            error!(
+                "[WebGUI] Failed to persist AH flips toggle to config: {}",
+                e
+            );
         }
     });
     StatusCode::OK
@@ -1054,9 +1130,20 @@ async fn toggle_bazaar(
     State(s): State<WebSharedState>,
     Json(payload): Json<TogglePayload>,
 ) -> impl IntoResponse {
-    s.enable_bazaar_flips.store(payload.enabled, Ordering::Relaxed);
-    info!("[WebGUI] Bazaar flips set to {} via web panel", payload.enabled);
-    let msg = format!("[BAF Web] Bazaar flips {}", if payload.enabled { "enabled" } else { "disabled" });
+    s.enable_bazaar_flips
+        .store(payload.enabled, Ordering::Relaxed);
+    info!(
+        "[WebGUI] Bazaar flips set to {} via web panel",
+        payload.enabled
+    );
+    let msg = format!(
+        "[BAF Web] Bazaar flips {}",
+        if payload.enabled {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
     print_mc_chat(&msg);
     let _ = s.chat_tx.send(msg);
     // Persist to config file
@@ -1064,7 +1151,10 @@ async fn toggle_bazaar(
     let loader = s.config_loader.clone();
     tokio::task::spawn_blocking(move || {
         if let Err(e) = loader.update_property(|c| c.enable_bazaar_flips = enabled) {
-            error!("[WebGUI] Failed to persist Bazaar flips toggle to config: {}", e);
+            error!(
+                "[WebGUI] Failed to persist Bazaar flips toggle to config: {}",
+                e
+            );
         }
     });
     StatusCode::OK
@@ -1074,9 +1164,20 @@ async fn toggle_anonymize(
     State(s): State<WebSharedState>,
     Json(payload): Json<TogglePayload>,
 ) -> impl IntoResponse {
-    s.anonymize_webhook_name.store(payload.enabled, Ordering::Relaxed);
-    info!("[WebGUI] Anonymize set to {} via web panel", payload.enabled);
-    let msg = format!("[BAF Web] Anonymize {}", if payload.enabled { "enabled" } else { "disabled" });
+    s.anonymize_webhook_name
+        .store(payload.enabled, Ordering::Relaxed);
+    info!(
+        "[WebGUI] Anonymize set to {} via web panel",
+        payload.enabled
+    );
+    let msg = format!(
+        "[BAF Web] Anonymize {}",
+        if payload.enabled {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
     print_mc_chat(&msg);
     let _ = s.chat_tx.send(msg);
     StatusCode::OK
@@ -1103,7 +1204,10 @@ fn ping_report(state: &WebSharedState) -> String {
         .unwrap_or_else(|| "?".to_string());
     format!(
         "§f[§4BAF§f]: §b/ping §7→ §fping §a{}§7 | §fstate §b{}§7 | §fpurse §6{}§7 | {}",
-        ping, bot_state, purse, state.flip_diag.summary_line(),
+        ping,
+        bot_state,
+        purse,
+        state.flip_diag.summary_line(),
     )
 }
 
@@ -1113,12 +1217,69 @@ fn ping_report(state: &WebSharedState) -> String {
 /// "top", "cat", "ls", "cd", "df"): a false positive here silently eats a real
 /// chat message, which is worse than letting one stray command through.
 const SHELL_BINARIES: &[&str] = &[
-    "chmod", "chown", "chgrp", "screen", "tmux", "sudo", "su", "bash", "sh", "zsh", "ssh", "scp",
-    "rsync", "systemctl", "journalctl", "service", "apt", "apt-get", "yum", "dnf", "pacman",
-    "rm", "mv", "cp", "mkdir", "rmdir", "touch", "ln", "tar", "unzip", "gzip", "wget", "curl",
-    "nano", "vim", "vi", "emacs", "kill", "killall", "pkill", "htop", "nohup", "crontab",
-    "export", "unset", "chroot", "mount", "umount", "dmesg", "useradd", "usermod", "passwd",
-    "docker", "git", "npm", "node", "cargo", "python", "python3", "pip", "pip3", "java", "make",
+    "chmod",
+    "chown",
+    "chgrp",
+    "screen",
+    "tmux",
+    "sudo",
+    "su",
+    "bash",
+    "sh",
+    "zsh",
+    "ssh",
+    "scp",
+    "rsync",
+    "systemctl",
+    "journalctl",
+    "service",
+    "apt",
+    "apt-get",
+    "yum",
+    "dnf",
+    "pacman",
+    "rm",
+    "mv",
+    "cp",
+    "mkdir",
+    "rmdir",
+    "touch",
+    "ln",
+    "tar",
+    "unzip",
+    "gzip",
+    "wget",
+    "curl",
+    "nano",
+    "vim",
+    "vi",
+    "emacs",
+    "kill",
+    "killall",
+    "pkill",
+    "htop",
+    "nohup",
+    "crontab",
+    "export",
+    "unset",
+    "chroot",
+    "mount",
+    "umount",
+    "dmesg",
+    "useradd",
+    "usermod",
+    "passwd",
+    "docker",
+    "git",
+    "npm",
+    "node",
+    "cargo",
+    "python",
+    "python3",
+    "pip",
+    "pip3",
+    "java",
+    "make",
 ];
 
 /// True when the input looks like a Linux shell command rather than chat.
@@ -1129,7 +1290,9 @@ const SHELL_BINARIES: &[&str] = &[
 fn looks_like_shell_command(input: &str) -> bool {
     let trimmed = input.trim();
     // A path-ish prefix is unambiguous: nothing in chat starts this way.
-    for prefix in ["./", "../", "~/", "/home/", "/root/", "/usr/", "/etc/", "/mnt/", "/tmp/"] {
+    for prefix in [
+        "./", "../", "~/", "/home/", "/root/", "/usr/", "/etc/", "/mnt/", "/tmp/",
+    ] {
         if trimmed.starts_with(prefix) {
             return true;
         }
@@ -1262,7 +1425,9 @@ async fn switch_account(
         .send(format!("[BAF Web] Switching to account {}...", next_name));
 
     // Transfer the COFL license to the next account before restarting.
-    let license_index = s.detected_cofl_license.load(std::sync::atomic::Ordering::Relaxed);
+    let license_index = s
+        .detected_cofl_license
+        .load(std::sync::atomic::Ordering::Relaxed);
     let ws = s.ws_client.clone();
     let target_name = next_name.clone();
 
@@ -1292,10 +1457,7 @@ async fn cancel_auction(
         payload.item_name, payload.starting_bid
     );
 
-    let msg = format!(
-        "[BAF Web] Cancelling auction: {}...",
-        payload.item_name
-    );
+    let msg = format!("[BAF Web] Cancelling auction: {}...", payload.item_name);
     print_mc_chat(&msg);
     let _ = s.chat_tx.send(msg);
 
@@ -1317,7 +1479,11 @@ async fn list_item(
 ) -> impl IntoResponse {
     // Basic validation
     if payload.starting_bid == 0 {
-        return (StatusCode::BAD_REQUEST, "Starting bid must be greater than 0").into_response();
+        return (
+            StatusCode::BAD_REQUEST,
+            "Starting bid must be greater than 0",
+        )
+            .into_response();
     }
     // Clamp to Hypixel's maximum auction duration of 7 days (168 hours).
     let duration = payload.duration_hours.clamp(1, 168);
@@ -1349,9 +1515,7 @@ async fn list_item(
     (StatusCode::OK, "List item command queued").into_response()
 }
 
-async fn claim_purchases(
-    State(s): State<WebSharedState>,
-) -> impl IntoResponse {
+async fn claim_purchases(State(s): State<WebSharedState>) -> impl IntoResponse {
     info!("[WebGUI] Claim purchases requested");
 
     let msg = "[BAF Web] Checking unclaimed purchases...".to_string();
@@ -1367,9 +1531,7 @@ async fn claim_purchases(
     (StatusCode::OK, "Claim purchases command queued")
 }
 
-async fn collect_bz_orders(
-    State(s): State<WebSharedState>,
-) -> impl IntoResponse {
+async fn collect_bz_orders(State(s): State<WebSharedState>) -> impl IntoResponse {
     info!("[WebGUI] Sell inventory instantly on bazaar requested");
 
     let msg = "[BAF Web] Selling inventory on bazaar...".to_string();
@@ -1385,9 +1547,7 @@ async fn collect_bz_orders(
     (StatusCode::OK, "Sell inventory on bazaar command queued")
 }
 
-async fn claim_bz_orders(
-    State(s): State<WebSharedState>,
-) -> impl IntoResponse {
+async fn claim_bz_orders(State(s): State<WebSharedState>) -> impl IntoResponse {
     info!("[WebGUI] Force claim bazaar orders requested");
 
     let msg = "[BAF Web] Checking and claiming bazaar orders...".to_string();
@@ -1395,7 +1555,10 @@ async fn claim_bz_orders(
     let _ = s.chat_tx.send(msg);
 
     s.command_queue.enqueue(
-        CommandType::ManageOrders { cancel_open: false, target_item: None },
+        CommandType::ManageOrders {
+            cancel_open: false,
+            target_item: None,
+        },
         CommandPriority::Critical,
         false,
     );
@@ -1428,8 +1591,10 @@ async fn cancel_bz_order(
     // Orders window (emitting a snapshot that still contains this order) BEFORE
     // it cancels it, so without this the reconcile pass would re-add the order
     // and it would flicker back into the panel.
-    s.bazaar_tracker.mark_cancelling(&payload.item_name, payload.is_buy_order);
-    s.bazaar_tracker.remove_order(&payload.item_name, payload.is_buy_order);
+    s.bazaar_tracker
+        .mark_cancelling(&payload.item_name, payload.is_buy_order);
+    s.bazaar_tracker
+        .remove_order(&payload.item_name, payload.is_buy_order);
 
     s.command_queue.enqueue(
         CommandType::ManageOrders {
@@ -1447,9 +1612,7 @@ async fn cancel_bz_order(
     (StatusCode::OK, "Cancel bazaar order command queued")
 }
 
-async fn cancel_all_bz_orders(
-    State(s): State<WebSharedState>,
-) -> impl IntoResponse {
+async fn cancel_all_bz_orders(State(s): State<WebSharedState>) -> impl IntoResponse {
     info!("[WebGUI] Cancel ALL bazaar orders requested");
 
     let msg = "[BAF Web] Cancelling all bazaar orders...".to_string();
@@ -1462,7 +1625,10 @@ async fn cancel_all_bz_orders(
 
     // Queue a ManageOrders cycle with cancel_open=true to cancel in-game orders.
     s.command_queue.enqueue(
-        CommandType::ManageOrders { cancel_open: true, target_item: None },
+        CommandType::ManageOrders {
+            cancel_open: true,
+            target_item: None,
+        },
         CommandPriority::Critical,
         false,
     );
@@ -1545,7 +1711,10 @@ async fn disconnect_session(State(s): State<WebSharedState>) -> impl IntoRespons
     // Disconnect the bot from Hypixel (logs + parks state in Idle)
     s.bot_client.disconnect();
 
-    (StatusCode::OK, "Disconnected: flip intake paused, queue cleared, COFL closed")
+    (
+        StatusCode::OK,
+        "Disconnected: flip intake paused, queue cleared, COFL closed",
+    )
 }
 
 async fn connect_session(State(s): State<WebSharedState>) -> impl IntoResponse {
@@ -1578,7 +1747,9 @@ async fn restart_session(State(s): State<WebSharedState>) -> impl IntoResponse {
     // back flipping. The restart re-creates the atomic fresh anyway.
     s.flip_intake_paused.store(false, Ordering::Relaxed);
 
-    let _ = s.chat_tx.send("[BAF Web] Restarting process...".to_string());
+    let _ = s
+        .chat_tx
+        .send("[BAF Web] Restarting process...".to_string());
 
     tokio::spawn(async {
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
@@ -1624,7 +1795,8 @@ async fn rest_break_now(
             .into_response();
     }
     let msg = match minutes {
-        0 => "Rest break starting (random length) — the bot disconnects, the panel stays up".to_string(),
+        0 => "Rest break starting (random length) — the bot disconnects, the panel stays up"
+            .to_string(),
         m => format!(
             "Rest break starting ({}m) — the bot disconnects, the panel stays up",
             m
@@ -1713,21 +1885,27 @@ async fn get_auctions(State(s): State<WebSharedState>) -> impl IntoResponse {
                     // Only include active auctions
                     a.get("status").and_then(|s| s.as_str()).unwrap_or("") == "active"
                 })
-                .map(|a| {
-                    AuctionEntry {
-                        uuid: String::new(),
-                        item_name: a.get("item_name").and_then(|v| v.as_str()).unwrap_or("Unknown").to_string(),
-                        tag: a.get("tag").and_then(|v| v.as_str()).map(|s| s.to_string()),
-                        highest_bid: a.get("highest_bid").and_then(|v| v.as_i64()).unwrap_or(0),
-                        starting_bid: a.get("starting_bid").and_then(|v| v.as_i64()).unwrap_or(0),
-                        bin: a.get("bin").and_then(|v| v.as_bool()).unwrap_or(false),
-                        end: String::new(),
-                        time_remaining_seconds: a.get("time_remaining_seconds").and_then(|v| v.as_i64()),
-                        buyable_in_seconds: a.get("buyable_in_seconds").and_then(|v| v.as_i64()),
-                        lore: a.get("lore").and_then(|v| v.as_array()).map(|arr| {
-                            arr.iter().filter_map(|l| l.as_str().map(|s| s.to_string())).collect()
-                        }),
-                    }
+                .map(|a| AuctionEntry {
+                    uuid: String::new(),
+                    item_name: a
+                        .get("item_name")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Unknown")
+                        .to_string(),
+                    tag: a.get("tag").and_then(|v| v.as_str()).map(|s| s.to_string()),
+                    highest_bid: a.get("highest_bid").and_then(|v| v.as_i64()).unwrap_or(0),
+                    starting_bid: a.get("starting_bid").and_then(|v| v.as_i64()).unwrap_or(0),
+                    bin: a.get("bin").and_then(|v| v.as_bool()).unwrap_or(false),
+                    end: String::new(),
+                    time_remaining_seconds: a
+                        .get("time_remaining_seconds")
+                        .and_then(|v| v.as_i64()),
+                    buyable_in_seconds: a.get("buyable_in_seconds").and_then(|v| v.as_i64()),
+                    lore: a.get("lore").and_then(|v| v.as_array()).map(|arr| {
+                        arr.iter()
+                            .filter_map(|l| l.as_str().map(|s| s.to_string()))
+                            .collect()
+                    }),
                 })
                 .collect();
             if !entries.is_empty() {
@@ -1799,11 +1977,17 @@ async fn get_auctions(State(s): State<WebSharedState>) -> impl IntoResponse {
             Ok(resp) if resp.status().is_success() => {
                 match resp.json::<serde_json::Value>().await {
                     Ok(data) => {
-                        if data.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
+                        if data
+                            .get("success")
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false)
+                        {
                             let entries = parse_hypixel_auctions(&data);
                             return Json(entries).into_response();
                         }
-                        warn!("[WebGUI] Hypixel API returned success=false, falling back to Coflnet");
+                        warn!(
+                            "[WebGUI] Hypixel API returned success=false, falling back to Coflnet"
+                        );
                     }
                     Err(e) => {
                         warn!("[WebGUI] Failed to parse Hypixel auction response: {}", e);
@@ -1811,7 +1995,10 @@ async fn get_auctions(State(s): State<WebSharedState>) -> impl IntoResponse {
                 }
             }
             Ok(resp) => {
-                warn!("[WebGUI] Hypixel API returned status {}, falling back to Coflnet", resp.status());
+                warn!(
+                    "[WebGUI] Hypixel API returned status {}, falling back to Coflnet",
+                    resp.status()
+                );
             }
             Err(e) => {
                 warn!("[WebGUI] Failed to fetch auctions from Hypixel: {}", e);
@@ -1820,10 +2007,7 @@ async fn get_auctions(State(s): State<WebSharedState>) -> impl IntoResponse {
     }
 
     // Fallback: Fetch auctions from Coflnet
-    let url = format!(
-        "https://sky.coflnet.com/api/player/{}/auctions",
-        uuid
-    );
+    let url = format!("https://sky.coflnet.com/api/player/{}/auctions", uuid);
 
     let resp = match client.get(&url).send().await {
         Ok(r) => r,
@@ -1853,7 +2037,10 @@ async fn get_auctions(State(s): State<WebSharedState>) -> impl IntoResponse {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or_else(|e| {
-            warn!("[WebGUI] System clock appears to be before Unix epoch: {}", e);
+            warn!(
+                "[WebGUI] System clock appears to be before Unix epoch: {}",
+                e
+            );
             0
         });
 
@@ -1867,7 +2054,10 @@ async fn get_auctions(State(s): State<WebSharedState>) -> impl IntoResponse {
             let end_secs = match chrono::DateTime::parse_from_rfc3339(end_str) {
                 Ok(dt) => dt.timestamp(),
                 Err(e) => {
-                    warn!("[WebGUI] Skipping auction with invalid end timestamp '{}': {}", end_str, e);
+                    warn!(
+                        "[WebGUI] Skipping auction with invalid end timestamp '{}': {}",
+                        end_str, e
+                    );
                     return None;
                 }
             };
@@ -1925,7 +2115,9 @@ async fn get_auctions(State(s): State<WebSharedState>) -> impl IntoResponse {
 
 // ── Bazaar orders endpoint ──────────────────────────────────
 
-async fn get_bazaar_orders(State(s): State<WebSharedState>) -> Json<Vec<crate::bazaar_tracker::TrackedBazaarOrder>> {
+async fn get_bazaar_orders(
+    State(s): State<WebSharedState>,
+) -> Json<Vec<crate::bazaar_tracker::TrackedBazaarOrder>> {
     Json(s.bazaar_tracker.get_orders())
 }
 
@@ -1939,9 +2131,7 @@ async fn get_queue_status(State(s): State<WebSharedState>) -> Json<Vec<crate::st
 
 async fn get_config(State(s): State<WebSharedState>) -> impl IntoResponse {
     let loader = s.config_loader.clone();
-    match tokio::task::spawn_blocking(move || {
-        loader.load()
-    }).await {
+    match tokio::task::spawn_blocking(move || loader.load()).await {
         Ok(Ok(mut config)) => {
             // Never expose COFL account session tokens to the web client. They
             // are server-managed credentials, not user-editable settings, and
@@ -1952,7 +2142,11 @@ async fn get_config(State(s): State<WebSharedState>) -> impl IntoResponse {
                 Ok(toml_str) => (StatusCode::OK, toml_str).into_response(),
                 Err(e) => {
                     error!("[WebGUI] Failed to serialize config: {}", e);
-                    (StatusCode::INTERNAL_SERVER_ERROR, "Failed to serialize config").into_response()
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        "Failed to serialize config",
+                    )
+                        .into_response()
                 }
             }
         }
@@ -1978,10 +2172,17 @@ struct SaveConfigPayload {
 /// read, and the user would be locked out of a panel they thought they had
 /// opened up. Failing the save says so while they are still looking at it.
 fn reject_empty_panel_password(config: &crate::config::Config) -> Result<(), String> {
-    if config.web_gui_password.as_deref().is_some_and(|p| !p.is_empty()) {
+    if config
+        .web_gui_password
+        .as_deref()
+        .is_some_and(|p| !p.is_empty())
+    {
         return Ok(());
     }
-    Err("Panel password cannot be empty — the panel controls the bot, so it always needs one".to_string())
+    Err(
+        "Panel password cannot be empty — the panel controls the bot, so it always needs one"
+            .to_string(),
+    )
 }
 
 async fn save_config(
@@ -1994,8 +2195,8 @@ async fn save_config(
     let toml_str = payload.config_toml;
     match tokio::task::spawn_blocking(move || -> Result<(bool, u64), String> {
         // Parse the TOML to validate it first
-        let mut config: crate::config::Config = toml::from_str(&toml_str)
-            .map_err(|e| format!("Invalid config TOML: {}", e))?;
+        let mut config: crate::config::Config =
+            toml::from_str(&toml_str).map_err(|e| format!("Invalid config TOML: {}", e))?;
         reject_empty_panel_password(&config)?;
         // Preserve server-managed COFL session tokens: get_config strips them
         // before sending to the client, so the incoming TOML never contains
@@ -2011,9 +2212,13 @@ async fn save_config(
         enable_bz.store(config.enable_bazaar_flips, Ordering::Relaxed);
         crate::auction_ownership::set_enabled(config.only_claim_own_auctions);
         // Save validated config
-        loader.save(&config).map_err(|e| format!("Failed to save config: {}", e))?;
+        loader
+            .save(&config)
+            .map_err(|e| format!("Failed to save config: {}", e))?;
         Ok((duration_changed, config.auction_duration_hours))
-    }).await {
+    })
+    .await
+    {
         Ok(Ok((duration_changed, list_hours))) => {
             info!("[WebGUI] Config saved via web panel");
             let msg = "[BAF Web] Config saved".to_string();
@@ -2037,7 +2242,11 @@ async fn save_config(
         }
         Err(e) => {
             error!("[WebGUI] Config save task panicked: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".to_string()).into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal error".to_string(),
+            )
+                .into_response()
         }
     }
 }
@@ -2074,7 +2283,11 @@ async fn get_config_json(State(s): State<WebSharedState>) -> impl IntoResponse {
             Ok(v) => (StatusCode::OK, Json(v)).into_response(),
             Err(e) => {
                 error!("[WebGUI] {}", e);
-                (StatusCode::INTERNAL_SERVER_ERROR, "Failed to serialize config").into_response()
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "Failed to serialize config",
+                )
+                    .into_response()
             }
         },
         Ok(Err(e)) => {
@@ -2123,7 +2336,9 @@ async fn save_config_json(
     let enable_bz = s.enable_bazaar_flips.clone();
     let changed: Vec<String> = patch.keys().cloned().collect();
     match tokio::task::spawn_blocking(move || -> Result<(Option<String>, bool, u64), String> {
-        let existing = loader.load().map_err(|e| format!("Failed to load config: {e}"))?;
+        let existing = loader
+            .load()
+            .map_err(|e| format!("Failed to load config: {e}"))?;
         let mut config = merge_config_patch(&existing, &patch)?;
         reject_empty_panel_password(&config)?;
         // config_to_json cleared these; restore the real ones so saving from the
@@ -2134,8 +2349,14 @@ async fn save_config_json(
         enable_ah.store(config.enable_ah_flips, Ordering::Relaxed);
         enable_bz.store(config.enable_bazaar_flips, Ordering::Relaxed);
         crate::auction_ownership::set_enabled(config.only_claim_own_auctions);
-        loader.save(&config).map_err(|e| format!("Failed to save config: {e}"))?;
-        Ok((config.web_gui_password.clone(), duration_changed, config.auction_duration_hours))
+        loader
+            .save(&config)
+            .map_err(|e| format!("Failed to save config: {e}"))?;
+        Ok((
+            config.web_gui_password.clone(),
+            duration_changed,
+            config.auction_duration_hours,
+        ))
     })
     .await
     {
@@ -2143,7 +2364,11 @@ async fn save_config_json(
             // Without this the new password only took effect on the next
             // restart, while the panel said it had saved.
             s.set_panel_password(password);
-            info!("[WebGUI] Config updated ({} field(s): {})", changed.len(), changed.join(", "));
+            info!(
+                "[WebGUI] Config updated ({} field(s): {})",
+                changed.len(),
+                changed.join(", ")
+            );
             if duration_changed {
                 // Push the new listing duration to COFL so its own listings
                 // pick it up without a restart (no-op on a finder socket).
@@ -2154,7 +2379,11 @@ async fn save_config_json(
                     }
                 });
             }
-            (StatusCode::OK, format!("Saved {} setting(s)", changed.len())).into_response()
+            (
+                StatusCode::OK,
+                format!("Saved {} setting(s)", changed.len()),
+            )
+                .into_response()
         }
         Ok(Err(msg)) => {
             warn!("[WebGUI] Config patch rejected: {}", msg);
@@ -2162,7 +2391,11 @@ async fn save_config_json(
         }
         Err(e) => {
             error!("[WebGUI] Config patch task panicked: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, "Internal error".to_string()).into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "Internal error".to_string(),
+            )
+                .into_response()
         }
     }
 }
@@ -2181,7 +2414,11 @@ fn parse_hypixel_auctions(data: &serde_json::Value) -> Vec<AuctionEntry> {
         .iter()
         .filter_map(|auction| {
             // Skip claimed auctions
-            if auction.get("claimed").and_then(|v| v.as_bool()).unwrap_or(false) {
+            if auction
+                .get("claimed")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
                 return None;
             }
             let end_ms = auction.get("end").and_then(|v| v.as_i64()).unwrap_or(0);
@@ -2243,7 +2480,13 @@ fn derive_item_tag(item_name: &str) -> Option<String> {
     Some(
         item_name
             .chars()
-            .map(|c| if c.is_alphanumeric() { c.to_ascii_uppercase() } else { '_' })
+            .map(|c| {
+                if c.is_alphanumeric() {
+                    c.to_ascii_uppercase()
+                } else {
+                    '_'
+                }
+            })
             .collect::<String>()
             .trim_matches('_')
             .to_string(),
@@ -2258,7 +2501,10 @@ async fn download_latest_log() -> impl IntoResponse {
     match tokio::fs::read(&log_path).await {
         Ok(contents) => {
             let headers = [
-                (axum::http::header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+                (
+                    axum::http::header::CONTENT_TYPE,
+                    "text/plain; charset=utf-8",
+                ),
                 (
                     axum::http::header::CONTENT_DISPOSITION,
                     "attachment; filename=\"latest.log\"",
@@ -2298,7 +2544,11 @@ async fn get_profit_public(State(s): State<WebSharedState>) -> Json<PublicProfit
     let total = ah_total + bz_total;
     let uptime = s.previous_session_secs + s.started_at.elapsed().as_secs();
     let hours = uptime as f64 / 3600.0;
-    let per_hour = if hours > 0.0 { total as f64 / hours } else { 0.0 };
+    let per_hour = if hours > 0.0 {
+        total as f64 / hours
+    } else {
+        0.0
+    };
     Json(PublicProfitResponse {
         ah_total,
         bz_total,
@@ -2317,7 +2567,11 @@ async fn get_og_image(State(s): State<WebSharedState>) -> impl IntoResponse {
     let total = ah_total + bz_total;
     let uptime = s.previous_session_secs + s.started_at.elapsed().as_secs();
     let hours = uptime as f64 / 3600.0;
-    let per_hour = if hours > 0.0 { total as f64 / hours } else { 0.0 };
+    let per_hour = if hours > 0.0 {
+        total as f64 / hours
+    } else {
+        0.0
+    };
 
     let ah_pts = s.profit_tracker.ah_points();
     let bz_pts = s.profit_tracker.bz_points();
@@ -2327,10 +2581,7 @@ async fn get_og_image(State(s): State<WebSharedState>) -> impl IntoResponse {
         StatusCode::OK,
         [
             (axum::http::header::CONTENT_TYPE, "image/png"),
-            (
-                axum::http::header::CACHE_CONTROL,
-                "public, max-age=30",
-            ),
+            (axum::http::header::CACHE_CONTROL, "public, max-age=30"),
         ],
         png,
     )
@@ -2402,8 +2653,16 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let dir = temp_dir("perms");
         let (_, key) = ensure_panel_cert(&dir).expect("certificate should be generated");
-        let mode = std::fs::metadata(&key).expect("key exists").permissions().mode();
-        assert_eq!(mode & 0o077, 0, "key is readable by group/other: {:o}", mode);
+        let mode = std::fs::metadata(&key)
+            .expect("key exists")
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o077,
+            0,
+            "key is readable by group/other: {:o}",
+            mode
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -2430,13 +2689,24 @@ mod tests {
     #[test]
     fn unauthenticated_requests_cannot_reach_control_endpoints() {
         let now = unix_now();
-        for path in ["/api/config", "/api/config.json", "/api/chat/send", "/api/status"] {
+        for path in [
+            "/api/config",
+            "/api/config.json",
+            "/api/chat/send",
+            "/api/status",
+        ] {
             assert!(
                 !request_is_authorized(Some(TEST_PW), TEST_PORT, now, path, &[]),
                 "{path} must require a session"
             );
             assert!(
-                !request_is_authorized(Some(TEST_PW), TEST_PORT, now, path, &["wrong-token".to_string()]),
+                !request_is_authorized(
+                    Some(TEST_PW),
+                    TEST_PORT,
+                    now,
+                    path,
+                    &["wrong-token".to_string()]
+                ),
                 "{path} must reject an unknown token"
             );
         }
@@ -2446,7 +2716,13 @@ mod tests {
     fn a_valid_session_token_is_accepted_however_it_arrives() {
         let now = unix_now();
         let token = a_valid_token();
-        assert!(request_is_authorized(Some(TEST_PW), TEST_PORT, now, "/api/config", &[token.clone()]));
+        assert!(request_is_authorized(
+            Some(TEST_PW),
+            TEST_PORT,
+            now,
+            "/api/config",
+            &[token.clone()]
+        ));
         // Several presented tokens: one good is enough (cookie + ?token= on a WS).
         assert!(request_is_authorized(
             Some(TEST_PW),
@@ -2461,10 +2737,15 @@ mod tests {
     fn only_the_login_form_and_share_endpoints_are_public() {
         let now = unix_now();
         for path in ["/", "/api/login", "/api/profit/public", "/api/og-image.png"] {
-            assert!(request_is_authorized(Some(TEST_PW), TEST_PORT, now, path, &[]), "{path} should be public");
+            assert!(
+                request_is_authorized(Some(TEST_PW), TEST_PORT, now, path, &[]),
+                "{path} should be public"
+            );
         }
-        assert!(!request_is_authorized(Some(TEST_PW), TEST_PORT, now, "/api/profit", &[]),
-            "the full profit endpoint is not the public one");
+        assert!(
+            !request_is_authorized(Some(TEST_PW), TEST_PORT, now, "/api/profit", &[]),
+            "the full profit endpoint is not the public one"
+        );
     }
 
     /// The reported bug: sign into one bot's panel, get thrown out of another's.
@@ -2477,7 +2758,13 @@ mod tests {
         let token_8081 = mint_session(TEST_PW, 8081);
 
         assert!(
-            request_is_authorized(Some(TEST_PW), 8081, now, "/api/status", &[token_8081.clone()]),
+            request_is_authorized(
+                Some(TEST_PW),
+                8081,
+                now,
+                "/api/status",
+                &[token_8081.clone()]
+            ),
             "the token works on the panel that issued it"
         );
         assert!(
@@ -2509,7 +2796,13 @@ mod tests {
     fn changing_the_password_invalidates_existing_sessions() {
         let now = unix_now();
         let token = mint_session(TEST_PW, TEST_PORT);
-        assert!(!request_is_authorized(Some("a-new-password"), TEST_PORT, now, "/api/status", &[token]));
+        assert!(!request_is_authorized(
+            Some("a-new-password"),
+            TEST_PORT,
+            now,
+            "/api/status",
+            &[token]
+        ));
     }
 
     #[test]
@@ -2517,13 +2810,19 @@ mod tests {
         let now = unix_now();
         // Correctly signed, but for a moment already past.
         let expired = format!("{}.{}", now - 1, sign_session(TEST_PW, TEST_PORT, now - 1));
-        assert!(!session_is_valid(&expired, TEST_PW, TEST_PORT, now), "expired token");
+        assert!(
+            !session_is_valid(&expired, TEST_PW, TEST_PORT, now),
+            "expired token"
+        );
 
         // Pushing the expiry out without knowing the password must not work.
         let token = mint_session(TEST_PW, TEST_PORT);
         let signature = token.split_once('.').unwrap().1;
         let forged = format!("{}.{}", now + 999_999, signature);
-        assert!(!session_is_valid(&forged, TEST_PW, TEST_PORT, now), "expiry is covered by the signature");
+        assert!(
+            !session_is_valid(&forged, TEST_PW, TEST_PORT, now),
+            "expiry is covered by the signature"
+        );
 
         assert!(!session_is_valid("garbage", TEST_PW, TEST_PORT, now));
         assert!(!session_is_valid("", TEST_PW, TEST_PORT, now));
@@ -2572,7 +2871,10 @@ mod tests {
             .timeout(std::time::Duration::from_secs(10))
             .send()
             .await;
-        assert!(plain.is_err(), "plaintext request to the TLS port should fail");
+        assert!(
+            plain.is_err(),
+            "plaintext request to the TLS port should fail"
+        );
 
         server.abort();
         let _ = std::fs::remove_dir_all(&dir);
@@ -2649,7 +2951,10 @@ mod tests {
             .into_iter()
             .filter(|k| !fields.contains(k))
             .collect();
-        assert!(stale.is_empty(), "CONFIG_SCHEMA names fields that no longer exist in Config: {stale:?}");
+        assert!(
+            stale.is_empty(),
+            "CONFIG_SCHEMA names fields that no longer exist in Config: {stale:?}"
+        );
     }
 
     /// A configured certificate must actually be picked up. Removing these
@@ -2666,7 +2971,10 @@ mod tests {
         );
         // Whitespace-only counts as unset, matching how the config serializes
         // "not configured" as an empty string.
-        assert_eq!(choose_panel_cert(Some("  "), Some("")), PanelCert::SelfSigned);
+        assert_eq!(
+            choose_panel_cert(Some("  "), Some("")),
+            PanelCert::SelfSigned
+        );
         assert_eq!(choose_panel_cert(None, None), PanelCert::SelfSigned);
     }
 
@@ -2676,11 +2984,17 @@ mod tests {
     fn half_configured_cert_is_reported_not_ignored() {
         assert_eq!(
             choose_panel_cert(Some("/etc/le/fullchain.pem"), None),
-            PanelCert::Incomplete { have: "web_tls_cert_path", missing: "web_tls_key_path" }
+            PanelCert::Incomplete {
+                have: "web_tls_cert_path",
+                missing: "web_tls_key_path"
+            }
         );
         assert_eq!(
             choose_panel_cert(None, Some("/etc/le/privkey.pem")),
-            PanelCert::Incomplete { have: "web_tls_key_path", missing: "web_tls_cert_path" }
+            PanelCert::Incomplete {
+                have: "web_tls_key_path",
+                missing: "web_tls_cert_path"
+            }
         );
     }
 
@@ -2754,8 +3068,8 @@ mod tests {
 
     /// Write a freshly generated certificate to `dir`, returning its DER.
     fn issue_cert_into(dir: &std::path::Path, san: &str) -> Vec<u8> {
-        let issued = rcgen::generate_simple_self_signed(vec![san.to_string()])
-            .expect("generate test cert");
+        let issued =
+            rcgen::generate_simple_self_signed(vec![san.to_string()]).expect("generate test cert");
         std::fs::write(dir.join("cert.pem"), issued.cert.pem()).expect("write cert");
         std::fs::write(dir.join("key.pem"), issued.key_pair.serialize_pem()).expect("write key");
         issued.cert.der().to_vec()
@@ -2796,7 +3110,9 @@ mod tests {
 
         let cert = dir.join("cert.pem");
         let key = dir.join("key.pem");
-        let tls = build_web_tls(cert.to_str(), key.to_str()).await.expect("loads");
+        let tls = build_web_tls(cert.to_str(), key.to_str())
+            .await
+            .expect("loads");
 
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");
@@ -2809,11 +3125,18 @@ mod tests {
                 .ok();
         });
         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
-        assert_eq!(served_cert_der(addr).await, first_der, "serves the original certificate");
+        assert_eq!(
+            served_cert_der(addr).await,
+            first_der,
+            "serves the original certificate"
+        );
 
         // Simulate the renewal: same paths, brand new certificate.
         let renewed_der = issue_cert_into(&dir, "127.0.0.1");
-        assert_ne!(renewed_der, first_der, "the renewal must be a different certificate");
+        assert_ne!(
+            renewed_der, first_der,
+            "the renewal must be a different certificate"
+        );
 
         // Drive the same reload the background watcher performs, rather than
         // sleeping out its poll interval.
@@ -2847,8 +3170,8 @@ mod tests {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
         let addr = listener.local_addr().expect("addr");
         let app = Router::new().route("/", get(|| async { "panel" }));
-        let acceptor = axum_server::tls_rustls::RustlsAcceptor::new(tls)
-            .acceptor(RedirectPlainHttpToHttps);
+        let acceptor =
+            axum_server::tls_rustls::RustlsAcceptor::new(tls).acceptor(RedirectPlainHttpToHttps);
         tokio::spawn(async move {
             axum_server::from_tcp(listener)
                 .acceptor(acceptor)
@@ -2875,9 +3198,15 @@ mod tests {
         .await
         .expect("client");
 
-        assert!(raw.starts_with("HTTP/1.1 302"), "expected a redirect, got: {raw:?}");
         assert!(
-            raw.contains(&format!("Location: https://localhost:{}/config", addr.port())),
+            raw.starts_with("HTTP/1.1 302"),
+            "expected a redirect, got: {raw:?}"
+        );
+        assert!(
+            raw.contains(&format!(
+                "Location: https://localhost:{}/config",
+                addr.port()
+            )),
             "the redirect must preserve host AND path, got: {raw:?}"
         );
 
@@ -2908,7 +3237,10 @@ mod tests {
             Some("/nonexistent/privkey.pem"),
         )
         .await;
-        assert!(result.is_ok(), "a bad cert path must not stop the panel from starting");
+        assert!(
+            result.is_ok(),
+            "a bad cert path must not stop the panel from starting"
+        );
     }
 
     #[test]
@@ -2942,7 +3274,10 @@ mod tests {
         // Wrong type must fail here, not corrupt config.toml.
         let mistyped: serde_json::Map<String, serde_json::Value> =
             serde_json::from_str(r#"{"bed_pre_click_ms": "soon"}"#).unwrap();
-        assert!(merge_config_patch(&base, &mistyped).is_err(), "a string is not a u64");
+        assert!(
+            merge_config_patch(&base, &mistyped).is_err(),
+            "a string is not a u64"
+        );
     }
 
     #[test]
@@ -2957,13 +3292,22 @@ mod tests {
         );
         let json = config_to_json(&base).expect("serializes");
         let text = serde_json::to_string(&json).unwrap();
-        assert!(!text.contains("secret-session-id"), "session tokens must never reach the browser");
+        assert!(
+            !text.contains("secret-session-id"),
+            "session tokens must never reach the browser"
+        );
     }
 
     #[test]
     fn derive_tag_from_item_name() {
-        assert_eq!(derive_item_tag("Aspect of the End"), Some("ASPECT_OF_THE_END".to_string()));
-        assert_eq!(derive_item_tag("Mithril Drill SX-R326"), Some("MITHRIL_DRILL_SX_R326".to_string()));
+        assert_eq!(
+            derive_item_tag("Aspect of the End"),
+            Some("ASPECT_OF_THE_END".to_string())
+        );
+        assert_eq!(
+            derive_item_tag("Mithril Drill SX-R326"),
+            Some("MITHRIL_DRILL_SX_R326".to_string())
+        );
         assert_eq!(derive_item_tag(""), None);
         assert_eq!(derive_item_tag("Unknown"), None);
     }
@@ -3032,7 +3376,11 @@ mod tests {
             "~/baf/run.sh",
             "CHMOD 777 file",
         ] {
-            assert!(looks_like_shell_command(cmd), "should have blocked: {}", cmd);
+            assert!(
+                looks_like_shell_command(cmd),
+                "should have blocked: {}",
+                cmd
+            );
         }
 
         // Real chat and real bot commands must still go through. A false

@@ -3,7 +3,9 @@ use once_cell::sync::Lazy;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracing_appender::rolling::{RollingFileAppender, Rotation};
-use tracing_subscriber::{filter::LevelFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
+use tracing_subscriber::{
+    filter::LevelFilter, fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer,
+};
 
 /// When `true`, the logger prefixes all messages with `userId:instanceId`.
 /// Set once at startup via `set_vps_log_prefix`.
@@ -64,12 +66,7 @@ pub fn init_logger() -> Result<()> {
     cleanup_old_logs(&logs_dir, 7);
 
     // Create file appender
-    let file_appender = RollingFileAppender::new(
-        Rotation::NEVER,
-        &logs_dir,
-        "latest.log",
-    );
-
+    let file_appender = RollingFileAppender::new(Rotation::NEVER, &logs_dir, "latest.log");
 
     // Create filter with specific rules to suppress noise.
     // Azalea library crates emit harmless errors & warnings (e.g. set_equipment
@@ -86,17 +83,20 @@ pub fn init_logger() -> Result<()> {
                 .with_writer(std::io::stdout)
                 .with_ansi(true)
                 .with_target(false)
-                .with_filter(LevelFilter::WARN)
+                .with_filter(LevelFilter::WARN),
         )
         .with(
             fmt::layer()
                 .with_writer(file_appender)
                 .with_ansi(false)
-                .with_target(true)
+                .with_target(true),
         )
         .init();
 
-    tracing::info!("Logger initialized, writing to {:?}", logs_dir.join("latest.log"));
+    tracing::info!(
+        "Logger initialized, writing to {:?}",
+        logs_dir.join("latest.log")
+    );
     Ok(())
 }
 
@@ -271,7 +271,7 @@ mod tests {
     fn test_mc_to_ansi() {
         let text = "§f[§4BAF§f]: §aTest";
         let ansi = mc_to_ansi(text);
-        
+
         // Should contain ANSI escape codes
         assert!(ansi.contains("\x1b["));
         // Should end with reset
@@ -292,10 +292,10 @@ mod tests {
         assert!(mc_to_ansi("§c").contains("\x1b[91m")); // Red
         assert!(mc_to_ansi("§e").contains("\x1b[93m")); // Yellow
         assert!(mc_to_ansi("§f").contains("\x1b[97m")); // White
-        
+
         // Test formatting codes
-        assert!(mc_to_ansi("§l").contains("\x1b[1m"));  // Bold
-        assert!(mc_to_ansi("§r").contains("\x1b[0m"));  // Reset
+        assert!(mc_to_ansi("§l").contains("\x1b[1m")); // Bold
+        assert!(mc_to_ansi("§r").contains("\x1b[0m")); // Reset
     }
 
     use std::sync::{Arc, Mutex};
@@ -306,7 +306,10 @@ mod tests {
 
     impl<S: tracing::Subscriber> Layer<S> for Capture {
         fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
-            self.0.lock().unwrap().push(event.metadata().target().to_string());
+            self.0
+                .lock()
+                .unwrap()
+                .push(event.metadata().target().to_string());
         }
     }
 
@@ -346,7 +349,11 @@ mod tests {
             tracing::error!(target: "rustls::msgs::handshake", "something actually broke");
             tracing::error!(target: "rustls", "a different rustls module");
         });
-        assert_eq!(seen.len(), 2, "errors must survive the filter, got: {seen:?}");
+        assert_eq!(
+            seen.len(),
+            2,
+            "errors must survive the filter, got: {seen:?}"
+        );
     }
 
     /// Our own logging is what the filter exists to protect.
@@ -356,7 +363,11 @@ mod tests {
             tracing::warn!(target: "frikadellen_baf::web::server", "[WebTLS] something worth seeing");
             tracing::info!(target: "frikadellen_baf", "startup");
         });
-        assert_eq!(seen.len(), 2, "the bot's own logs must not be filtered, got: {seen:?}");
+        assert_eq!(
+            seen.len(),
+            2,
+            "the bot's own logs must not be filtered, got: {seen:?}"
+        );
     }
 
     #[test]
@@ -367,5 +378,4 @@ mod tests {
         });
         assert!(seen.is_empty(), "azalea noise must stay off, got: {seen:?}");
     }
-
 }

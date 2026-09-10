@@ -10,7 +10,11 @@ use tracing::{error, info};
 pub fn restart_process() -> ! {
     let exe = std::env::current_exe().expect("Failed to get current executable path");
     let args: Vec<String> = std::env::args().skip(1).collect();
-    info!("[Restart] Re-executing {} with args {:?}", exe.display(), args);
+    info!(
+        "[Restart] Re-executing {} with args {:?}",
+        exe.display(),
+        args
+    );
     #[cfg(unix)]
     {
         use std::os::unix::process::CommandExt;

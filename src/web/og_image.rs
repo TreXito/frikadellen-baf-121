@@ -3,7 +3,6 @@
 /// Produces a 1200×630 PNG stats card for OpenGraph / Discord embeds.
 /// Uses a built-in 5×7 bitmap font (scaled up) so no external font
 /// files or heavy dependencies are needed — only the `image` crate.
-
 use image::{ImageBuffer, Rgba, RgbaImage};
 use std::io::Cursor;
 
@@ -430,7 +429,10 @@ pub fn generate_og_image(
             .collect();
 
         // Determine value range across all three series
-        let all_vals = ah_vals.iter().chain(bz_vals.iter()).chain(total_vals.iter());
+        let all_vals = ah_vals
+            .iter()
+            .chain(bz_vals.iter())
+            .chain(total_vals.iter());
         let min_val = *all_vals.clone().min().unwrap_or(&0);
         let max_val = *all_vals.max().unwrap_or(&0);
         let range = (max_val - min_val).max(1) as f64;
@@ -455,8 +457,7 @@ pub fn generate_og_image(
 
         // Draw a zero-line if the range crosses zero
         if min_val < 0 && max_val > 0 {
-            let zero_y_px =
-                (plot_bottom as f64 - ((0 - min_val) as f64 / range) * plot_h) as u32;
+            let zero_y_px = (plot_bottom as f64 - ((0 - min_val) as f64 / range) * plot_h) as u32;
             for px in (plot_left..plot_right).step_by(6) {
                 fill_rect(&mut img, px, zero_y_px, 3, 1, Rgba([50, 55, 90, 255]));
             }

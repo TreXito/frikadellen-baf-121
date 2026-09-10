@@ -17,10 +17,12 @@ pub struct ChatMessage {
 }
 
 /// Parse websocket message data (handles double-JSON encoding)
-pub fn parse_message_data<T: for<'de> Deserialize<'de>>(data: &str) -> Result<T, serde_json::Error> {
+pub fn parse_message_data<T: for<'de> Deserialize<'de>>(
+    data: &str,
+) -> Result<T, serde_json::Error> {
     // First parse as Value to handle potential double encoding
     let value: Value = serde_json::from_str(data)?;
-    
+
     // If it's a string, parse it again
     if let Some(string_data) = value.as_str() {
         serde_json::from_str(string_data)
@@ -71,10 +73,14 @@ mod tests {
         let result = inject_referral_id(url);
         assert!(result.contains("refId=9KKPN9"));
         assert!(result.contains("&amp;conId=abc123"));
-        assert_eq!(result, "https://sky.coflnet.com/authmod?userId=123&amp;refId=9KKPN9&amp;conId=abc123");
+        assert_eq!(
+            result,
+            "https://sky.coflnet.com/authmod?userId=123&amp;refId=9KKPN9&amp;conId=abc123"
+        );
 
         // Test already has refId - should not inject again
-        let url_with_ref = "https://sky.coflnet.com/authmod?userId=123&amp;refId=existing&amp;conId=abc123";
+        let url_with_ref =
+            "https://sky.coflnet.com/authmod?userId=123&amp;refId=existing&amp;conId=abc123";
         let result = inject_referral_id(url_with_ref);
         assert_eq!(result, url_with_ref);
 
@@ -88,15 +94,23 @@ mod tests {
     fn test_chat_message_with_referral_id() {
         let msg = ChatMessage {
             text: "Click here to authenticate".to_string(),
-            on_click: Some("https://sky.coflnet.com/authmod?userId=123&amp;conId=abc123".to_string()),
-            hover: Some("Hover text with https://sky.coflnet.com/authmod?test=1&amp;conId=xyz".to_string()),
+            on_click: Some(
+                "https://sky.coflnet.com/authmod?userId=123&amp;conId=abc123".to_string(),
+            ),
+            hover: Some(
+                "Hover text with https://sky.coflnet.com/authmod?test=1&amp;conId=xyz".to_string(),
+            ),
         };
 
         let processed = msg.with_referral_id();
-        
+
         // Check that refId was injected into onClick
-        assert!(processed.on_click.as_ref().unwrap().contains("refId=9KKPN9"));
-        
+        assert!(processed
+            .on_click
+            .as_ref()
+            .unwrap()
+            .contains("refId=9KKPN9"));
+
         // Check that refId was injected into hover
         assert!(processed.hover.as_ref().unwrap().contains("refId=9KKPN9"));
     }
@@ -109,7 +123,10 @@ mod tests {
         let messages = messages.unwrap();
         assert_eq!(messages.len(), 2);
         assert_eq!(messages[0].text, "Hello");
-        assert_eq!(messages[0].on_click, Some("https://example.com".to_string()));
+        assert_eq!(
+            messages[0].on_click,
+            Some("https://example.com".to_string())
+        );
         assert_eq!(messages[1].text, "World");
         assert_eq!(messages[1].on_click, None);
     }

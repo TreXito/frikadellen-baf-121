@@ -167,7 +167,11 @@ mod tests {
             tracker.record_ah_profit(1);
         }
         let points = tracker.ah_points();
-        assert!(points.len() <= MAX_POINTS, "points should stay bounded, got {}", points.len());
+        assert!(
+            points.len() <= MAX_POINTS,
+            "points should stay bounded, got {}",
+            points.len()
+        );
         // The running total must remain correct despite downsampling.
         assert_eq!(tracker.totals().0, (MAX_POINTS * 3) as i64);
     }

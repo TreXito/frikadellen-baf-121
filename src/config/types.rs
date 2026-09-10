@@ -1,6 +1,6 @@
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use chrono::{DateTime, Utc};
 
 /// Serde helpers that serialize `None` as `""` and deserialize `""` as `None`.
 /// This ensures optional string config fields always appear in the saved TOML file
@@ -196,7 +196,10 @@ pub struct Config {
     #[serde(default = "default_bazaar_order_check_interval_seconds")]
     pub bazaar_order_check_interval_seconds: u64,
 
-    #[serde(default = "default_bazaar_order_cancel_minutes_per_million", alias = "bazaar_order_cancel_minutes")]
+    #[serde(
+        default = "default_bazaar_order_cancel_minutes_per_million",
+        alias = "bazaar_order_cancel_minutes"
+    )]
     pub bazaar_order_cancel_minutes_per_million: u64,
 
     /// Bazaar sell tax rate as a percentage (e.g. 1.25 = 1.25%).
@@ -545,7 +548,8 @@ impl Default for Config {
             auction_listing_delay_ms: default_auction_listing_delay_ms(),
             // Bazaar settings
             bazaar_order_check_interval_seconds: default_bazaar_order_check_interval_seconds(),
-            bazaar_order_cancel_minutes_per_million: default_bazaar_order_cancel_minutes_per_million(),
+            bazaar_order_cancel_minutes_per_million:
+                default_bazaar_order_cancel_minutes_per_million(),
             bazaar_tax_rate: default_bazaar_tax_rate(),
             // Auction / inventory / runtime
             auction_duration_hours: default_auction_duration_hours(),
@@ -603,7 +607,11 @@ impl Config {
     /// unauthenticated one on a public VPS is exactly how instances get taken
     /// over. Blanking the field is therefore not a way to disable auth.
     pub fn ensure_web_gui_password(&mut self) -> Option<String> {
-        if self.web_gui_password.as_deref().is_some_and(|p| !p.is_empty()) {
+        if self
+            .web_gui_password
+            .as_deref()
+            .is_some_and(|p| !p.is_empty())
+        {
             return None;
         }
         let generated = generate_web_password();
@@ -633,7 +641,11 @@ impl Config {
             .strip_prefix("wss://")
             .or_else(|| url.strip_prefix("ws://"))
             .unwrap_or(url);
-        if host.split('/').next().is_some_and(|h| h == "sky.coflnet.com") {
+        if host
+            .split('/')
+            .next()
+            .is_some_and(|h| h == "sky.coflnet.com")
+        {
             return None;
         }
         let previous = self.websocket_url.clone();
@@ -815,7 +827,10 @@ mod tests {
     fn default_websocket_is_the_neutral_coflnet_entry_point() {
         // Not a regional host: COFL redirects each user to their nearest
         // modsocket, so this one value is correct everywhere.
-        assert_eq!(Config::default().websocket_url, "wss://sky.coflnet.com/modsocket");
+        assert_eq!(
+            Config::default().websocket_url,
+            "wss://sky.coflnet.com/modsocket"
+        );
         assert!(Config::default().reset_regional_websocket_url().is_none());
     }
 
@@ -851,13 +866,20 @@ mod tests {
             ..Config::default()
         };
         assert!(config.reset_regional_websocket_url().is_none());
-        assert_eq!(config.multisocket_urls, vec!["wss://us-sky.coflnet.com/modsocket"]);
+        assert_eq!(
+            config.multisocket_urls,
+            vec!["wss://us-sky.coflnet.com/modsocket"]
+        );
     }
 
     #[test]
     fn default_config_includes_bedtiming() {
-        let toml = toml::to_string_pretty(&Config::default()).expect("default config should serialize");
-        assert!(toml.contains("bedtiming = true"), "bedtiming should appear in default config");
+        let toml =
+            toml::to_string_pretty(&Config::default()).expect("default config should serialize");
+        assert!(
+            toml.contains("bedtiming = true"),
+            "bedtiming should appear in default config"
+        );
     }
 
     #[test]
@@ -883,7 +905,8 @@ mod tests {
 
     #[test]
     fn parses_bed_spam_click_delay() {
-        let config: Config = toml::from_str("bed_spam_click_delay = 125").expect("config should parse");
+        let config: Config =
+            toml::from_str("bed_spam_click_delay = 125").expect("config should parse");
         assert_eq!(config.bed_spam_click_delay, 125);
     }
 
@@ -901,7 +924,8 @@ mod tests {
 
     #[test]
     fn single_ingame_name() {
-        let config: Config = toml::from_str(r#"ingame_name = "Player1""#).expect("config should parse");
+        let config: Config =
+            toml::from_str(r#"ingame_name = "Player1""#).expect("config should parse");
         assert_eq!(config.ingame_names(), vec!["Player1"]);
     }
 
@@ -927,26 +951,29 @@ mod tests {
 
     #[test]
     fn parses_multi_switch_time() {
-        let config: Config = toml::from_str("multi_switch_time = 12.0").expect("config should parse");
+        let config: Config =
+            toml::from_str("multi_switch_time = 12.0").expect("config should parse");
         assert_eq!(config.multi_switch_time, Some(12.0));
     }
 
     #[test]
     fn multi_switch_time_zero_is_none() {
-        let config: Config = toml::from_str("multi_switch_time = 0.0").expect("config should parse");
+        let config: Config =
+            toml::from_str("multi_switch_time = 0.0").expect("config should parse");
         assert_eq!(config.multi_switch_time, None);
     }
 
     #[test]
     fn multi_switch_time_default_serializes_as_zero() {
-        let toml = toml::to_string_pretty(&Config::default()).expect("default config should serialize");
+        let toml =
+            toml::to_string_pretty(&Config::default()).expect("default config should serialize");
         assert!(toml.contains("multi_switch_time = 0.0"));
     }
 
     #[test]
     fn proxy_credentials_parsing() {
-        let config: Config =
-            toml::from_str(r#"proxy_credentials = "myuser:mypassword""#).expect("config should parse");
+        let config: Config = toml::from_str(r#"proxy_credentials = "myuser:mypassword""#)
+            .expect("config should parse");
         assert_eq!(config.proxy_username(), Some("myuser"));
         assert_eq!(config.proxy_password(), Some("mypassword"));
     }
@@ -967,14 +994,18 @@ mod tests {
 
     #[test]
     fn web_gui_password_empty_string_is_none() {
-        let config: Config = toml::from_str(r#"web_gui_password = """#).expect("config should parse");
+        let config: Config =
+            toml::from_str(r#"web_gui_password = """#).expect("config should parse");
         assert_eq!(config.web_gui_password, None);
     }
 
     #[test]
     fn ensure_web_gui_password_fills_in_a_missing_one() {
-        let mut config: Config = toml::from_str(r#"web_gui_password = """#).expect("config should parse");
-        let generated = config.ensure_web_gui_password().expect("should generate one");
+        let mut config: Config =
+            toml::from_str(r#"web_gui_password = """#).expect("config should parse");
+        let generated = config
+            .ensure_web_gui_password()
+            .expect("should generate one");
         assert_eq!(config.web_gui_password.as_deref(), Some(generated.as_str()));
         assert_eq!(generated.len(), 20);
         assert!(generated.chars().all(|c| c.is_ascii_alphanumeric()));
@@ -1029,21 +1060,52 @@ mod tests {
         config.web_tls_key_path = Some("/etc/le/privkey.pem".to_string());
         let toml = toml::to_string_pretty(&config).expect("serializes");
         let parsed: Config = toml::from_str(&toml).expect("parses back");
-        assert_eq!(parsed.web_tls_cert_path.as_deref(), Some("/etc/le/fullchain.pem"));
-        assert_eq!(parsed.web_tls_key_path.as_deref(), Some("/etc/le/privkey.pem"));
+        assert_eq!(
+            parsed.web_tls_cert_path.as_deref(),
+            Some("/etc/le/fullchain.pem")
+        );
+        assert_eq!(
+            parsed.web_tls_key_path.as_deref(),
+            Some("/etc/le/privkey.pem")
+        );
     }
 
     #[test]
     fn optional_fields_appear_in_default_config() {
-        let toml = toml::to_string_pretty(&Config::default()).expect("default config should serialize");
-        assert!(toml.contains("web_gui_password"), "web_gui_password should appear in default config");
-        assert!(toml.contains("proxy_address"), "proxy_address should appear in default config");
-        assert!(toml.contains("proxy_credentials"), "proxy_credentials should appear in default config");
-        assert!(toml.contains("multi_switch_time"), "multi_switch_time should appear in default config");
-        assert!(toml.contains("discord_id"), "discord_id should appear in default config");
-        assert!(toml.contains("do_not_relist_ids"), "do_not_relist_ids should appear in default config");
-        assert!(toml.contains("do_not_relist_finders"), "do_not_relist_finders should appear in default config");
-        assert!(toml.contains("do_not_relist_over_profit"), "do_not_relist_over_profit should appear in default config");
+        let toml =
+            toml::to_string_pretty(&Config::default()).expect("default config should serialize");
+        assert!(
+            toml.contains("web_gui_password"),
+            "web_gui_password should appear in default config"
+        );
+        assert!(
+            toml.contains("proxy_address"),
+            "proxy_address should appear in default config"
+        );
+        assert!(
+            toml.contains("proxy_credentials"),
+            "proxy_credentials should appear in default config"
+        );
+        assert!(
+            toml.contains("multi_switch_time"),
+            "multi_switch_time should appear in default config"
+        );
+        assert!(
+            toml.contains("discord_id"),
+            "discord_id should appear in default config"
+        );
+        assert!(
+            toml.contains("do_not_relist_ids"),
+            "do_not_relist_ids should appear in default config"
+        );
+        assert!(
+            toml.contains("do_not_relist_finders"),
+            "do_not_relist_finders should appear in default config"
+        );
+        assert!(
+            toml.contains("do_not_relist_over_profit"),
+            "do_not_relist_over_profit should appear in default config"
+        );
     }
 
     #[test]
@@ -1058,16 +1120,30 @@ mod tests {
     fn relist_block_reason_covers_all_three_axes() {
         let c = Config::default();
         // Item id (case-insensitive)
-        assert!(c.relist_block_reason(Some("hyperion"), None, None).is_some());
-        assert!(c.relist_block_reason(Some("ASPECT_OF_THE_END"), None, None).is_none());
+        assert!(c
+            .relist_block_reason(Some("hyperion"), None, None)
+            .is_some());
+        assert!(c
+            .relist_block_reason(Some("ASPECT_OF_THE_END"), None, None)
+            .is_none());
         // Finder (punctuation/case-insensitive)
-        assert!(c.relist_block_reason(None, Some("CRAFT_COST"), None).is_some());
-        assert!(c.relist_block_reason(None, Some("CraftCost"), None).is_some());
+        assert!(c
+            .relist_block_reason(None, Some("CRAFT_COST"), None)
+            .is_some());
+        assert!(c
+            .relist_block_reason(None, Some("CraftCost"), None)
+            .is_some());
         assert!(c.relist_block_reason(None, Some("SNIPER"), None).is_none());
         // Profit ceiling (>= 200m held; below still lists)
-        assert!(c.relist_block_reason(None, None, Some(200_000_000)).is_some());
-        assert!(c.relist_block_reason(None, None, Some(250_000_000)).is_some());
-        assert!(c.relist_block_reason(None, None, Some(199_999_999)).is_none());
+        assert!(c
+            .relist_block_reason(None, None, Some(200_000_000))
+            .is_some());
+        assert!(c
+            .relist_block_reason(None, None, Some(250_000_000))
+            .is_some());
+        assert!(c
+            .relist_block_reason(None, None, Some(199_999_999))
+            .is_none());
         // Nothing supplied → never blocks.
         assert!(c.relist_block_reason(None, None, None).is_none());
     }
@@ -1075,7 +1151,10 @@ mod tests {
     #[test]
     fn relist_over_profit_zero_disables() {
         let c: Config = toml::from_str("do_not_relist_over_profit = 0").expect("parse");
-        assert!(!c.should_not_relist_profit(i64::MAX), "0 disables the profit gate");
+        assert!(
+            !c.should_not_relist_profit(i64::MAX),
+            "0 disables the profit gate"
+        );
     }
 
     #[test]
@@ -1102,14 +1181,18 @@ proxy_credentials = "myuser:mypassword"
         )
         .expect("config should parse");
         assert!(config.proxy_enabled);
-        assert_eq!(config.proxy_address.as_deref(), Some("121.124.241.211:3313"));
+        assert_eq!(
+            config.proxy_address.as_deref(),
+            Some("121.124.241.211:3313")
+        );
         assert_eq!(config.proxy_username(), Some("myuser"));
         assert_eq!(config.proxy_password(), Some("mypassword"));
     }
 
     #[test]
     fn default_config_has_no_skip_field() {
-        let toml = toml::to_string_pretty(&Config::default()).expect("default config should serialize");
+        let toml =
+            toml::to_string_pretty(&Config::default()).expect("default config should serialize");
         assert!(!toml.contains("[skip]"));
         assert!(!toml.contains("min_profit"));
     }
@@ -1123,7 +1206,8 @@ proxy_credentials = "myuser:mypassword"
 
     #[test]
     fn discord_id_parses_and_returns_active() {
-        let config: Config = toml::from_str(r#"discord_id = "123456789012345678""#).expect("config should parse");
+        let config: Config =
+            toml::from_str(r#"discord_id = "123456789012345678""#).expect("config should parse");
         assert_eq!(config.active_discord_id(), Some("123456789012345678"));
     }
 
@@ -1153,8 +1237,12 @@ proxy_credentials = "myuser:mypassword"
 
     #[test]
     fn skip_appears_in_default_config() {
-        let toml = toml::to_string_pretty(&Config::default()).expect("default config should serialize");
-        assert!(toml.contains("skip = false"), "skip should appear in default config");
+        let toml =
+            toml::to_string_pretty(&Config::default()).expect("default config should serialize");
+        assert!(
+            toml.contains("skip = false"),
+            "skip should appear in default config"
+        );
     }
 
     #[test]
@@ -1166,29 +1254,44 @@ proxy_credentials = "myuser:mypassword"
 
     #[test]
     fn bazaar_webhook_url_falls_back_to_regular() {
-        let config: Config = toml::from_str(r#"webhook_url = "https://discord.com/api/webhooks/main""#)
-            .expect("config should parse");
-        assert_eq!(config.active_bazaar_webhook_url(), Some("https://discord.com/api/webhooks/main"));
+        let config: Config =
+            toml::from_str(r#"webhook_url = "https://discord.com/api/webhooks/main""#)
+                .expect("config should parse");
+        assert_eq!(
+            config.active_bazaar_webhook_url(),
+            Some("https://discord.com/api/webhooks/main")
+        );
     }
 
     #[test]
     fn bazaar_webhook_url_overrides_regular() {
         let config: Config = toml::from_str(
             r#"webhook_url = "https://discord.com/api/webhooks/main"
-bazaar_webhook_url = "https://discord.com/api/webhooks/bazaar""#
-        ).expect("config should parse");
-        assert_eq!(config.active_bazaar_webhook_url(), Some("https://discord.com/api/webhooks/bazaar"));
+bazaar_webhook_url = "https://discord.com/api/webhooks/bazaar""#,
+        )
+        .expect("config should parse");
+        assert_eq!(
+            config.active_bazaar_webhook_url(),
+            Some("https://discord.com/api/webhooks/bazaar")
+        );
         // Regular webhook is unchanged
-        assert_eq!(config.active_webhook_url(), Some("https://discord.com/api/webhooks/main"));
+        assert_eq!(
+            config.active_webhook_url(),
+            Some("https://discord.com/api/webhooks/main")
+        );
     }
 
     #[test]
     fn bazaar_webhook_url_empty_string_falls_back() {
         let config: Config = toml::from_str(
             r#"webhook_url = "https://discord.com/api/webhooks/main"
-bazaar_webhook_url = """#
-        ).expect("config should parse");
-        assert_eq!(config.active_bazaar_webhook_url(), Some("https://discord.com/api/webhooks/main"));
+bazaar_webhook_url = """#,
+        )
+        .expect("config should parse");
+        assert_eq!(
+            config.active_bazaar_webhook_url(),
+            Some("https://discord.com/api/webhooks/main")
+        );
     }
 
     #[test]
@@ -1202,13 +1305,15 @@ bazaar_webhook_url = """#
     fn finder_flip_webhook_url_is_strictly_opt_in() {
         // The raw found-flip feed must never fall back to the personal
         // webhook: unset (or empty) means the feed is simply not posted.
-        let config: Config = toml::from_str(r#"webhook_url = "https://discord.com/api/webhooks/main""#)
-            .expect("config should parse");
+        let config: Config =
+            toml::from_str(r#"webhook_url = "https://discord.com/api/webhooks/main""#)
+                .expect("config should parse");
         assert_eq!(config.active_finder_flip_webhook_url(), None);
         let config: Config = toml::from_str(
             r#"webhook_url = "https://discord.com/api/webhooks/main"
-finder_flip_webhook_url = """#
-        ).expect("config should parse");
+finder_flip_webhook_url = """#,
+        )
+        .expect("config should parse");
         assert_eq!(config.active_finder_flip_webhook_url(), None);
     }
 
@@ -1216,11 +1321,17 @@ finder_flip_webhook_url = """#
     fn finder_flip_webhook_url_set_is_active() {
         let config: Config = toml::from_str(
             r#"webhook_url = "https://discord.com/api/webhooks/main"
-finder_flip_webhook_url = "https://discord.com/api/webhooks/finder""#
-        ).expect("config should parse");
-        assert_eq!(config.active_finder_flip_webhook_url(), Some("https://discord.com/api/webhooks/finder"));
+finder_flip_webhook_url = "https://discord.com/api/webhooks/finder""#,
+        )
+        .expect("config should parse");
+        assert_eq!(
+            config.active_finder_flip_webhook_url(),
+            Some("https://discord.com/api/webhooks/finder")
+        );
         // Regular webhook is unchanged
-        assert_eq!(config.active_webhook_url(), Some("https://discord.com/api/webhooks/main"));
+        assert_eq!(
+            config.active_webhook_url(),
+            Some("https://discord.com/api/webhooks/main")
+        );
     }
-
 }

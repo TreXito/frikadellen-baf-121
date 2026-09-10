@@ -1,13 +1,12 @@
 /// Window handler for GUI interaction
-/// 
+///
 /// This module provides functionality for:
 /// - Parsing window slots and finding items by name
 /// - Handling window opening sequences
 /// - Waiting for windows with timeout
 /// - Clicking specific slots with proper packet format
-/// 
+///
 /// Preserves all packet-driven logic from the TypeScript implementation.
-
 use anyhow::{anyhow, Result};
 use std::time::Duration;
 use tokio::time::{sleep, timeout};
@@ -67,7 +66,7 @@ impl WindowHandler {
     }
 
     /// Parse window title from JSON format
-    /// 
+    ///
     /// Hypixel sends window titles in JSON format like:
     /// `{"italic":false,"extra":[{"text":"BIN Auction View"}],"text":""}`
     pub fn parse_window_title(raw_title: &str) -> String {
@@ -81,7 +80,7 @@ impl WindowHandler {
                     }
                 }
             }
-            
+
             // Fallback to "text" field
             if let Some(text) = json.get("text").and_then(|t| t.as_str()) {
                 if !text.is_empty() {
@@ -89,7 +88,7 @@ impl WindowHandler {
                 }
             }
         }
-        
+
         // If parsing fails, return the raw title
         raw_title.to_string()
     }
@@ -97,7 +96,7 @@ impl WindowHandler {
     /// Find an item in window slots by name (exact match)
     pub fn find_item_by_name(&self, slots: &[WindowSlot], name: &str) -> Option<usize> {
         let clean_name = Self::remove_minecraft_colors(name).to_lowercase();
-        
+
         for slot in slots {
             let slot_name = Self::remove_minecraft_colors(&slot.name).to_lowercase();
             if slot_name == clean_name {
@@ -105,14 +104,14 @@ impl WindowHandler {
                 return Some(slot.index);
             }
         }
-        
+
         None
     }
 
     /// Find an item in window slots by name (contains match)
     pub fn find_item_containing(&self, slots: &[WindowSlot], name: &str) -> Option<usize> {
         let clean_name = Self::remove_minecraft_colors(name).to_lowercase();
-        
+
         for slot in slots {
             let slot_name = Self::remove_minecraft_colors(&slot.name).to_lowercase();
             if slot_name.contains(&clean_name) {
@@ -120,7 +119,7 @@ impl WindowHandler {
                 return Some(slot.index);
             }
         }
-        
+
         None
     }
 
@@ -129,7 +128,7 @@ impl WindowHandler {
     pub fn remove_minecraft_colors(text: &str) -> String {
         let mut result = String::new();
         let mut chars = text.chars();
-        
+
         while let Some(ch) = chars.next() {
             if ch == '§' || ch == '┬' {
                 // Skip the next character (color code)
@@ -138,12 +137,12 @@ impl WindowHandler {
                 result.push(ch);
             }
         }
-        
+
         result
     }
 
     /// Wait for a specific item to appear in a slot
-    /// 
+    ///
     /// This implements the TPM+ pattern from the TypeScript version:
     /// - Polls slot at 1ms intervals
     /// - Times out after `delay * 3` milliseconds
@@ -159,22 +158,22 @@ impl WindowHandler {
     {
         let delay = self.config.flip_action_delay;
         let timeout_duration = delay * 3;
-        
+
         let initial_name = if already_loaded {
             get_slot().map(|s| s.name.clone())
         } else {
             None
         };
-        
+
         let start = std::time::Instant::now();
         let mut iterations = 0;
-        
+
         loop {
             if start.elapsed() >= timeout_duration {
                 warn!("Failed to find item in slot {} after timeout", slot_index);
                 return Ok(None);
             }
-            
+
             if let Some(slot) = get_slot() {
                 if already_loaded {
                     // Wait for item to CHANGE from initial value
@@ -193,7 +192,7 @@ impl WindowHandler {
                     }
                 }
             }
-            
+
             iterations += 1;
             sleep(Duration::from_millis(1)).await;
         }
@@ -243,7 +242,7 @@ where
         }
     })
     .await;
-    
+
     match result {
         Ok(Ok(())) => Ok(()),
         Ok(Err(e)) => Err(e),

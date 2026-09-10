@@ -97,7 +97,11 @@ pub fn set_enabled(enabled: bool) {
     if was != enabled {
         info!(
             "[AuctionOwnership] Own-auctions-only claiming {}",
-            if enabled { "ENABLED — co-op members' sales will be left alone" } else { "disabled" }
+            if enabled {
+                "ENABLED — co-op members' sales will be left alone"
+            } else {
+                "disabled"
+            }
         );
     }
 }
@@ -107,7 +111,10 @@ pub fn enabled() -> bool {
 }
 
 fn now_secs() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// Strip Minecraft color codes, rarity/star decorations and punctuation so a GUI
@@ -167,7 +174,10 @@ pub fn note_own_listing(item_name: &str, price: i64) {
         }
         prune(&mut listings);
     }
-    debug!("[AuctionOwnership] Recorded own listing '{}' @ {}", name, price);
+    debug!(
+        "[AuctionOwnership] Recorded own listing '{}' @ {}",
+        name, price
+    );
     save_own_listings();
 }
 
@@ -234,7 +244,10 @@ fn save_own_listings() {
         match serde_json::to_string(&listings) {
             Ok(json) => {
                 if let Err(e) = std::fs::write(persistence_path(), json) {
-                    warn!("[AuctionOwnership] Failed to write own_auctions.json: {}", e);
+                    warn!(
+                        "[AuctionOwnership] Failed to write own_auctions.json: {}",
+                        e
+                    );
                 }
             }
             Err(e) => warn!("[AuctionOwnership] Failed to serialize own listings: {}", e),
@@ -252,12 +265,23 @@ pub fn load_own_listings() {
         Ok(json) => match serde_json::from_str::<Vec<OwnAuction>>(&json) {
             Ok(mut listings) => {
                 prune(&mut listings);
-                info!("[AuctionOwnership] Loaded {} own listing(s) from disk", listings.len());
+                info!(
+                    "[AuctionOwnership] Loaded {} own listing(s) from disk",
+                    listings.len()
+                );
                 *OWN_LISTINGS.write() = listings;
             }
-            Err(e) => warn!("[AuctionOwnership] Failed to parse {}: {}", path.display(), e),
+            Err(e) => warn!(
+                "[AuctionOwnership] Failed to parse {}: {}",
+                path.display(),
+                e
+            ),
         },
-        Err(e) => warn!("[AuctionOwnership] Failed to read {}: {}", path.display(), e),
+        Err(e) => warn!(
+            "[AuctionOwnership] Failed to read {}: {}",
+            path.display(),
+            e
+        ),
     }
 }
 
@@ -265,7 +289,10 @@ pub fn load_own_listings() {
 
 /// Resolve a Minecraft username to a dashed UUID via Mojang.
 async fn fetch_player_uuid(client: &reqwest::Client, username: &str) -> Option<String> {
-    let url = format!("https://api.mojang.com/users/profiles/minecraft/{}", username);
+    let url = format!(
+        "https://api.mojang.com/users/profiles/minecraft/{}",
+        username
+    );
     let resp = client.get(&url).send().await.ok()?;
     if !resp.status().is_success() {
         return None;
@@ -296,13 +323,25 @@ async fn fetch_hypixel_auctions(
         "https://api.hypixel.net/v2/skyblock/auction?player={}",
         uuid.replace('-', "")
     );
-    let resp = client.get(&url).header("API-Key", api_key).send().await.ok()?;
+    let resp = client
+        .get(&url)
+        .header("API-Key", api_key)
+        .send()
+        .await
+        .ok()?;
     if !resp.status().is_success() {
-        warn!("[AuctionOwnership] Hypixel API returned {} — falling back to Coflnet", resp.status());
+        warn!(
+            "[AuctionOwnership] Hypixel API returned {} — falling back to Coflnet",
+            resp.status()
+        );
         return None;
     }
     let json: serde_json::Value = resp.json().await.ok()?;
-    if !json.get("success").and_then(|v| v.as_bool()).unwrap_or(false) {
+    if !json
+        .get("success")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
         warn!("[AuctionOwnership] Hypixel API success=false — falling back to Coflnet");
         return None;
     }
@@ -323,7 +362,11 @@ async fn fetch_hypixel_auctions(
                         }
                     }
                 }
-                Some(OwnAuction { name, prices, recorded_at: now_secs() })
+                Some(OwnAuction {
+                    name,
+                    prices,
+                    recorded_at: now_secs(),
+                })
             })
             .collect(),
     )
@@ -333,11 +376,18 @@ async fn fetch_hypixel_auctions(
 async fn fetch_cofl_auctions(client: &reqwest::Client, uuid: &str) -> Option<Vec<OwnAuction>> {
     let mut out: Vec<OwnAuction> = Vec::new();
     for page in 0..COFL_PAGES {
-        let url = format!("https://sky.coflnet.com/api/player/{}/auctions?page={}", uuid, page);
+        let url = format!(
+            "https://sky.coflnet.com/api/player/{}/auctions?page={}",
+            uuid, page
+        );
         let resp = match client.get(&url).send().await {
             Ok(r) if r.status().is_success() => r,
             Ok(r) => {
-                warn!("[AuctionOwnership] Coflnet returned {} for page {}", r.status(), page);
+                warn!(
+                    "[AuctionOwnership] Coflnet returned {} for page {}",
+                    r.status(),
+                    page
+                );
                 break;
             }
             Err(e) => {
@@ -354,7 +404,10 @@ async fn fetch_cofl_auctions(client: &reqwest::Client, uuid: &str) -> Option<Vec
         };
         let empty = arr.is_empty();
         for a in arr {
-            let Some(name) = a.get("itemName").and_then(|v| v.as_str()).map(normalize_item_name)
+            let Some(name) = a
+                .get("itemName")
+                .and_then(|v| v.as_str())
+                .map(normalize_item_name)
             else {
                 continue;
             };
@@ -369,7 +422,11 @@ async fn fetch_cofl_auctions(client: &reqwest::Client, uuid: &str) -> Option<Vec
                     }
                 }
             }
-            out.push(OwnAuction { name, prices, recorded_at: now_secs() });
+            out.push(OwnAuction {
+                name,
+                prices,
+                recorded_at: now_secs(),
+            });
         }
         // Last page reached — Coflnet returns a short/empty array at the end.
         if empty {
@@ -398,7 +455,10 @@ pub async fn refresh_remote(ingame_name: &str, hypixel_api_key: Option<&str>) ->
         return false;
     };
     let Some(uuid) = fetch_player_uuid(&client, ingame_name).await else {
-        warn!("[AuctionOwnership] Could not resolve UUID for '{}'", ingame_name);
+        warn!(
+            "[AuctionOwnership] Could not resolve UUID for '{}'",
+            ingame_name
+        );
         return false;
     };
 
@@ -434,8 +494,14 @@ mod tests {
 
     #[test]
     fn normalizes_away_colors_and_decorations() {
-        assert_eq!(normalize_item_name("§6Withered Valkyrie ✪✪✪✪✪➌"), "withered valkyrie");
-        assert_eq!(normalize_item_name("§d[Lvl 100] Golden Dragon"), "lvl 100 golden dragon");
+        assert_eq!(
+            normalize_item_name("§6Withered Valkyrie ✪✪✪✪✪➌"),
+            "withered valkyrie"
+        );
+        assert_eq!(
+            normalize_item_name("§d[Lvl 100] Golden Dragon"),
+            "lvl 100 golden dragon"
+        );
         assert_eq!(normalize_item_name("  Hyperion  "), "hyperion");
     }
 
@@ -459,12 +525,21 @@ mod tests {
         assert_eq!(ownership_of("Hyperion", Some(100)), Ownership::Unknown);
 
         note_own_listing("§6Hyperion", 900_000_000);
-        assert_eq!(ownership_of("Heroic Hyperion ✪✪✪✪✪", Some(900_000_000)), Ownership::Ours);
+        assert_eq!(
+            ownership_of("Heroic Hyperion ✪✪✪✪✪", Some(900_000_000)),
+            Ownership::Ours
+        );
         // Same item, a co-op member's different price.
-        assert_eq!(ownership_of("Hyperion", Some(750_000_000)), Ownership::Foreign);
+        assert_eq!(
+            ownership_of("Hyperion", Some(750_000_000)),
+            Ownership::Foreign
+        );
         // Price unreadable from the lore — the name alone decides.
         assert_eq!(ownership_of("Hyperion", None), Ownership::Ours);
-        assert_eq!(ownership_of("Terminator", Some(900_000_000)), Ownership::Foreign);
+        assert_eq!(
+            ownership_of("Terminator", Some(900_000_000)),
+            Ownership::Foreign
+        );
         OWN_LISTINGS.write().clear();
     }
 }

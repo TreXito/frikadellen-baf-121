@@ -74,7 +74,11 @@ trait ToSocketAddrsIter {
 impl ToSocketAddrsIter for (&str, u16) {
     fn to_socket_addrs_iter(self) -> std::option::IntoIter<SocketAddr> {
         use std::net::ToSocketAddrs;
-        self.to_socket_addrs().ok().map(|mut i| i.next()).flatten().into_iter()
+        self.to_socket_addrs()
+            .ok()
+            .map(|mut i| i.next())
+            .flatten()
+            .into_iter()
     }
 }
 
@@ -96,7 +100,11 @@ fn pct_encode(s: &str) -> String {
 /// Call ONCE at startup, before any connection is made.
 pub fn init(config: &Config) {
     let parsed = if config.proxy_enabled {
-        match config.proxy_address.as_deref().and_then(parse_proxy_address) {
+        match config
+            .proxy_address
+            .as_deref()
+            .and_then(parse_proxy_address)
+        {
             Some(addr) => Some(ProxySettings {
                 addr,
                 username: config.proxy_username().map(|s| s.to_string()),
@@ -114,7 +122,10 @@ pub fn init(config: &Config) {
         None
     };
     if let Some(p) = &parsed {
-        info!("Proxy: ENABLED — SOCKS5 {} (Minecraft + session auth + Mojang/Hypixel HTTP)", p.addr);
+        info!(
+            "Proxy: ENABLED — SOCKS5 {} (Minecraft + session auth + Mojang/Hypixel HTTP)",
+            p.addr
+        );
     }
     let _ = PROXY.set(parsed);
 }
@@ -124,7 +135,10 @@ pub fn init(config: &Config) {
 pub fn azalea_proxy() -> Option<azalea_protocol::connect::Proxy> {
     let settings = PROXY.get()?.as_ref()?;
     let auth = settings.username.as_ref().map(|u| {
-        socks5_impl::protocol::UserKey::new(u.clone(), settings.password.clone().unwrap_or_default())
+        socks5_impl::protocol::UserKey::new(
+            u.clone(),
+            settings.password.clone().unwrap_or_default(),
+        )
     });
     Some(azalea_protocol::connect::Proxy::new(settings.addr, auth))
 }
@@ -132,13 +146,20 @@ pub fn azalea_proxy() -> Option<azalea_protocol::connect::Proxy> {
 /// Apply the configured proxy to a reqwest client builder. Pass-through when
 /// no proxy is configured.
 pub fn apply_to_client_builder(builder: reqwest::ClientBuilder) -> reqwest::ClientBuilder {
-    let Some(url) = PROXY.get().and_then(|p| p.as_ref()).map(|p| p.reqwest_url()) else {
+    let Some(url) = PROXY
+        .get()
+        .and_then(|p| p.as_ref())
+        .map(|p| p.reqwest_url())
+    else {
         return builder;
     };
     match reqwest::Proxy::all(&url) {
         Ok(proxy) => builder.proxy(proxy),
         Err(e) => {
-            warn!("Failed to parse proxy URL for HTTP clients: {} — going direct", e);
+            warn!(
+                "Failed to parse proxy URL for HTTP clients: {} — going direct",
+                e
+            );
             builder
         }
     }

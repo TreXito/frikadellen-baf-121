@@ -32,7 +32,11 @@ fn backend_token() -> Option<String> {
     COMPILE_TIME
         .filter(|s| !s.is_empty())
         .map(|s| s.to_owned())
-        .or_else(|| std::env::var("BAF_BACKEND_TOKEN").ok().filter(|s| !s.is_empty()))
+        .or_else(|| {
+            std::env::var("BAF_BACKEND_TOKEN")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
 }
 
 /// Handle used by the rest of the bot to push events to the backend. Cloneable
@@ -169,7 +173,9 @@ pub fn spawn(deps: BackendDeps) -> BackendHandle {
     };
 
     let (tx, rx) = mpsc::unbounded_channel::<String>();
-    let handle = BackendHandle { tx: Some(tx.clone()) };
+    let handle = BackendHandle {
+        tx: Some(tx.clone()),
+    };
     tokio::spawn(run(deps, token, rx, tx));
     handle
 }
@@ -275,7 +281,10 @@ fn handle_inbound(text: &str, deps: &BackendDeps, tx: &mpsc::UnboundedSender<Str
             if owner.is_some() {
                 deps.linked.store(true, Ordering::Relaxed);
             }
-            info!("[Backend] authenticated (owner: {})", owner.unwrap_or("unlinked"));
+            info!(
+                "[Backend] authenticated (owner: {})",
+                owner.unwrap_or("unlinked")
+            );
         }
         Some("ping") => {
             let _ = tx.send(json!({ "type": "pong" }).to_string());
@@ -287,7 +296,11 @@ fn handle_inbound(text: &str, deps: &BackendDeps, tx: &mpsc::UnboundedSender<Str
             );
         }
         Some("command") => {
-            let id = value.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let id = value
+                .get("id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
             let action = value.get("action").and_then(|v| v.as_str()).unwrap_or("");
             let args = value.get("args");
             // Data-returning queries (inventory/auctions) carry a `data` payload;
@@ -378,7 +391,10 @@ fn read_log_tail() -> String {
 fn execute_command(action: &str, args: Option<&Value>, deps: &BackendDeps) -> (bool, String) {
     match action {
         "set_discord_id" => {
-            let Some(id) = args.and_then(|a| a.get("discord_id")).and_then(|v| v.as_str()) else {
+            let Some(id) = args
+                .and_then(|a| a.get("discord_id"))
+                .and_then(|v| v.as_str())
+            else {
                 return (false, "missing discord_id".to_string());
             };
             // Persist the owner's Discord id so ownership survives restarts.
@@ -418,11 +434,14 @@ fn execute_command(action: &str, args: Option<&Value>, deps: &BackendDeps) -> (b
             let bed = crate::hypixel_ping::adaptive_bed_enabled();
             let nodelay = azalea_client::TCP_NODELAY.load(Ordering::Relaxed);
             info!("[Backend] timing: bed={} nodelay={}", bed, nodelay);
-            (true, format!(
-                "timing: bed-rtt {} / nodelay {}",
-                if bed { "on" } else { "off" },
-                if nodelay { "on" } else { "off" }
-            ))
+            (
+                true,
+                format!(
+                    "timing: bed-rtt {} / nodelay {}",
+                    if bed { "on" } else { "off" },
+                    if nodelay { "on" } else { "off" }
+                ),
+            )
         }
         "pause" => {
             deps.macro_paused.store(true, Ordering::Relaxed);
@@ -435,12 +454,18 @@ fn execute_command(action: &str, args: Option<&Value>, deps: &BackendDeps) -> (b
         "toggle_ah" => {
             let now = !deps.enable_ah_flips.load(Ordering::Relaxed);
             deps.enable_ah_flips.store(now, Ordering::Relaxed);
-            (true, format!("AH flips {}", if now { "enabled" } else { "disabled" }))
+            (
+                true,
+                format!("AH flips {}", if now { "enabled" } else { "disabled" }),
+            )
         }
         "toggle_bazaar" => {
             let now = !deps.enable_bazaar_flips.load(Ordering::Relaxed);
             deps.enable_bazaar_flips.store(now, Ordering::Relaxed);
-            (true, format!("Bazaar flips {}", if now { "enabled" } else { "disabled" }))
+            (
+                true,
+                format!("Bazaar flips {}", if now { "enabled" } else { "disabled" }),
+            )
         }
         "status" => {
             let (ah, bz) = deps.profit_tracker.totals();
@@ -456,13 +481,24 @@ fn execute_command(action: &str, args: Option<&Value>, deps: &BackendDeps) -> (b
                 free,
                 auctions,
                 purse.map(|p| format!(" • purse {}", p)).unwrap_or_default(),
-                if crate::hypixel_ping::adaptive_bed_enabled() { "on" } else { "off" },
-                if azalea_client::TCP_NODELAY.load(Ordering::Relaxed) { "on" } else { "off" },
+                if crate::hypixel_ping::adaptive_bed_enabled() {
+                    "on"
+                } else {
+                    "off"
+                },
+                if azalea_client::TCP_NODELAY.load(Ordering::Relaxed) {
+                    "on"
+                } else {
+                    "off"
+                },
             );
             (true, msg)
         }
         "list_item" => {
-            let Some(item_name) = args.and_then(|a| a.get("item_name")).and_then(|v| v.as_str()) else {
+            let Some(item_name) = args
+                .and_then(|a| a.get("item_name"))
+                .and_then(|v| v.as_str())
+            else {
                 return (false, "missing item_name".to_string());
             };
             let starting_bid = args
@@ -474,7 +510,9 @@ fn execute_command(action: &str, args: Option<&Value>, deps: &BackendDeps) -> (b
             }
             // Optional exact inventory slot (from /list picking an item). When
             // present the lister targets that slot instead of searching by name.
-            let item_slot = args.and_then(|a| a.get("item_slot")).and_then(|v| v.as_u64());
+            let item_slot = args
+                .and_then(|a| a.get("item_slot"))
+                .and_then(|v| v.as_u64());
             deps.command_queue.enqueue(
                 CommandType::SellToAuction {
                     item_name: item_name.to_string(),
@@ -489,7 +527,10 @@ fn execute_command(action: &str, args: Option<&Value>, deps: &BackendDeps) -> (b
             (true, format!("queued listing for {}", item_name))
         }
         "cancel_auction" => {
-            let Some(item_name) = args.and_then(|a| a.get("item_name")).and_then(|v| v.as_str()) else {
+            let Some(item_name) = args
+                .and_then(|a| a.get("item_name"))
+                .and_then(|v| v.as_str())
+            else {
                 return (false, "missing item_name".to_string());
             };
             let starting_bid = args
@@ -507,19 +548,28 @@ fn execute_command(action: &str, args: Option<&Value>, deps: &BackendDeps) -> (b
             (true, format!("queued cancel for {}", item_name))
         }
         "claim_purchases" => {
-            deps.command_queue
-                .enqueue(CommandType::ClaimPurchasedItem, CommandPriority::High, false);
+            deps.command_queue.enqueue(
+                CommandType::ClaimPurchasedItem,
+                CommandPriority::High,
+                false,
+            );
             (true, "queued claim".to_string())
         }
         "collect_bz_orders" => {
             deps.command_queue.enqueue(
-                CommandType::ManageOrders { cancel_open: false, target_item: None },
+                CommandType::ManageOrders {
+                    cancel_open: false,
+                    target_item: None,
+                },
                 CommandPriority::High,
                 false,
             );
             (true, "queued bazaar order collection".to_string())
         }
-        "switch_account" => (false, "account switching not supported via backend yet".to_string()),
+        "switch_account" => (
+            false,
+            "account switching not supported via backend yet".to_string(),
+        ),
         // Operator kill switch: lets the central backend GUI shut a bot down
         // remotely. Exit shortly after so the command_result is flushed first.
         "shutdown" => {
