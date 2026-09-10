@@ -23,6 +23,16 @@ use crate::state::CommandQueue;
 use crate::types::{BotState, QueuedCommand};
 use crate::websocket::CoflWebSocket;
 
+/// Scoreboard scores shared between BotClient and BotClientState:
+/// objective_name -> (owner -> (display_text, score))
+type ScoreboardScores = Arc<RwLock<HashMap<String, HashMap<String, (String, u32)>>>>;
+/// Team data for scoreboard rendering: team_name -> (prefix, suffix, members)
+type ScoreboardTeams = Arc<RwLock<HashMap<String, (String, String, Vec<String>)>>>;
+/// Context of the bazaar order currently being managed by the startup workflow:
+/// (is_buy_order, item_tag, order_identity, filled_amount)
+type ManagingOrderContext =
+    Arc<RwLock<Option<(bool, String, Option<(bool, String)>, Option<u64>)>>>;
+
 /// Connection wait duration (seconds) - time to wait for bot connection to establish
 const CONNECTION_WAIT_SECONDS: u64 = 2;
 
@@ -330,11 +340,11 @@ pub struct BotClient {
     /// Command receiver channel (for the event handler to receive commands)
     command_rx: Arc<tokio::sync::Mutex<mpsc::UnboundedReceiver<QueuedCommand>>>,
     /// Scoreboard scores shared with BotClientState: objective_name -> (owner -> (display_text, score))
-    scoreboard_scores: Arc<RwLock<HashMap<String, HashMap<String, (String, u32)>>>>,
+    scoreboard_scores: ScoreboardScores,
     /// Which objective is displayed in the sidebar slot (shared with BotClientState)
     sidebar_objective: Arc<RwLock<Option<String>>>,
     /// Team data for scoreboard rendering: team_name -> (prefix, suffix, members)
-    scoreboard_teams: Arc<RwLock<HashMap<String, (String, String, Vec<String>)>>>,
+    scoreboard_teams: ScoreboardTeams,
     /// Count of bazaar orders cancelled during startup order management
     manage_orders_cancelled: Arc<RwLock<u64>>,
     /// Set when "You reached your maximum of XY Bazaar orders!" is received.
@@ -1312,6 +1322,7 @@ pub struct BotClientState {
     /// Time when we joined SkyBlock (for timeout detection)
     pub skyblock_join_time: Arc<RwLock<Option<tokio::time::Instant>>>,
     /// WebSocket client for sending messages (e.g., inventory uploads)
+    #[allow(dead_code)]
     pub ws_client: Option<CoflWebSocket>,
     /// true = claiming purchased item, false = claiming sold item
     pub claiming_purchased: Arc<RwLock<bool>>,
@@ -1353,11 +1364,11 @@ pub struct BotClientState {
     /// MAX_AUCTION_STUCK_ITEM_RETRIES the bot gives up and goes Idle.
     pub auction_stuck_item_retries: Arc<std::sync::atomic::AtomicU8>,
     /// Scoreboard scores: objective_name -> (owner -> (display_text, score))
-    pub scoreboard_scores: Arc<RwLock<HashMap<String, HashMap<String, (String, u32)>>>>,
+    pub scoreboard_scores: ScoreboardScores,
     /// Which objective is currently displayed in the sidebar slot
     pub sidebar_objective: Arc<RwLock<Option<String>>>,
     /// Team data for scoreboard rendering: team_name -> (prefix, suffix, members)
-    pub scoreboard_teams: Arc<RwLock<HashMap<String, (String, String, Vec<String>)>>>,
+    pub scoreboard_teams: ScoreboardTeams,
     /// Count of bazaar orders cancelled during startup order management (shared with run_startup_workflow)
     pub manage_orders_cancelled: Arc<RwLock<u64>>,
     /// Set when Hypixel sends "You reached your maximum of XY Bazaar orders!".
@@ -1470,8 +1481,7 @@ pub struct BotClientState {
     /// `order_identity` is the `(is_buy, item_tag)` tuple used by
     /// `should_cancel_open_order_due_to_age()`, and `filled_amount` is the actual
     /// filled quantity parsed from the "Filled: X/Y" lore line.
-    pub managing_order_context:
-        Arc<RwLock<Option<(bool, String, Option<(bool, String)>, Option<u64>)>>>,
+    pub managing_order_context: ManagingOrderContext,
     /// Cached "My Auctions" JSON shared with BotClient for instant replies.
     pub cached_my_auctions_json: Arc<RwLock<Option<String>>>,
     /// Persistent set of processed order names (normalized, slot-index-free) across
@@ -8227,34 +8237,6 @@ fn count_empty_player_slots(bot: &Client) -> usize {
     player_slots.iter().filter(|s| s.is_empty()).count()
 }
 
-/// Returns the display name of the item that occupies more than half of the player's
-/// inventory slots (> half of 36 = 18 slots). Used to detect a dominant stackable item
-/// that should be instasold to free space when inventory is full.
-/// Returns None if no single item type dominates the inventory.
-fn find_dominant_inventory_item(bot: &Client) -> Option<String> {
-    let menu = bot.menu();
-    let all_slots = menu.slots();
-    let player_range = menu.player_slots_range();
-    let player_slots = &all_slots[player_range];
-
-    let total = player_slots.len(); // 36 for a standard player inventory
-    let half = total / 2;
-
-    let mut counts: HashMap<String, usize> = HashMap::new();
-    for slot in player_slots.iter() {
-        if !slot.is_empty() {
-            if let Some(name) = get_item_display_name_from_slot(slot) {
-                *counts.entry(name).or_insert(0) += 1;
-            }
-        }
-    }
-
-    counts
-        .into_iter()
-        .find(|(_, count)| *count > half)
-        .map(|(name, _)| name)
-}
-
 /// Click a window slot via raw TCP, matching the transport used by
 /// `send_raw_close` so that click → close ordering is preserved on the wire.
 /// Previously this used `bot.write_packet()` (ECS trigger pipeline) which
@@ -8946,6 +8928,7 @@ async fn click_window_slot_carrying(
 /// Commands are enqueued through the shared CommandQueue so they go through
 /// `execute_command`, which handles all required initialisation (deadlines,
 /// processed-set clearing, SafeClose of stale windows, etc.).
+#[allow(clippy::too_many_arguments)]
 async fn run_startup_workflow(
     _bot: Client,
     bot_state: Arc<RwLock<BotState>>,

@@ -1188,6 +1188,7 @@ async fn toggle_anonymize(
 /// - `/cofl <cmd>` or `/baf <cmd>` → send to Coflnet WebSocket
 /// - `/<command>` → queue as Minecraft SendChat command
 /// - plain text → send to Coflnet as "chat" type
+///
 /// Build the `/ping` report: live Hypixel ping, bot state, purse and a one-line
 /// flip-intake health summary (which also reveals *why* flips are being dropped,
 /// e.g. Coflnet not authenticated or AH flips disabled).
@@ -1778,7 +1779,7 @@ async fn rest_break_now(
     Json(body): Json<RestBreakRequest>,
 ) -> impl IntoResponse {
     let minutes = body.minutes.unwrap_or(0);
-    if minutes > 0 && minutes > 7 * 24 * 60 {
+    if minutes > 7 * 24 * 60 {
         return (
             StatusCode::BAD_REQUEST,
             "Break length is capped at 7 days".to_string(),

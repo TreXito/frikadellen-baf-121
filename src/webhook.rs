@@ -453,6 +453,9 @@ pub async fn send_webhook_startup_complete(
     post_embed(webhook_url, payload).await;
 }
 
+// Discord embed field lists read naturally as flat argument lists; a param
+// struct would obscure the mapping to webhook JSON.
+#[allow(clippy::too_many_arguments)]
 pub async fn send_webhook_item_purchased(
     ingame_name: &str,
     item_name: &str,
@@ -552,6 +555,7 @@ pub async fn send_webhook_manual_purchase(
     post_embed(webhook_url, payload).await;
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn send_webhook_item_sold(
     ingame_name: &str,
     item_name: &str,
@@ -846,6 +850,7 @@ pub fn spawn_found_flip_flusher(webhook_url: String) {
 /// Per-order bazaar embed. Superseded by the batched digest
 /// ([`digest_order_placed`] + [`spawn_bazaar_digest_flusher`]); retained for
 /// callers that want a single detailed embed.
+#[allow(clippy::too_many_arguments)]
 #[allow(dead_code)]
 pub async fn send_webhook_bazaar_order_placed(
     ingame_name: &str,
@@ -891,6 +896,7 @@ pub async fn send_webhook_bazaar_order_placed(
 
 /// Per-order bazaar embed. Superseded by the batched digest
 /// ([`digest_order_collected`] + [`spawn_bazaar_digest_flusher`]).
+#[allow(clippy::too_many_arguments)]
 #[allow(dead_code)]
 pub async fn send_webhook_bazaar_order_collected(
     ingame_name: &str,
@@ -974,6 +980,7 @@ pub async fn send_webhook_bazaar_order_collected(
 
 /// Per-order bazaar embed. Superseded by the batched digest
 /// ([`digest_order_cancelled`] + [`spawn_bazaar_digest_flusher`]).
+#[allow(clippy::too_many_arguments)]
 #[allow(dead_code)]
 pub async fn send_webhook_bazaar_order_cancelled(
     ingame_name: &str,
@@ -1319,6 +1326,7 @@ pub const DIVINE_PROFIT_THRESHOLD: u64 = 1_000_000_000;
 /// Send a legendary flip (100M+ profit) notification to the user's webhook.
 /// Like a normal purchase webhook but with yellow color, legendary title, and optional Discord ping.
 /// Also always sends an anonymized notification to the shared public channel.
+#[allow(clippy::too_many_arguments)]
 pub async fn send_webhook_legendary_flip(
     ingame_name: &str,
     item_name: &str,
@@ -1370,6 +1378,7 @@ pub async fn send_webhook_legendary_flip(
 /// Send a divine flip (1B+ profit) notification to the user's webhook.
 /// Like a normal purchase webhook but with cyan color, divine title, and optional Discord ping.
 /// Also always sends an anonymized notification to the shared public channel.
+#[allow(clippy::too_many_arguments)]
 pub async fn send_webhook_divine_flip(
     ingame_name: &str,
     item_name: &str,
@@ -1482,6 +1491,7 @@ fn format_ts_ms(epoch_ms: i64) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_purchase_fields(
     price: u64,
     target: Option<u64>,

@@ -194,6 +194,7 @@ fn draw_rect_outline(
 
 /// Draw a line between two points using Bresenham's algorithm.
 /// `dashed`: if true, alternates 4px on / 4px off.
+#[allow(clippy::too_many_arguments)]
 fn draw_line(
     img: &mut RgbaImage,
     x0: u32,

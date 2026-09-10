@@ -29,7 +29,10 @@ pub struct VpsSocket {
 #[derive(Debug, Clone)]
 struct ManagedInstance {
     instance: Instance,
+    /// Captured from the vps payload for diagnostics; not read back anywhere yet.
+    #[allow(dead_code)]
     config: Option<serde_json::Value>,
+    #[allow(dead_code)]
     extra_config: Option<String>,
     /// Set to `true` while the instance is considered "running".
     running: bool,
