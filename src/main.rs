@@ -6641,7 +6641,8 @@ async fn main() -> Result<()> {
             .max(min_break_demand + 1);
         tokio::spawn(async move {
             use rand::Rng;
-            while let Some(minutes) = rest_break_rx.recv().await {
+            // The restart path diverges, so this channel handles exactly one request.
+            if let Some(minutes) = rest_break_rx.recv().await {
                 let break_secs = if minutes > 0 {
                     minutes.saturating_mul(60)
                 } else {
@@ -7123,7 +7124,7 @@ mod tests {
         );
         std::fs::write(&path, stale).expect("write stale");
         assert!(restore_flip_tracker(&path, "tester").is_empty());
-        assert!(MAX_TRACKED_FLIP_AGE_SECS >= 6 * 24 * 60 * 60);
+        const { assert!(MAX_TRACKED_FLIP_AGE_SECS >= 6 * 24 * 60 * 60) };
 
         let _ = std::fs::remove_file(&path);
     }
