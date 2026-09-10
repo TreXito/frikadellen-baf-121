@@ -205,6 +205,12 @@ impl ConfigLoader {
     }
 }
 
+impl Default for ConfigLoader {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::ConfigLoader;
@@ -425,11 +431,5 @@ mod tests {
             .expect("config with unknown field should still parse");
         // Known defaults still apply (bed timing defaults to on)
         assert!(config.bedtiming_enabled());
-    }
-}
-
-impl Default for ConfigLoader {
-    fn default() -> Self {
-        Self::new()
     }
 }

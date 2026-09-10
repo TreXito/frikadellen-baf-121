@@ -170,7 +170,7 @@ pub async fn ping_once(host: &str, port: u16, timeout: Duration) -> Result<Durat
 
         // Status response: length, then packet id + JSON. Read and discard.
         let resp_len = read_varint(&mut stream).await?;
-        if resp_len < 0 || resp_len > 4_000_000 {
+        if !(0..=4_000_000).contains(&resp_len) {
             return Err(anyhow!("bad status length {resp_len}"));
         }
         let mut resp = vec![0u8; resp_len as usize];

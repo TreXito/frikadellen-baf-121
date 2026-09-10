@@ -1,7 +1,6 @@
-use std::collections::HashSet;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
+    Arc,
 };
 
 use axum::{
@@ -2721,7 +2720,7 @@ mod tests {
             TEST_PORT,
             now,
             "/api/config",
-            &[token.clone()]
+            std::slice::from_ref(&token)
         ));
         // Several presented tokens: one good is enough (cookie + ?token= on a WS).
         assert!(request_is_authorized(
@@ -2763,7 +2762,7 @@ mod tests {
                 8081,
                 now,
                 "/api/status",
-                &[token_8081.clone()]
+                std::slice::from_ref(&token_8081)
             ),
             "the token works on the panel that issued it"
         );

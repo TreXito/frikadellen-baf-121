@@ -334,7 +334,7 @@ impl CoflWebSocket {
         reset_auth_state_for_region_switch();
         // Wakes the read task, which drops the current connection and dials the
         // URL just stored.
-        let _ = self.switch_tx.send_modify(|n| *n = n.wrapping_add(1));
+        self.switch_tx.send_modify(|n| *n = n.wrapping_add(1));
     }
 
     /// True when this socket points at the private baf-flip-finder rather than
@@ -811,9 +811,8 @@ pub fn parse_license_entries(messages: &[ChatMessage]) -> Vec<(String, u32, Stri
         // are still detected.
         for line in msg.text.split('\n') {
             // Match the exact old format: `§7> §a...`
-            if line.starts_with(LICENSE_ENTRY_PREFIX) {
+            if let Some(rest) = line.strip_prefix(LICENSE_ENTRY_PREFIX) {
                 counter += 1;
-                let rest = &line[LICENSE_ENTRY_PREFIX.len()..];
                 let ign: String = rest
                     .chars()
                     .take_while(|&c| c != ' ' && c != '\u{00a7}')
@@ -824,8 +823,7 @@ pub fn parse_license_entries(messages: &[ChatMessage]) -> Vec<(String, u32, Stri
                 }
             }
             // Match search result format: `§7N> §a...` where N is digits
-            else if line.starts_with("\u{00a7}7") {
-                let after_color = &line["\u{00a7}7".len()..];
+            else if let Some(after_color) = line.strip_prefix("\u{00a7}7") {
                 // Try to read digits followed by "> §a"
                 let num_str: String = after_color
                     .chars()
@@ -833,9 +831,8 @@ pub fn parse_license_entries(messages: &[ChatMessage]) -> Vec<(String, u32, Stri
                     .collect();
                 if !num_str.is_empty() {
                     let rest_after_num = &after_color[num_str.len()..];
-                    if rest_after_num.starts_with(LICENSE_NUMBERED_SUFFIX) {
+                    if let Some(ign_start) = rest_after_num.strip_prefix(LICENSE_NUMBERED_SUFFIX) {
                         if let Ok(global_idx) = num_str.parse::<u32>() {
-                            let ign_start = &rest_after_num[LICENSE_NUMBERED_SUFFIX.len()..];
                             let ign: String = ign_start
                                 .chars()
                                 .take_while(|&c| c != ' ' && c != '\u{00a7}')

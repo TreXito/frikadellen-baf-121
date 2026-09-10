@@ -802,7 +802,7 @@ impl Config {
     pub fn proxy_username(&self) -> Option<&str> {
         let creds = self.proxy_credentials.as_deref()?;
         // splitn(2, ':').next() always returns Some for non-empty iterators
-        Some(creds.splitn(2, ':').next().unwrap())
+        Some(creds.split(':').next().unwrap())
     }
 
     /// Returns the proxy password parsed from `proxy_credentials` (`"user:pass"` → `"pass"`).

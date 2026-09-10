@@ -875,7 +875,7 @@ impl BotClient {
         // Build a member -> (prefix+suffix) lookup from team data for proper display
         let teams = self.scoreboard_teams.read();
         let mut member_display: HashMap<String, String> = HashMap::new();
-        for (_, (prefix, suffix, members)) in teams.iter() {
+        for (prefix, suffix, members) in teams.values() {
             let text = format!("{}{}", prefix, suffix);
             for member in members {
                 member_display.insert(member.clone(), text.clone());
@@ -1633,7 +1633,7 @@ impl BotClientState {
         // get_scoreboard_lines() so that the purse line is found the same way.
         let teams = self.scoreboard_teams.read();
         let mut member_display: HashMap<String, String> = HashMap::with_capacity(teams.len());
-        for (_, (prefix, suffix, members)) in teams.iter() {
+        for (prefix, suffix, members) in teams.values() {
             let text = format!("{}{}", prefix, suffix);
             for member in members {
                 member_display.insert(member.clone(), text.clone());
@@ -1921,7 +1921,7 @@ fn format_with_commas(n: i64) -> String {
     let s = n.unsigned_abs().to_string();
     let mut result = String::with_capacity(s.len() + s.len() / 3);
     for (i, ch) in s.chars().enumerate() {
-        if i > 0 && (s.len() - i) % 3 == 0 {
+        if i > 0 && (s.len() - i).is_multiple_of(3) {
             result.push(',');
         }
         result.push(ch);
@@ -4755,7 +4755,7 @@ async fn handle_window_interaction(
                                 }
                                 // Fire at the 20ms burst cadence, but only while we still
                                 // have throttle budget left in the current 500ms window.
-                                let cadence_ok = last_bed_click.map_or(true, |t| {
+                                let cadence_ok = last_bed_click.is_none_or(|t| {
                                     now.duration_since(t)
                                         >= tokio::time::Duration::from_millis(click_interval_ms)
                                 });
@@ -5696,7 +5696,7 @@ async fn handle_window_interaction(
                 // practice it does not, and the chat handler is what fires;
                 // whichever wins, the de-dupe stops a double webhook.
                 emit_auction_cancelled(
-                    &state,
+                    state,
                     cancelled_name,
                     cancelled_bid.max(0) as u64,
                     "confirm window",
@@ -5783,7 +5783,7 @@ async fn handle_window_interaction(
                         clear_auction_preview_slot(bot, state, window_id, &slots).await;
                         let player_start = *menu.player_slots_range().start();
                         let target_slot = if let Some(mj_slot) = item_slot_opt {
-                            if mj_slot >= 9 && mj_slot <= 44 {
+                            if (9..=44).contains(&mj_slot) {
                                 let offset = (mj_slot as usize) - 9;
                                 let ws = player_start + offset;
                                 if ws < slots.len() && !slots[ws].is_empty() {
@@ -5858,7 +5858,7 @@ async fn handle_window_interaction(
                         clear_auction_preview_slot(bot, state, window_id, &slots).await;
                         let player_start = *menu.player_slots_range().start();
                         let target_slot = if let Some(mj_slot) = item_slot_opt {
-                            if mj_slot >= 9 && mj_slot <= 44 {
+                            if (9..=44).contains(&mj_slot) {
                                 let offset = (mj_slot as usize) - 9;
                                 let ws = player_start + offset;
                                 if ws < slots.len() && !slots[ws].is_empty() {
@@ -5940,7 +5940,7 @@ async fn handle_window_interaction(
                         let target_slot = if let Some(mj_slot) = item_slot_opt {
                             // TypeScript: itemSlot = data.slot - bot.inventory.inventoryStart + sellWindow.inventoryStart
                             // mineflayer inventoryStart = 9; slots 9-44 are player inventory (36 slots)
-                            if mj_slot >= 9 && mj_slot <= 44 {
+                            if (9..=44).contains(&mj_slot) {
                                 let offset = (mj_slot as usize) - 9;
                                 let ws = player_start + offset;
                                 if ws < slots.len() && !slots[ws].is_empty() {
@@ -6230,7 +6230,7 @@ async fn handle_window_interaction(
                 // enough free slots to hold a stack, clear the flag and let
                 // BUY orders through.
                 if inv_full {
-                    let empty = count_empty_player_slots(&bot);
+                    let empty = count_empty_player_slots(bot);
                     if empty >= MIN_FREE_SLOTS_FOR_BUY as usize {
                         info!("[ManageOrders] inventory_full flag was set but {} empty slots found — clearing flag", empty);
                         state.inventory_full.store(false, Ordering::Relaxed);
@@ -6356,7 +6356,7 @@ async fn handle_window_interaction(
                         if order_is_buy && !cancel_open {
                             let still_full = state.inventory_full.load(Ordering::Relaxed);
                             if still_full {
-                                let empty = count_empty_player_slots(&bot);
+                                let empty = count_empty_player_slots(bot);
                                 if empty >= MIN_FREE_SLOTS_FOR_BUY as usize {
                                     info!("[ManageOrders] inventory_full flag stale — {} empty slots, proceeding with BUY order \"{}\"", empty, order_name);
                                     state.inventory_full.store(false, Ordering::Relaxed);
@@ -7282,7 +7282,7 @@ fn regex_first_u64(text: &str, pattern: &str) -> Option<u64> {
 fn extract_item_nbt_components(item_data: &azalea_inventory::ItemStackData) -> serde_json::Value {
     match serde_json::to_value(&item_data.component_patch) {
         Ok(value) => {
-            if value.as_object().map_or(false, |o| o.is_empty()) {
+            if value.as_object().is_some_and(|o| o.is_empty()) {
                 serde_json::Value::Null
             } else {
                 value
@@ -9850,7 +9850,7 @@ mod tests {
         );
         assert_eq!(
             parse_cookie_duration_secs("Duration: 1h 30m"),
-            1 * 3600 + 30 * 60
+            3600 + 30 * 60
         );
         assert_eq!(parse_cookie_duration_secs("Duration: 0d 0h 0m"), 0);
     }

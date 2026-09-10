@@ -215,7 +215,7 @@ fn draw_line(
     let half_t = thickness / 2;
 
     loop {
-        let visible = !dashed || (step / 4) % 2 == 0;
+        let visible = !dashed || (step / 4).is_multiple_of(2);
         if visible {
             for dt in 0..thickness {
                 let py = (cy + dt as i64 - half_t as i64).max(0) as u32;

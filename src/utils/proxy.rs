@@ -76,8 +76,7 @@ impl ToSocketAddrsIter for (&str, u16) {
         use std::net::ToSocketAddrs;
         self.to_socket_addrs()
             .ok()
-            .map(|mut i| i.next())
-            .flatten()
+            .and_then(|mut i| i.next())
             .into_iter()
     }
 }

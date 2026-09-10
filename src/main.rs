@@ -10,8 +10,6 @@ use frikadellen_baf::{
     web::WebSharedState,
     websocket::CoflWebSocket,
 };
-use rustyline;
-use serde_json;
 use std::collections::HashMap;
 use std::sync::{
     atomic::{AtomicBool, AtomicI64, Ordering},
@@ -353,7 +351,7 @@ fn is_direct_address(body: &str, name: &str) -> bool {
 
     // Name at the start of the message, followed by a boundary (or end of line).
     if let Some(rest) = body_l.strip_prefix(&name_l) {
-        if rest.as_bytes().first().map_or(true, |&c| boundary(c)) {
+        if rest.as_bytes().first().is_none_or(|&c| boundary(c)) {
             return true;
         }
     }
@@ -364,7 +362,7 @@ fn is_direct_address(body: &str, name: &str) -> bool {
     let mut start = 0;
     while let Some(pos) = body_l[start..].find(&at_name) {
         let end = start + pos + at_name.len();
-        if bytes.get(end).map_or(true, |&c| boundary(c)) {
+        if bytes.get(end).is_none_or(|&c| boundary(c)) {
             return true;
         }
         start += pos + 1;
@@ -893,8 +891,8 @@ fn load_session_times(path: &std::path::Path) -> HashMap<String, SessionTimeEntr
     // Fallback: old `{ign: u64}` format — treat all entries as expired.
     if let Ok(old) = serde_json::from_str::<HashMap<String, u64>>(&raw) {
         return old
-            .into_iter()
-            .map(|(k, _)| {
+            .into_keys()
+            .map(|k| {
                 (
                     k,
                     SessionTimeEntry {
@@ -2351,16 +2349,14 @@ async fn main() -> Result<()> {
                     // guard stops bouncing off `/play sb` and the stall guard treats
                     // the quiet as expected. The window auto-clears, so the bot
                     // resumes on its own once SkyBlock is back.
-                    if clean.to_lowercase().contains("maintenance") {
-                        if note_maintenance() {
-                            warn!(
+                    if clean.to_lowercase().contains("maintenance") && note_maintenance() {
+                        warn!(
                                 "[Maintenance] SkyBlock appears to be down for maintenance — pausing rejoin for {}m",
                                 MAINTENANCE_COOLDOWN_SECS / 60
                             );
-                            let baf_msg = "§f[§4BAF§f]: §eSkyBlock is under maintenance — pausing rejoin until it's back up".to_string();
-                            print_mc_chat(&baf_msg);
-                            let _ = chat_tx_events.send(baf_msg);
-                        }
+                        let baf_msg = "§f[§4BAF§f]: §eSkyBlock is under maintenance — pausing rejoin until it's back up".to_string();
+                        print_mc_chat(&baf_msg);
+                        let _ = chat_tx_events.send(baf_msg);
                     }
 
                     // Friend-island visit refused. After we click the "Visit
@@ -2859,55 +2855,59 @@ async fn main() -> Result<()> {
                     // logic). Only acts if the item is STILL in inventory after the
                     // grace window; `opt_list_at` presence is just the "finder
                     // listing enabled" signal (ws-config listingRecommendations).
-                    if opt_finder.as_deref() == Some("BAF_FINDER") {
-                        if opt_list_at.filter(|&v| v > 0).is_some() {
-                            const COFL_LISTING_GRACE_SECS: u64 = 150;
-                            let bc = bot_client_clone.clone();
-                            let item = item_name.clone();
-                            let ws = ws_client_for_events.clone();
-                            let chat = chat_tx_events.clone();
-                            tokio::spawn(async move {
-                                sleep(Duration::from_secs(COFL_LISTING_GRACE_SECS)).await;
-                                // Listed already (by COFL or manually) → gone from inventory.
-                                let needle = frikadellen_baf::utils::remove_minecraft_colors(&item)
-                                    .to_lowercase();
-                                let still_held = bc
-                                    .get_cached_inventory_json()
-                                    .and_then(|j| serde_json::from_str::<serde_json::Value>(&j).ok())
-                                    .and_then(|inv| {
-                                        inv.get("slots").and_then(|s| s.as_array()).map(|slots| {
-                                            slots.iter().any(|it| {
-                                                it.get("displayName")
-                                                    .and_then(|v| v.as_str())
-                                                    .map(|n| frikadellen_baf::utils::remove_minecraft_colors(n).to_lowercase().contains(&needle))
-                                                    .unwrap_or(false)
-                                            })
+                    if opt_finder.as_deref() == Some("BAF_FINDER")
+                        && opt_list_at.filter(|&v| v > 0).is_some()
+                    {
+                        const COFL_LISTING_GRACE_SECS: u64 = 150;
+                        let bc = bot_client_clone.clone();
+                        let item = item_name.clone();
+                        let ws = ws_client_for_events.clone();
+                        let chat = chat_tx_events.clone();
+                        tokio::spawn(async move {
+                            sleep(Duration::from_secs(COFL_LISTING_GRACE_SECS)).await;
+                            // Listed already (by COFL or manually) → gone from inventory.
+                            let needle = frikadellen_baf::utils::remove_minecraft_colors(&item)
+                                .to_lowercase();
+                            let still_held = bc
+                                .get_cached_inventory_json()
+                                .and_then(|j| serde_json::from_str::<serde_json::Value>(&j).ok())
+                                .and_then(|inv| {
+                                    inv.get("slots").and_then(|s| s.as_array()).map(|slots| {
+                                        slots.iter().any(|it| {
+                                            it.get("displayName")
+                                                .and_then(|v| v.as_str())
+                                                .map(|n| {
+                                                    frikadellen_baf::utils::remove_minecraft_colors(
+                                                        n,
+                                                    )
+                                                    .to_lowercase()
+                                                    .contains(&needle)
+                                                })
+                                                .unwrap_or(false)
                                         })
                                     })
-                                    .unwrap_or(false);
-                                if !still_held {
-                                    return;
-                                }
-                                info!("[FinderListing] \"{}\" still in inventory after {}s — requesting fresh finder pricing (inventory RPC)", item, COFL_LISTING_GRACE_SECS);
-                                let msg = format!(
+                                })
+                                .unwrap_or(false);
+                            if !still_held {
+                                return;
+                            }
+                            info!("[FinderListing] \"{}\" still in inventory after {}s — requesting fresh finder pricing (inventory RPC)", item, COFL_LISTING_GRACE_SECS);
+                            let msg = format!(
                                     "§f[§4BAF§f]: §b📋 §r{}§r §7still held — asking finder for a fresh listing price",
                                     item
                                 );
-                                print_mc_chat(&msg);
-                                let _ = chat.send(msg);
-                                if let Some(inv) = bc.get_cached_inventory_json() {
-                                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&inv) {
-                                        let items = v
-                                            .get("slots")
-                                            .cloned()
-                                            .unwrap_or(serde_json::json!([]));
-                                        if let Err(e) = ws.send_inventory(&items, true).await {
-                                            warn!("[FinderListing] inventory upload for pricing failed: {}", e);
-                                        }
+                            print_mc_chat(&msg);
+                            let _ = chat.send(msg);
+                            if let Some(inv) = bc.get_cached_inventory_json() {
+                                if let Ok(v) = serde_json::from_str::<serde_json::Value>(&inv) {
+                                    let items =
+                                        v.get("slots").cloned().unwrap_or(serde_json::json!([]));
+                                    if let Err(e) = ws.send_inventory(&items, true).await {
+                                        warn!("[FinderListing] inventory upload for pricing failed: {}", e);
                                     }
                                 }
-                            });
-                        }
+                            }
+                        });
                     }
                     // Report the buy to the backend with full purchase detail (the
                     // all-flips channel renders it as a normal purchase webhook).
@@ -2962,7 +2962,7 @@ async fn main() -> Result<()> {
                     let _ = chat_tx_events.send(baf_msg);
                     // Send webhook: for legendary/divine flips, send the styled
                     // webhook (with ping + color) instead of the regular purchase one.
-                    let is_legendary_flip = opt_profit.map_or(false, |p| {
+                    let is_legendary_flip = opt_profit.is_some_and(|p| {
                         p >= frikadellen_baf::webhook::LEGENDARY_PROFIT_THRESHOLD as i64
                     });
                     // No flip was tracked for this buy: no finder, no target, so
@@ -4484,7 +4484,7 @@ async fn main() -> Result<()> {
                     let lowercase_cmd = cmd.trim().to_lowercase();
                     if lowercase_cmd.starts_with("/cofl") || lowercase_cmd.starts_with("/baf") {
                         // Parse /cofl command like the console handler does
-                        let parts: Vec<&str> = cmd.trim().split_whitespace().collect();
+                        let parts: Vec<&str> = cmd.split_whitespace().collect();
                         if parts.len() > 1 {
                             let command = parts[1].to_string(); // Clone to own the data
                             let args = parts[2..].join(" ");
@@ -7109,7 +7109,7 @@ mod tests {
         // The sell clock keeps running from the real purchase, not from now.
         let elapsed = purchased.elapsed().as_secs();
         assert!(
-            elapsed >= 90 * 60 - 5 && elapsed <= 90 * 60 + 5,
+            (90 * 60 - 5..=90 * 60 + 5).contains(&elapsed),
             "restored purchase time drifted: {elapsed}s"
         );
 

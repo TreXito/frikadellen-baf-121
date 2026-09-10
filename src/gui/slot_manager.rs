@@ -138,7 +138,7 @@ impl SlotManager {
         let window_key = format!("{:?}", window_kind);
         self.mappings
             .entry(window_key)
-            .or_insert_with(HashMap::new)
+            .or_default()
             .insert(slot_name, physical_slot);
     }
 }

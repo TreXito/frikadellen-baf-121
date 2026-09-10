@@ -155,6 +155,12 @@ impl ProfitTracker {
     }
 }
 
+impl Default for ProfitTracker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -133,15 +133,14 @@ impl BazaarOrderTracker {
     /// so the caller can use price/amount for profit calculation.
     pub fn remove_order(&self, item_name: &str, is_buy_order: bool) -> Option<TrackedBazaarOrder> {
         let mut orders = self.orders.write();
-        let result = if let Some(pos) = orders.iter().rposition(|o| {
-            (o.status == "open" || o.status == "filled")
-                && o.is_buy_order == is_buy_order
-                && normalize_for_match(&o.item_name) == normalize_for_match(item_name)
-        }) {
-            Some(orders.remove(pos))
-        } else {
-            None
-        };
+        let result = orders
+            .iter()
+            .rposition(|o| {
+                (o.status == "open" || o.status == "filled")
+                    && o.is_buy_order == is_buy_order
+                    && normalize_for_match(&o.item_name) == normalize_for_match(item_name)
+            })
+            .map(|pos| orders.remove(pos));
         drop(orders);
         self.save_orders_to_disk();
         result
@@ -465,6 +464,12 @@ impl BazaarOrderTracker {
                 ),
             }
         }
+    }
+}
+
+impl Default for BazaarOrderTracker {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
