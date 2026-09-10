@@ -1,0 +1,41 @@
+# One-off helper: apply machine-applicable clippy suggestions and push the
+# result. Trigger manually with `gh workflow run clippy-fix.yml --ref main`.
+# Delete this file once the fmt/clippy debt is cleared.
+name: clippy-fix
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fix:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly-2026-08-19
+          components: clippy, rustfmt
+
+      - name: cargo clippy --fix
+        run: cargo clippy --fix --allow-dirty --all-targets --all-features
+
+      - name: cargo fmt
+        run: cargo fmt --all
+
+      - name: commit and push
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git diff --quiet; then
+            echo "no clippy fixes"
+          else
+            git add -A
+            git commit -m "style: apply machine-applicable clippy fixes under pinned nightly-2026-08-19"
+            git push
+          fi
