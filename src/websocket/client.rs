@@ -1087,6 +1087,40 @@ mod tests {
         assert!(!COFL_AUTH_LINK_SHOWN.load(Ordering::Relaxed));
     }
 
+    /// Multisocket: all sockets share the process-global `COFL_LOGGED_IN`, and
+    /// the swap-guard means whichever socket observes auth FIRST is the only one
+    /// that ever emits `Authenticated` — on ITS OWN channel. A secondary socket
+    /// that wins the race therefore emits an event the main loop never sees
+    /// unless its forwarder relays it (main.rs multisocket forwarder). This pins
+    /// the single-emission behavior the forwarder relies on.
+    #[test]
+    fn test_auth_event_fires_only_on_first_socket_to_observe_auth() {
+        COFL_AUTH_LINK_SHOWN.store(false, Ordering::Relaxed);
+        COFL_LOGGED_IN.store(false, Ordering::Relaxed);
+        let (tx_primary, mut rx_primary) = mpsc::unbounded_channel();
+        let (tx_secondary, mut rx_secondary) = mpsc::unbounded_channel();
+
+        // Secondary socket sees authenticated traffic first (e.g. a resumed
+        // session where COFL pushes flips to any connection of the session).
+        CoflWebSocket::note_authenticated_traffic(&tx_secondary);
+        assert!(COFL_LOGGED_IN.load(Ordering::Relaxed));
+        assert!(matches!(
+            rx_secondary.try_recv(),
+            Ok(CoflEvent::Authenticated)
+        ));
+
+        // The primary socket's later traffic must NOT re-emit (swap-guard) —
+        // relaying the secondary's event is what keeps the main loop latched.
+        CoflWebSocket::note_authenticated_traffic(&tx_primary);
+        assert!(
+            !matches!(rx_primary.try_recv(), Ok(CoflEvent::Authenticated)),
+            "a second socket must not re-emit auth; its event channel stays empty"
+        );
+
+        COFL_AUTH_LINK_SHOWN.store(false, Ordering::Relaxed);
+        COFL_LOGGED_IN.store(false, Ordering::Relaxed);
+    }
+
     fn handle_message_for_test(text: &str, tx: &mpsc::UnboundedSender<CoflEvent>) {
         CoflWebSocket::handle_message(text, tx).expect("message parses");
     }

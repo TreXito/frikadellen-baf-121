@@ -1571,22 +1571,41 @@ async fn main() -> Result<()> {
                     let url_log = url_trim.clone();
                     tokio::spawn(async move {
                         while let Some(ev) = rx.recv().await {
-                            if let CoflEvent::AuctionFlip(ref f) = ev {
-                                if let Some(u) = f.uuid.as_deref() {
-                                    if flip_already_seen(&seen, u) {
-                                        debug!(
-                                            "[Multisocket] Duplicate flip {} ({}) — dropped",
-                                            u, url_log
-                                        );
-                                        continue;
+                            match ev {
+                                CoflEvent::AuctionFlip(ref f) => {
+                                    if let Some(u) = f.uuid.as_deref() {
+                                        if flip_already_seen(&seen, u) {
+                                            debug!(
+                                                "[Multisocket] Duplicate flip {} ({}) — dropped",
+                                                u, url_log
+                                            );
+                                            continue;
+                                        }
+                                    }
+                                    info!("[Multisocket] Flip won by {}", url_log);
+                                    if agg_tx.send(ev).is_err() {
+                                        break;
                                     }
                                 }
-                                info!("[Multisocket] Flip won by {}", url_log);
-                                if agg_tx.send(ev).is_err() {
-                                    break;
+                                // Auth is a SESSION property, not a socket property: all
+                                // sockets share the global COFL_LOGGED_IN flag, and the
+                                // swap-guards in note_authenticated_traffic / the loggedIn
+                                // handler mean whichever socket observes auth FIRST is the
+                                // only one that ever emits this event. If that socket is a
+                                // secondary and the event died here, the primary never
+                                // re-emits it and every COFL flip was dropped as
+                                // "Coflnet is not authenticated yet" for the whole run —
+                                // with the drop's own diagnostic line proving
+                                // cofl_logged_in=true. Forward it so the main loop latches
+                                // no matter which socket saw auth first.
+                                CoflEvent::Authenticated => {
+                                    if agg_tx.send(ev).is_err() {
+                                        break;
+                                    }
                                 }
+                                // Everything else from secondary sockets is dropped.
+                                _ => {}
                             }
-                            // Everything else from secondary sockets is dropped.
                         }
                     });
                 }
@@ -3770,6 +3789,25 @@ async fn main() -> Result<()> {
         use frikadellen_baf::websocket::CoflEvent;
 
         while let Some(event) = ws_rx.recv().await {
+            // Self-heal the auth latch. COFL_LOGGED_IN is the global truth and is
+            // stored BEFORE the Authenticated event is queued, so if it is set the
+            // session IS authenticated even if the event never reached this loop
+            // (e.g. emitted by a multisocket secondary whose forwarder dropped it).
+            // Latch here so a lost event can never wedge the bot into dropping
+            // every COFL flip while the drop's own diagnostic line reports
+            // cofl_logged_in=true. Runs before dispatch, so every gate below (AH
+            // flips, bazaar, orders) sees a healed latch within one event. Never
+            // bypasses a region-switch reset: it only fires while the flag is set.
+            if !cofl_authenticated_ws.load(Ordering::Relaxed)
+                && frikadellen_baf::websocket::COFL_LOGGED_IN.load(Ordering::Relaxed)
+            {
+                cofl_authenticated_ws.store(true, Ordering::Relaxed);
+                info!("[Coflnet] Authentication confirmed (global COFL state) — flips enabled");
+                let baf_msg =
+                    "§f[§4BAF§f]: §aCoflnet authenticated — flip buying enabled".to_string();
+                print_mc_chat(&baf_msg);
+                let _ = chat_tx_ws.send(baf_msg);
+            }
             match event {
                 CoflEvent::Authenticated => {
                     // COFL confirmed the session is authenticated (loggedIn).
@@ -3819,9 +3857,11 @@ async fn main() -> Result<()> {
                         // is the discriminator that matters: true means COFL
                         // really did reject the session and the user must open
                         // the link; false means COFL is pushing flips to a
-                        // session it never challenged, which should have been
-                        // auto-confirmed (see note_authenticated_traffic) and is
-                        // a bug if it ever appears here.
+                        // session it never challenged. The loop latches auth from
+                        // the global COFL_LOGGED_IN before every event, so reaching
+                        // this branch with cofl_logged_in=true means the flag was
+                        // stored after this event was already queued (transient,
+                        // next flip passes) — it can no longer persist for a run.
                         let detail = format!(
                             "signin_link_shown={} cofl_logged_in={} finder_tag={}",
                             frikadellen_baf::websocket::COFL_AUTH_LINK_SHOWN
