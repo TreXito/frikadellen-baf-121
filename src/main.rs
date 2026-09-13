@@ -1599,9 +1599,7 @@ async fn main() -> Result<()> {
                                 // cofl_logged_in=true. Forward it so the main loop latches
                                 // no matter which socket saw auth first.
                                 CoflEvent::Authenticated => {
-                                    if agg_tx.send(ev).is_err() {
-                                        break;
-                                    }
+                                    let _ = agg_tx.send(ev);
                                 }
                                 // Everything else from secondary sockets is dropped.
                                 _ => {}
