@@ -1714,7 +1714,7 @@ const CONFIG_SCHEMA = [
 
     // ── Proxy ──
     {key:'proxy_enabled', group:'proxy', type:'bool', label:'Use a proxy',
-     help:'SOCKS5. Routes the Minecraft connection, Mojang session auth and the Hypixel/Mojang HTTP lookups through it. The flip websocket and Discord webhooks stay direct: they never see the game IP and the proxy would only add latency to flips.'},
+     help:'SOCKS5. Routes the Minecraft connection, Mojang session auth and the Hypixel/Mojang HTTP lookups through it. The flip websocket and Discord webhooks stay direct: they never see the game IP and the proxy would only add latency to flips. Per-account overrides: an [account_proxies.<ign>] table in config.toml (replaces the global proxy for that account; address = "" forces that account direct). Takes effect on restart.'},
     {key:'proxy_address', group:'proxy', type:'text', label:'Proxy address', ph:'host:port'},
     {key:'proxy_credentials', group:'proxy', type:'text', label:'Proxy credentials', ph:'username:password', secret:true,
      help:'Leave empty if the proxy needs no authentication.'},

@@ -1090,11 +1090,6 @@ async fn main() -> Result<()> {
     let config_loader = Arc::new(ConfigLoader::new());
     let mut config = config_loader.load()?;
 
-    // Parse and store the SOCKS5 proxy (if `proxy_enabled`) for every game-
-    // adjacent connection: Minecraft + Mojang session auth + Hypixel/Mojang
-    // HTTP. Must happen before anything connects.
-    frikadellen_baf::utils::proxy::init(&config);
-
     // A config that already has an ingame name is an existing install — never
     // re-run first-run onboarding prompts (e.g. auto-cookie) on it, even when a
     // newly-added field defaults to "not yet asked". Only a genuinely fresh
@@ -1213,6 +1208,14 @@ async fn main() -> Result<()> {
     };
 
     let ingame_name = ingame_names[current_account_index].clone();
+
+    // Parse and store the SOCKS5 proxy for every game-adjacent connection:
+    // Minecraft + Mojang session auth + Hypixel/Mojang HTTP. Must happen
+    // before anything connects, and AFTER the active account is known: a
+    // `account_proxies.<ign>` entry overrides the global `proxy_*` fields for
+    // this account. Account switches restart the process, so the next
+    // account's proxy resolves on the next launch.
+    frikadellen_baf::utils::proxy::init(&config, &ingame_name);
 
     // ---- Session time persistence ----
     // Load the accumulated running time for this account from a sidecar JSON file.
@@ -1336,7 +1339,7 @@ async fn main() -> Result<()> {
     check_ufw_port(config.web_gui_port);
 
     // Proxy state was parsed and logged by `utils::proxy::init` right after
-    // the config load.
+    // the active account was resolved (per-account overrides keyed on it).
 
     // Initialize command queue
     let command_queue = CommandQueue::new();

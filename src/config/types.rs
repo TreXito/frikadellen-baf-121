@@ -46,6 +46,35 @@ mod opt_f64_as_zero {
     }
 }
 
+/// Per-account SOCKS5 proxy override (see [`Config::account_proxies`]).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct AccountProxy {
+    /// Proxy server address in `host:port` format, e.g. `"121.124.241.211:3313"`.
+    /// An empty string explicitly disables the proxy for this account.
+    #[serde(default, with = "opt_string_as_empty")]
+    pub address: Option<String>,
+
+    /// Proxy credentials in `username:password` format. Leave empty if the
+    /// proxy requires no authentication.
+    #[serde(default, with = "opt_string_as_empty")]
+    pub credentials: Option<String>,
+}
+
+impl AccountProxy {
+    /// Returns the proxy username parsed from `credentials` (`"user:pass"` → `"user"`).
+    pub fn username(&self) -> Option<String> {
+        let creds = self.credentials.as_deref()?;
+        Some(creds.split(':').next().unwrap().to_string())
+    }
+
+    /// Returns the proxy password parsed from `credentials` (`"user:pass"` → `"pass"`).
+    pub fn password(&self) -> Option<String> {
+        let creds = self.credentials.as_deref()?;
+        let colon_pos = creds.find(':')?;
+        Some(creds[colon_pos + 1..].to_string())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
     // ═══════════════════════════ Account ═══════════════════════════
@@ -264,7 +293,32 @@ pub struct Config {
     #[serde(default, with = "opt_string_as_empty")]
     pub proxy_credentials: Option<String>,
 
-    // ═══════════════════════ Web control panel ═════════════════════
+    /// Per-account SOCKS5 proxy overrides, keyed by ingame name. When the
+    /// active account (the one this process started for) has an entry here it
+    /// REPLACES the global `proxy_*` fields entirely — including `address = ""`,
+    /// which deliberately runs that account direct while every other account
+    /// keeps using the global proxy. Entries for accounts that are never
+    /// started are inert.
+    ///
+    /// Example:
+    /// ```toml
+    /// proxy_enabled = true
+    /// proxy_address = "82.23.97.65:7791"
+    ///
+    /// [account_proxies.cxwsi]
+    /// address = "51.10.22.33:1080"
+    /// credentials = "user:pass"
+    ///
+    /// [account_proxies.AltAccount]
+    /// address = ""   # explicit off: never proxy this one
+    /// ```
+    /// Takes effect at startup: account switching restarts the process, so the
+    /// next account's proxy is picked up on the next launch. The web panel
+    /// cannot edit this table yet — edit config.toml by hand.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub account_proxies: HashMap<String, AccountProxy>,
+
+    // ═══════════════════════ Web control panel ═════════════════════════════
     #[serde(default = "default_web_gui_port")]
     pub web_gui_port: u16,
 
@@ -563,6 +617,7 @@ impl Default for Config {
             proxy_enabled: false,
             proxy_address: None,
             proxy_credentials: None,
+            account_proxies: HashMap::new(),
             // Web control panel
             web_gui_port: default_web_gui_port(),
             web_gui_password: None,
@@ -990,6 +1045,59 @@ mod tests {
     fn proxy_empty_string_is_none() {
         let config: Config = toml::from_str(r#"proxy_address = """#).expect("config should parse");
         assert_eq!(config.proxy_address, None);
+    }
+
+    #[test]
+    fn account_proxies_parse_and_split_credentials() {
+        let config: Config = toml::from_str(
+            r#"
+            [account_proxies.cxwsi]
+            address = "51.10.22.33:1080"
+            credentials = "user:pass"
+
+            [account_proxies.AltAccount]
+            address = ""
+        "#,
+        )
+        .expect("config should parse");
+        assert_eq!(config.account_proxies.len(), 2);
+        let main = config.account_proxies.get("cxwsi").expect("entry exists");
+        assert_eq!(main.address.as_deref(), Some("51.10.22.33:1080"));
+        assert_eq!(main.username().as_deref(), Some("user"));
+        assert_eq!(main.password().as_deref(), Some("pass"));
+        let alt = config
+            .account_proxies
+            .get("AltAccount")
+            .expect("entry exists");
+        assert_eq!(alt.address, None, "empty address deserializes to None");
+        assert_eq!(alt.credentials, None);
+    }
+
+    #[test]
+    fn account_proxies_absent_by_default_and_skipped_when_empty() {
+        let config: Config = toml::from_str(r#"ingame_name = "Player1""#).expect("parses");
+        assert!(config.account_proxies.is_empty());
+        // Round-trip: an untouched map must not add noise to saved configs.
+        let serialized = toml::to_string(&config).expect("serializes");
+        assert!(
+            !serialized.contains("account_proxies"),
+            "empty account_proxies should be skipped, got: {serialized}"
+        );
+    }
+
+    #[test]
+    fn account_proxy_credentials_with_colon_in_password() {
+        let config: Config = toml::from_str(
+            r#"
+            [account_proxies.Player1]
+            address = "1.2.3.4:7791"
+            credentials = "user:pass:word"
+        "#,
+        )
+        .expect("parses");
+        let ap = config.account_proxies.get("Player1").unwrap();
+        assert_eq!(ap.username().as_deref(), Some("user"));
+        assert_eq!(ap.password().as_deref(), Some("pass:word"));
     }
 
     #[test]
