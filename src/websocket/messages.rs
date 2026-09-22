@@ -5,6 +5,9 @@ use serde_json::Value;
 pub struct WebSocketMessage {
     #[serde(rename = "type")]
     pub msg_type: String,
+    /// Absent on some keepalive / side-channel messages (`ping`,
+    /// `registerKeybind`), so this defaults instead of failing the parse.
+    #[serde(default)]
     pub data: String,
 }
 
