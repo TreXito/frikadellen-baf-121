@@ -97,6 +97,26 @@ fn cofl_tls_connector() -> Option<Connector> {
         .map(Connector::NativeTls)
 }
 
+/// Read the `"type"` field of a modsocket message without failing on shape
+/// quirks (missing `data`, non-string `data`, …).
+fn peek_msg_type(text: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(text)
+        .ok()?
+        .get("type")
+        .and_then(|t| t.as_str())
+        .map(str::to_owned)
+}
+
+/// `{type:"pong"}` keepalive reply, echoing any `data` the ping carried.
+/// Same shape as the backend control socket's pong.
+fn build_pong(text: &str) -> String {
+    let data = serde_json::from_str::<serde_json::Value>(text)
+        .ok()
+        .and_then(|v| v.get("data").cloned())
+        .unwrap_or_else(|| serde_json::Value::String(String::new()));
+    serde_json::json!({ "type": "pong", "data": data }).to_string()
+}
+
 pub enum CoflEvent {
     AuctionFlip(Flip),
     BazaarFlip(BazaarFlipRecommendation),
@@ -220,8 +240,31 @@ impl CoflWebSocket {
                     };
                     match message {
                         Some(Ok(Message::Text(text))) => {
-                            if let Err(e) = Self::handle_message(&text, &tx_clone) {
-                                error!("Error handling WebSocket message: {}", e);
+                            // Protocol housekeeping at the socket layer so it
+                            // never depends on the event loop:
+                            // - `ping` MUST be answered with `pong`, otherwise
+                            //   proxies and NAT with idle timeouts drop the
+                            //   socket (this used to fall through to "Unknown
+                            //   websocket message type: ping").
+                            // - `registerKeybind` is a COFL side-channel this
+                            //   mod has no keybinds for; acknowledge quietly
+                            //   instead of warning on every one.
+                            match peek_msg_type(&text).as_deref() {
+                                Some("ping") => {
+                                    let pong = build_pong(&text);
+                                    let mut w = write_for_task.lock().await;
+                                    if let Err(e) = w.send(Message::Text(pong)).await {
+                                        error!("Failed to send pong: {}", e);
+                                    }
+                                }
+                                Some("registerKeybind") => {
+                                    debug!("Ignoring COFL registerKeybind (no keybinds registered)");
+                                }
+                                _ => {
+                                    if let Err(e) = Self::handle_message(&text, &tx_clone) {
+                                        error!("Error handling WebSocket message: {}", e);
+                                    }
+                                }
                             }
                         }
                         Some(Ok(Message::Close(_))) => {

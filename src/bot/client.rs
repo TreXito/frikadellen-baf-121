@@ -89,8 +89,15 @@ async fn go_to_island(bot: &Client, last_window_id: &Arc<RwLock<u8>>) {
     }
 }
 
-/// Timeout for waiting for SkyBlock join confirmation (seconds)
-const SKYBLOCK_JOIN_TIMEOUT_SECS: u64 = 15;
+/// Timeout for waiting for SkyBlock join confirmation (seconds).
+///
+/// Generous on purpose: this deadline is now enforced by a real timer (it used
+/// to be evaluated only when a chat message happened to arrive, so a quiet
+/// link never hit it at all), and on a proxied / high-latency connection the
+/// lobby → SkyBlock switch legitimately takes tens of seconds. The join chat
+/// message still completes the flow as soon as it arrives; this is only the
+/// no-message safety net.
+const SKYBLOCK_JOIN_TIMEOUT_SECS: u64 = 45;
 
 /// Delay before clicking accept button in trade response window (milliseconds)
 /// TypeScript waits to check for "Deal!" or "Warning!" messages before accepting
@@ -169,6 +176,51 @@ fn is_skyblock_join_message(clean_message: &str) -> bool {
             let upper = clean_message.to_uppercase();
             upper.contains("SKYBLOCK") && upper.contains("PROFILE")
         })
+}
+
+/// Atomically claim the lobby → SkyBlock → island transition. Returns true for
+/// exactly one caller across the chat-detection, join-timeout and watchdog
+/// paths so `run_startup_workflow` can never fire twice (two concurrent runs
+/// would double-send `/sbmenu` and `/ah` and burn both 60s queue slots).
+fn claim_startup_transition(state: &BotClientState) -> bool {
+    let mut teleported = state.teleported_to_island.write();
+    if *teleported {
+        return false;
+    }
+    *teleported = true;
+    *state.joined_skyblock.write() = true;
+    true
+}
+
+/// Shared tail of every startup path: wait out the island teleport, then run
+/// the startup workflow.
+fn spawn_startup_after_teleport(bot: Client, state: &BotClientState) {
+    let bot_state = state.bot_state.clone();
+    let event_tx_startup = state.event_tx.clone();
+    let manage_orders_cancelled_startup = state.manage_orders_cancelled.clone();
+    let auto_cookie_startup = state.auto_cookie_hours.clone();
+    let command_queue_startup = state.command_queue.clone();
+    let startup_in_progress_startup = state.startup_in_progress.clone();
+    let enable_bazaar_flips_startup = state.enable_bazaar_flips.clone();
+    let last_window_id_startup = state.last_window_id.clone();
+    tokio::spawn(async move {
+        tokio::time::sleep(tokio::time::Duration::from_secs(ISLAND_TELEPORT_DELAY_SECS)).await;
+        // Go home: friend's island via /visit + slot 11 when
+        // visitfriend is active, else /is.
+        go_to_island(&bot, &last_window_id_startup).await;
+        tokio::time::sleep(tokio::time::Duration::from_secs(TELEPORT_COMPLETION_WAIT_SECS)).await;
+        run_startup_workflow(
+            bot,
+            bot_state,
+            event_tx_startup,
+            manage_orders_cancelled_startup,
+            auto_cookie_startup,
+            command_queue_startup,
+            startup_in_progress_startup,
+            enable_bazaar_flips_startup,
+        )
+        .await;
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -2588,54 +2640,49 @@ async fn event_handler(bot: Client, event: Event, state: BotClientState) -> Resu
             // Do NOT set to Startup here; Startup is reserved for an active startup workflow.
             *state.bot_state.write() = BotState::GracePeriod;
 
-            // Spawn a 30-second startup-completion watchdog (matching TypeScript's ~5.5 s grace
-            // period + runStartupWorkflow).  If the chat-based detection hasn't fired by then,
-            // this guarantees the bot exits GracePeriod and becomes fully ready.
+            // Spawn a last-resort startup-completion watchdog. The normal
+            // paths (SkyBlock join chat line, or the join-timeout timer from
+            // Event::Init) almost always claim the transition first. On
+            // proxied/high-latency links the SkyBlock switch legitimately
+            // takes longer than the old fixed 30s — and forcing early ran
+            // /sbmenu and /ah while the bot was still in the lobby, which is
+            // exactly the "Command CheckCookie timed out after 60s" /
+            // "Command ClaimSoldItem timed out after 60s" failure. Poll
+            // instead of assuming, and only force when nothing claimed it.
             {
-                let bot_state_wd = state.bot_state.clone();
+                let state_wd = state.clone();
                 let teleported_wd = state.teleported_to_island.clone();
                 let joined_wd = state.joined_skyblock.clone();
                 let bot_wd = bot.clone();
-                let event_tx_wd = state.event_tx.clone();
-                let manage_orders_cancelled_wd = state.manage_orders_cancelled.clone();
-                let auto_cookie_wd = state.auto_cookie_hours.clone();
-                let command_queue_wd = state.command_queue.clone();
-                let startup_in_progress_wd = state.startup_in_progress.clone();
-                let enable_bazaar_flips_wd = state.enable_bazaar_flips.clone();
-                let last_window_id_wd = state.last_window_id.clone();
                 tokio::spawn(async move {
-                    tokio::time::sleep(tokio::time::Duration::from_secs(30)).await;
-                    let already_done = *teleported_wd.read();
-                    if !already_done {
-                        warn!("[Startup] 30-second watchdog: forcing startup completion");
-                        *joined_wd.write() = true;
-                        *teleported_wd.write() = true;
-                        // Retry /play sb in case the initial attempt failed (lobby not ready)
-                        send_chat_command(&bot_wd, "/play sb");
-                        // Wait for SkyBlock to load (5s) + island teleport delay combined
-                        tokio::time::sleep(tokio::time::Duration::from_secs(
-                            5 + ISLAND_TELEPORT_DELAY_SECS,
-                        ))
-                        .await;
-                        // Go home: friend's island via /visit + slot 11 when
-                        // visitfriend is active, else /is.
-                        go_to_island(&bot_wd, &last_window_id_wd).await;
-                        tokio::time::sleep(tokio::time::Duration::from_secs(
-                            TELEPORT_COMPLETION_WAIT_SECS,
-                        ))
-                        .await;
-                        run_startup_workflow(
-                            bot_wd,
-                            bot_state_wd,
-                            event_tx_wd,
-                            manage_orders_cancelled_wd,
-                            auto_cookie_wd,
-                            command_queue_wd,
-                            startup_in_progress_wd,
-                            enable_bazaar_flips_wd,
-                        )
-                        .await;
+                    const WATCHDOG_SECS: u64 = 90;
+                    let deadline = std::time::Instant::now()
+                        + std::time::Duration::from_secs(WATCHDOG_SECS);
+                    while std::time::Instant::now() < deadline {
+                        tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                        if *teleported_wd.read() {
+                            return; // normal path already ran the startup flow
+                        }
                     }
+                    // Read BEFORE claiming: the claim marks joined=true, so
+                    // afterwards this can no longer tell whether the SkyBlock
+                    // switch ever confirmed.
+                    let was_joined = *joined_wd.read();
+                    if !claim_startup_transition(&state_wd) {
+                        return;
+                    }
+                    warn!(
+                        "[Startup] {}s watchdog: forcing startup completion",
+                        WATCHDOG_SECS
+                    );
+                    if !was_joined {
+                        // Retry the SkyBlock switch and give the world a real
+                        // chance to load (proxied links can take tens of
+                        // seconds) instead of the old fixed 7s.
+                        send_chat_command(&bot_wd, "/play sb");
+                        tokio::time::sleep(tokio::time::Duration::from_secs(20)).await;
+                    }
+                    spawn_startup_after_teleport(bot_wd, &state_wd);
                 });
             }
 
@@ -2680,6 +2727,28 @@ async fn event_handler(bot: Client, event: Event, state: BotClientState) -> Resu
 
                 // Set the join time for timeout tracking
                 *skyblock_join_time.write() = Some(tokio::time::Instant::now());
+
+                // The join deadline used to be evaluated only inside the chat
+                // handler, so it fired only if SOME chat message happened to
+                // arrive after it. On a quiet or proxied link that meant
+                // nothing ran at all and only the blunt watchdog recovered.
+                // Run the deadline on a real timer so the startup flow is
+                // guaranteed to start even with zero chat traffic.
+                {
+                    let state_timer = state.clone();
+                    let bot_timer = bot.clone();
+                    tokio::spawn(async move {
+                        tokio::time::sleep(tokio::time::Duration::from_secs(
+                            SKYBLOCK_JOIN_TIMEOUT_SECS,
+                        ))
+                        .await;
+                        if !claim_startup_transition(&state_timer) {
+                            return; // chat detection already ran the flow
+                        }
+                        info!("Timeout waiting for SkyBlock confirmation - attempting to teleport to island anyway...");
+                        spawn_startup_after_teleport(bot_timer, &state_timer);
+                    });
+                }
             }
             // Note: startup-completion watchdog is spawned from Event::Login,
             // which fires reliably after the bot is authenticated and in the game.
@@ -3279,53 +3348,18 @@ async fn event_handler(bot: Client, event: Event, state: BotClientState) -> Resu
                     let skyblock_detected = is_skyblock_join_message(&clean_message);
 
                     if skyblock_detected || should_timeout {
-                        // Mark as joined now that we've confirmed
-                        *state.joined_skyblock.write() = true;
-                        *state.teleported_to_island.write() = true;
-
-                        if should_timeout {
+                        // Mark as joined now that we've confirmed. The claim is
+                        // atomic so the join-timeout timer and the watchdog can
+                        // never run a second startup workflow alongside this.
+                        if !claim_startup_transition(&state) {
+                            // Another path already claimed it.
+                        } else if should_timeout {
                             info!("Timeout waiting for SkyBlock confirmation - attempting to teleport to island anyway...");
+                            spawn_startup_after_teleport(bot.clone(), &state);
                         } else {
                             info!("Detected SkyBlock join - teleporting to island...");
+                            spawn_startup_after_teleport(bot.clone(), &state);
                         }
-
-                        // Spawn a task to handle teleportation and startup workflow (non-blocking)
-                        let bot_clone = bot.clone();
-                        let bot_state = state.bot_state.clone();
-                        let event_tx_startup = state.event_tx.clone();
-                        let manage_orders_cancelled_startup = state.manage_orders_cancelled.clone();
-                        let auto_cookie_startup = state.auto_cookie_hours.clone();
-                        let command_queue_startup = state.command_queue.clone();
-                        let startup_in_progress_startup = state.startup_in_progress.clone();
-                        let enable_bazaar_flips_startup = state.enable_bazaar_flips.clone();
-                        let last_window_id_startup = state.last_window_id.clone();
-                        tokio::spawn(async move {
-                            tokio::time::sleep(tokio::time::Duration::from_secs(
-                                ISLAND_TELEPORT_DELAY_SECS,
-                            ))
-                            .await;
-                            // Go home: friend's island via /visit + slot 11 when
-                            // visitfriend is active, else /is.
-                            go_to_island(&bot_clone, &last_window_id_startup).await;
-
-                            // Wait for teleport to complete
-                            tokio::time::sleep(tokio::time::Duration::from_secs(
-                                TELEPORT_COMPLETION_WAIT_SECS,
-                            ))
-                            .await;
-
-                            run_startup_workflow(
-                                bot_clone,
-                                bot_state,
-                                event_tx_startup,
-                                manage_orders_cancelled_startup,
-                                auto_cookie_startup,
-                                command_queue_startup,
-                                startup_in_progress_startup,
-                                enable_bazaar_flips_startup,
-                            )
-                            .await;
-                        });
                     }
                 }
             }
