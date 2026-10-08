@@ -1,5 +1,7 @@
 <div align="center">
 
+## due to hypixels recent frequency of bans, it is currently (October 2026) not recommended to use this software.
+
 # Frikadellen BAF
 
 ### Bazaar & Auction Flipper for Hypixel Skyblock
