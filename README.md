@@ -31,6 +31,7 @@ A high-performance, Rust-powered macro that automates auction house sniping, baz
 - [Discord Integration (central backend)](#discord-integration-central-backend)
 - [Multi-Account Support](#multi-account-support)
 - [Humanization / Rest Breaks](#humanization--rest-breaks)
+- [Stealth Session Pacing](#stealth-session-pacing)
 - [Proxy Support](#proxy-support)
 - [Configuration Reference](#configuration-reference)
 - [Troubleshooting](#troubleshooting)
@@ -61,6 +62,9 @@ Get notified about flips, profits, and events directly in your Discord server. S
 
 ### 🛡️ Humanization
 Optional periodic rest breaks that simulate human behavior — the bot disconnects, waits a random duration, and reconnects. Fully configurable intervals and break lengths.
+
+### 🥷 Stealth Session Pacing
+Randomised online spans, offline gaps and a per-day online budget, so the join/leave history an admin can pull looks like a person's day instead of a 24/7 macro. Off by default. *(See [Stealth Session Pacing](#stealth-session-pacing) below.)*
 
 ### 🔒 Proxy Support
 Route the bot through a SOCKS5/HTTP proxy for VPS or network-restricted environments.
@@ -307,6 +311,28 @@ When a break triggers, the bot disconnects from the server, waits a random durat
 
 ---
 
+## Stealth Session Pacing
+
+A reviewer checking an account for macros can see one thing without any behavioural data at all: the join/leave history. An account that is online around the clock, or that naps for the same few minutes on the same schedule from morning to night, looks machine-made on that evidence alone. Stealth mode randomises exactly those numbers:
+
+```toml
+stealth_enabled = true
+stealth_min_session_minutes = 60      # online span range
+stealth_max_session_minutes = 300
+stealth_min_break_minutes = 30        # offline gap range
+stealth_max_break_minutes = 180
+stealth_daily_online_minutes = 600    # per-day online allowance, 0 = no cap
+```
+
+- Every online span and every offline gap is drawn from its range with a triangular distribution, so draws cluster in the middle of the range instead of bouncing between two fixed endpoints.
+- The daily allowance is redrawn ±25% every day, so no two days match. Once it is spent the bot does not take another short nap: it logs off for the night, sized at roughly 24 hours minus whatever it actually played (clamped to 4h..16h and jittered ±45 minutes).
+- The day is persisted in `stealth_day.json` next to the executable, so a crash or a manual restart mid-day does not hand the account a fresh allowance, and only time spent online counts against it.
+- It overrides the humanization ranges above for scheduled breaks while it is on (those still drive the panel's on-demand break button).
+
+Off by default, and it changes WHEN the account is online, not what it does while online: movement, clicking and buy timing are untouched.
+
+---
+
 ## Proxy Support
 
 Route the bot's connection through a proxy:
@@ -379,6 +405,17 @@ The `config.toml` file is created automatically on first run. You can edit it wi
 | `humanization_max_interval_minutes` | integer | `120` | Maximum minutes between breaks |
 | `humanization_min_break_minutes` | integer | `2` | Minimum break duration in minutes |
 | `humanization_max_break_minutes` | integer | `10` | Maximum break duration in minutes |
+
+### Stealth
+
+| Field | Type | Default | Description |
+|---|---|---|---|
+| `stealth_enabled` | boolean | `false` | Randomise online spans, offline gaps and daily online time |
+| `stealth_min_session_minutes` | integer | `60` | Minimum online span in minutes |
+| `stealth_max_session_minutes` | integer | `300` | Maximum online span in minutes |
+| `stealth_min_break_minutes` | integer | `30` | Minimum offline gap in minutes |
+| `stealth_max_break_minutes` | integer | `180` | Maximum offline gap in minutes |
+| `stealth_daily_online_minutes` | integer | `600` | Online allowance per day before logging off for the night (`0` = no cap) |
 
 ### Proxy
 

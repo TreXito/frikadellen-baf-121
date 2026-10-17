@@ -1597,6 +1597,7 @@ const CFG_GROUPS = [
     {id:'finder',   icon:'🎯', name:'Private Finder'},
     {id:'notify',   icon:'🔔', name:'Notifications'},
     {id:'human',    icon:'😴', name:'Rest Breaks'},
+    {id:'stealth',  icon:'🥷', name:'Stealth'},
     {id:'panel',    icon:'🖥️', name:'Web Panel'},
     {id:'proxy',    icon:'🌐', name:'Proxy'},
     {id:'backend',  icon:'☁️', name:'Central Backend'},
@@ -1698,6 +1699,16 @@ const CONFIG_SCHEMA = [
     {key:'humanization_max_interval_minutes', group:'human', type:'number', label:'Max interval (minutes)', min:1},
     {key:'humanization_min_break_minutes', group:'human', type:'number', label:'Min break length (minutes)', min:1},
     {key:'humanization_max_break_minutes', group:'human', type:'number', label:'Max break length (minutes)', min:1},
+
+    // ── Stealth ──
+    {key:'stealth_enabled', group:'stealth', type:'bool', label:'Stealth session pacing',
+     help:'Randomises how long the account stays ONLINE and OFFLINE, and caps the online time per day, so the join/leave history looks like a person instead of a 24/7 macro. Overrides the Rest Break ranges above while on.'},
+    {key:'stealth_min_session_minutes', group:'stealth', type:'number', label:'Min online span (minutes)', min:1},
+    {key:'stealth_max_session_minutes', group:'stealth', type:'number', label:'Max online span (minutes)', min:1},
+    {key:'stealth_min_break_minutes', group:'stealth', type:'number', label:'Min offline gap (minutes)', min:1},
+    {key:'stealth_max_break_minutes', group:'stealth', type:'number', label:'Max offline gap (minutes)', min:1},
+    {key:'stealth_daily_online_minutes', group:'stealth', type:'number', label:'Daily online budget (minutes)', min:0,
+     help:'0 = no cap. Once the budget is used the bot logs off for a night sized against what it played; the real allowance is redrawn every day, ±25%.'},
 
     // ── Web panel ──
     {key:'web_gui_port', group:'panel', type:'number', label:'Panel port', min:1, max:65535,

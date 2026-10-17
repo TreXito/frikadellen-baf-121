@@ -132,5 +132,11 @@ pub const FBAF_DEFAULT_SETTINGS: &str = r#"{
     "humanization_min_interval_minutes": 45,
     "humanization_max_interval_minutes": 120,
     "humanization_min_break_minutes": 2,
-    "humanization_max_break_minutes": 10
+    "humanization_max_break_minutes": 10,
+    "stealth_enabled": false,
+    "stealth_min_session_minutes": 60,
+    "stealth_max_session_minutes": 300,
+    "stealth_min_break_minutes": 30,
+    "stealth_max_break_minutes": 180,
+    "stealth_daily_online_minutes": 600
 }"#;

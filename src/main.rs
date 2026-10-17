@@ -6506,6 +6506,23 @@ async fn main() -> Result<()> {
         });
     }
 
+    // ── Stealth day state ─────────────────────────────────────────────────────
+    // Online minutes are spent against a per-day budget so the account logs
+    // off for the night instead of running a marathon. Shared between the 60s
+    // uptime tick below (which spends it) and the rest-break scheduler (which
+    // ends the day once it is gone). None = stealth off, nothing to track.
+    let stealth_day: Option<frikadellen_baf::stealth::SharedTracker> = if config.stealth_enabled {
+        Some(frikadellen_baf::stealth::share(
+            frikadellen_baf::stealth::StealthTracker::load(
+                &ingame_name,
+                unix_now(),
+                config.stealth_daily_online_minutes.saturating_mul(60),
+            ),
+        ))
+    } else {
+        None
+    };
+
     // Periodic session-time persistence — save the accumulated running time for
     // this account every 60 seconds so a crash or kill preserves most of the data.
     // Profit totals are saved in the same tick: previously they were only written
@@ -6520,10 +6537,22 @@ async fn main() -> Result<()> {
         let profit_path_save = profit_path.clone();
         let flip_tracker_save = flip_tracker.clone();
         let flip_tracker_path_save = flip_tracker_path.clone();
+        let stealth_save = stealth_day.clone();
         tokio::spawn(async move {
+            let mut counted_secs = prev_secs_save;
             loop {
                 sleep(Duration::from_secs(60)).await;
                 let total_secs = prev_secs_save + started_save.elapsed().as_secs();
+                if let Some(day) = &stealth_save {
+                    // Only time spent ONLINE counts against the day: the delta
+                    // since the last tick happened while the connection was up,
+                    // whereas `total_secs` carries uptime from earlier days too.
+                    let delta = total_secs.saturating_sub(counted_secs);
+                    if delta > 0 {
+                        frikadellen_baf::stealth::lock(day).add_spent(delta);
+                    }
+                }
+                counted_secs = total_secs;
                 save_session_time(&session_times_path_save, &ign_save, total_secs);
                 save_profit_stats(&profit_path_save, &ign_save, &profit_tracker_save);
                 // Same tick as profit: a kill -9 must not cost the sell-time
@@ -6557,7 +6586,13 @@ async fn main() -> Result<()> {
     // duration, then restart the process to reconnect.
     // Session time is saved right before restart so it is preserved across
     // the break — the account-switching timer is NOT reset.
-    if config.humanization_enabled {
+    //
+    // Stealth mode swaps this nap-shaped cadence for session pacing: online
+    // spans and offline gaps drawn from their own ranges, plus a daily online
+    // budget that closes the day with a real night off instead of another nap.
+    if config.humanization_enabled || config.stealth_enabled {
+        let stealth = config.stealth_enabled;
+        let stealth_day_sched = stealth_day.clone();
         let chat_tx_human = chat_tx.clone();
         let ign_human = ingame_name.clone();
         let webhook_url_human = config.active_webhook_url().map(|s| s.to_string());
@@ -6574,28 +6609,76 @@ async fn main() -> Result<()> {
         let profit_path_human = profit_path.clone();
         let flip_tracker_human = flip_tracker.clone();
         let flip_tracker_path_human = flip_tracker_path.clone();
-        let min_interval = config.humanization_min_interval_minutes.max(5); // floor at 5 min
-        let max_interval = config
-            .humanization_max_interval_minutes
-            .max(min_interval + 1);
-        let min_break = config.humanization_min_break_minutes.max(1); // floor at 1 min
-        let max_break = config.humanization_max_break_minutes.max(min_break + 1);
-        info!(
-            "[Humanization] Enabled — interval {}-{}m, break {}-{}m",
-            min_interval, max_interval, min_break, max_break
-        );
+        let (min_interval, max_interval, min_break, max_break) = if stealth {
+            let min_online = config.stealth_min_session_minutes.max(5); // floor at 5 min
+            let max_online = config.stealth_max_session_minutes.max(min_online + 1);
+            let min_offline = config.stealth_min_break_minutes.max(5); // floor at 5 min
+            let max_offline = config.stealth_max_break_minutes.max(min_offline + 1);
+            (min_online, max_online, min_offline, max_offline)
+        } else {
+            let min_interval = config.humanization_min_interval_minutes.max(5); // floor at 5 min
+            let max_interval = config
+                .humanization_max_interval_minutes
+                .max(min_interval + 1);
+            let min_break = config.humanization_min_break_minutes.max(1); // floor at 1 min
+            let max_break = config.humanization_max_break_minutes.max(min_break + 1);
+            (min_interval, max_interval, min_break, max_break)
+        };
+        if stealth {
+            info!(
+                "[Stealth] Session pacing: {}-{}m online, {}-{}m offline, daily budget {}m ±25%{}",
+                min_interval,
+                max_interval,
+                min_break,
+                max_break,
+                config.stealth_daily_online_minutes,
+                if config.stealth_daily_online_minutes == 0 {
+                    " (no cap)"
+                } else {
+                    ""
+                }
+            );
+        } else {
+            info!(
+                "[Humanization] Enabled — interval {}-{}m, break {}-{}m",
+                min_interval, max_interval, min_break, max_break
+            );
+        }
         tokio::spawn(async move {
             use rand::Rng;
 
-            // Sleep for a random interval between min and max
-            let interval_secs = {
+            // How long this online span runs: triangular under stealth so the
+            // draws cluster mid-range, uniform for plain humanization.
+            let mut interval_secs = if stealth {
+                frikadellen_baf::stealth::sample_range(min_interval * 60, max_interval * 60)
+            } else {
                 let mut rng = rand::rng();
                 rng.random_range(min_interval * 60..=max_interval * 60)
             };
-            info!(
-                "[Humanization] Next rest break in {:.1}m",
-                interval_secs as f64 / 60.0
-            );
+            // Never start a span that would run past today's allowance: the day
+            // ends when the budget runs out, not one whole span later. A disabled
+            // budget (0) reports a huge remainder and leaves the span alone.
+            if let Some(day) = &stealth_day_sched {
+                let guard = frikadellen_baf::stealth::lock(day);
+                let budget = guard.budget_secs();
+                let remaining = if budget > 0 {
+                    budget.saturating_sub(guard.spent_secs())
+                } else {
+                    u64::MAX
+                };
+                interval_secs = interval_secs.min(remaining);
+            }
+            if stealth {
+                info!(
+                    "[Stealth] Online for the next {:.1}m",
+                    interval_secs as f64 / 60.0
+                );
+            } else {
+                info!(
+                    "[Humanization] Next rest break in {:.1}m",
+                    interval_secs as f64 / 60.0
+                );
+            }
             sleep(Duration::from_secs(interval_secs)).await;
 
             // If the macro is paused by the user, wait until it's unpaused
@@ -6612,15 +6695,39 @@ async fn main() -> Result<()> {
                 }
             }
 
-            // Pick random break duration
-            let break_secs = {
+            // Pick the offline gap. A stealth day that already spent its
+            // budget does not get another nap: it ends with a night off sized
+            // against what was actually played today.
+            let mut day_over_spent: Option<u64> = None;
+            let break_secs = if let Some(day) = &stealth_day_sched {
+                let guard = frikadellen_baf::stealth::lock(day);
+                if guard.exceeded() {
+                    day_over_spent = Some(guard.spent_secs());
+                    frikadellen_baf::stealth::long_break_secs(guard.spent_secs())
+                } else {
+                    frikadellen_baf::stealth::sample_range(min_break * 60, max_break * 60)
+                }
+            } else {
                 let mut rng = rand::rng();
                 rng.random_range(min_break * 60..=max_break * 60)
             };
-            info!(
-                "[Humanization] Starting rest break ({:.1}m) — disconnecting from server",
-                break_secs as f64 / 60.0
-            );
+            if let Some(spent) = day_over_spent {
+                info!(
+                    "[Stealth] Daily budget spent ({:.1}h online) — logging off for {:.1}h",
+                    spent as f64 / 3600.0,
+                    break_secs as f64 / 3600.0
+                );
+            } else if stealth {
+                info!(
+                    "[Stealth] Offline for the next {:.1}m — disconnecting from server",
+                    break_secs as f64 / 60.0
+                );
+            } else {
+                info!(
+                    "[Humanization] Starting rest break ({:.1}m) — disconnecting from server",
+                    break_secs as f64 / 60.0
+                );
+            }
 
             // Notify via webhook
             if let Some(ref url) = webhook_url_human {
@@ -6631,12 +6738,27 @@ async fn main() -> Result<()> {
             }
 
             // Notify chat
-            let baf_msg = format!(
-                "§f[§4BAF§f]: §e😴 Taking a rest break ({:.0}m). Disconnecting...",
-                break_secs as f64 / 60.0
-            );
+            let baf_msg = if day_over_spent.is_some() {
+                format!(
+                    "§f[§4BAF§f]: §e🌙 Logging off for the night ({:.1}h). Disconnecting...",
+                    break_secs as f64 / 3600.0
+                )
+            } else {
+                format!(
+                    "§f[§4BAF§f]: §e😴 Taking a rest break ({:.0}m). Disconnecting...",
+                    break_secs as f64 / 60.0
+                )
+            };
             print_mc_chat(&baf_msg);
             let _ = chat_tx_human.send(baf_msg);
+
+            // Roll the day over at the same moment the break marker is written,
+            // with no await in between: a crash anywhere earlier leaves the spent
+            // budget in place, so the next start still closes the day instead of
+            // trading the reset night for a fresh allowance.
+            if let (Some(_), Some(day)) = (day_over_spent, stealth_day_sched.as_ref()) {
+                frikadellen_baf::stealth::lock(day).start_new_day(unix_now(), break_secs);
+            }
 
             let total_secs = prev_secs_human + started_human.elapsed().as_secs();
             take_rest_break_and_restart(
