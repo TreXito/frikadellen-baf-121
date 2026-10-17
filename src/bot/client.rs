@@ -208,7 +208,10 @@ fn spawn_startup_after_teleport(bot: Client, state: &BotClientState) {
         // Go home: friend's island via /visit + slot 11 when
         // visitfriend is active, else /is.
         go_to_island(&bot, &last_window_id_startup).await;
-        tokio::time::sleep(tokio::time::Duration::from_secs(TELEPORT_COMPLETION_WAIT_SECS)).await;
+        tokio::time::sleep(tokio::time::Duration::from_secs(
+            TELEPORT_COMPLETION_WAIT_SECS,
+        ))
+        .await;
         run_startup_workflow(
             bot,
             bot_state,
@@ -2656,8 +2659,8 @@ async fn event_handler(bot: Client, event: Event, state: BotClientState) -> Resu
                 let bot_wd = bot.clone();
                 tokio::spawn(async move {
                     const WATCHDOG_SECS: u64 = 90;
-                    let deadline = std::time::Instant::now()
-                        + std::time::Duration::from_secs(WATCHDOG_SECS);
+                    let deadline =
+                        std::time::Instant::now() + std::time::Duration::from_secs(WATCHDOG_SECS);
                     while std::time::Instant::now() < deadline {
                         tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
                         if *teleported_wd.read() {

@@ -258,7 +258,9 @@ impl CoflWebSocket {
                                     }
                                 }
                                 Some("registerKeybind") => {
-                                    debug!("Ignoring COFL registerKeybind (no keybinds registered)");
+                                    debug!(
+                                        "Ignoring COFL registerKeybind (no keybinds registered)"
+                                    );
                                 }
                                 _ => {
                                     if let Err(e) = Self::handle_message(&text, &tx_clone) {
