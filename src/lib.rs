@@ -16,6 +16,7 @@ pub mod logging;
 pub mod profit;
 pub mod session;
 pub mod state;
+pub mod stealth;
 pub mod types;
 pub mod updater;
 pub mod utils;

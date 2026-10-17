@@ -453,6 +453,38 @@ pub struct Config {
     #[serde(default = "default_humanization_max_break_minutes")]
     pub humanization_max_break_minutes: u64,
 
+    // ═══════════════════ Stealth session pacing ═══════════════
+    /// Randomise how long the account stays ONLINE and OFFLINE so its
+    /// join/leave history reads like a person's day instead of a 24/7 macro,
+    /// and cap the online time per day so it signs off for the night. When
+    /// enabled this takes over the scheduling from the humanization ranges
+    /// above (those still drive the panel's on-demand break button).
+    /// Default: false.
+    #[serde(default)]
+    pub stealth_enabled: bool,
+
+    /// Shortest online span before an offline gap, in minutes. Default: 60.
+    #[serde(default = "default_stealth_min_session_minutes")]
+    pub stealth_min_session_minutes: u64,
+
+    /// Longest online span before an offline gap, in minutes. Default: 300.
+    #[serde(default = "default_stealth_max_session_minutes")]
+    pub stealth_max_session_minutes: u64,
+
+    /// Shortest offline gap between online spans, in minutes. Default: 30.
+    #[serde(default = "default_stealth_min_break_minutes")]
+    pub stealth_min_break_minutes: u64,
+
+    /// Longest offline gap between online spans, in minutes. Default: 180.
+    #[serde(default = "default_stealth_max_break_minutes")]
+    pub stealth_max_break_minutes: u64,
+
+    /// Online time one day is allowed before the macro logs off for the night,
+    /// in minutes; the real allowance is redrawn ±25% every day so no two days
+    /// match. 0 = no daily cap, only the spans above apply. Default: 600.
+    #[serde(default = "default_stealth_daily_online_minutes")]
+    pub stealth_daily_online_minutes: u64,
+
     // ═══════════════════════ Persisted session state ═══════════════
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub sessions: HashMap<String, CoflSession>,
@@ -571,6 +603,26 @@ fn default_humanization_max_break_minutes() -> u64 {
     10
 }
 
+fn default_stealth_min_session_minutes() -> u64 {
+    60
+}
+
+fn default_stealth_max_session_minutes() -> u64 {
+    300
+}
+
+fn default_stealth_min_break_minutes() -> u64 {
+    30
+}
+
+fn default_stealth_max_break_minutes() -> u64 {
+    180
+}
+
+fn default_stealth_daily_online_minutes() -> u64 {
+    600
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -645,6 +697,13 @@ impl Default for Config {
             humanization_max_interval_minutes: default_humanization_max_interval_minutes(),
             humanization_min_break_minutes: default_humanization_min_break_minutes(),
             humanization_max_break_minutes: default_humanization_max_break_minutes(),
+            // Stealth session pacing
+            stealth_enabled: false,
+            stealth_min_session_minutes: default_stealth_min_session_minutes(),
+            stealth_max_session_minutes: default_stealth_max_session_minutes(),
+            stealth_min_break_minutes: default_stealth_min_break_minutes(),
+            stealth_max_break_minutes: default_stealth_max_break_minutes(),
+            stealth_daily_online_minutes: default_stealth_daily_online_minutes(),
             // Persisted session state
             sessions: HashMap::new(),
         }
