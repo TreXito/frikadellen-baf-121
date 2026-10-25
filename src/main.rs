@@ -1813,6 +1813,68 @@ async fn main() -> Result<()> {
         });
     }
 
+    // Session fingerprint reporter. Costs no packets and no latency: it reads
+    // the click counters and the purse every 5 minutes and logs one line, so a
+    // session that dies can be compared with one that survives on numbers.
+    // The bans in play are staff/boosting, not Watchdog, which means the
+    // differentiator is the operating envelope (rate, duration, how far the
+    // timing sits outside what a client can do), not one packet.
+    {
+        let bc = bot_client.clone();
+        let started = std::time::Instant::now();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(300));
+            tick.tick().await;
+            loop {
+                tick.tick().await;
+                let (sent, under, suppressed) = frikadellen_baf::bot::click_fingerprint();
+                let worth = bc
+                    .get_purse()
+                    .map(|p| p.saturating_add(bc.active_listing_value_and_count().0));
+                info!(
+                    "[Session] up {}m worth {} click sent={} under_tick={} suppressed={} clicks/min={}",
+                    started.elapsed().as_secs() / 60,
+                    worth.map(|w| w.to_string()).unwrap_or_else(|| "?".into()),
+                    sent,
+                    under,
+                    suppressed,
+                    sent / (started.elapsed().as_secs() / 60).max(1),
+                );
+            }
+        });
+    }
+
+    // Earnings envelope sampler. Feeds the hourly gain curve (purse + coins
+    // locked in active listings) every 5s, so the purchase gate in
+    // `FlipHandler::handle_flip` and the periodic log have something to read.
+    // The expensive SkyBlock punishment is the boosting ban plus profile wipe,
+    // and it is settled from this curve, not from any packet. Only runs when
+    // `BAF_MAX_GAIN_PER_HOUR` is set.
+    if frikadellen_baf::state::earnings::ENVELOPE.enabled() {
+        let bc = bot_client.clone();
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(std::time::Duration::from_secs(5));
+            let mut last_log = std::time::Instant::now();
+            loop {
+                tick.tick().await;
+                let Some(purse) = bc.get_purse() else {
+                    continue;
+                };
+                let (locked, _auctions) = bc.active_listing_value_and_count();
+                let worth = purse.saturating_add(locked);
+                frikadellen_baf::state::earnings::ENVELOPE.record(worth);
+                if last_log.elapsed() >= std::time::Duration::from_secs(300) {
+                    last_log = std::time::Instant::now();
+                    info!(
+                        "[Envelope] worth {} — {}",
+                        worth,
+                        frikadellen_baf::state::earnings::ENVELOPE.summary()
+                    );
+                }
+            }
+        });
+    }
+
     // Finder-PRIMARY purse relay. When the primary `websocket_url` IS the private
     // finder (not a COFL modsocket), the finder feed arrives through `ws_client`
     // and the `finder_feed_urls` loop above never runs — so nothing relays the
