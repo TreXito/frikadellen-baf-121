@@ -1,5 +1,7 @@
 use anyhow::{anyhow, Result};
+use azalea::app::PluginGroup;
 use azalea::prelude::*;
+use azalea::ClientInformation;
 use azalea_client::chat::ChatPacket;
 use azalea_client::inventory::{MenuOpenedEvent, SetContainerContentEvent};
 use azalea_inventory::operations::ClickType;
@@ -810,7 +812,20 @@ impl BotClient {
                             );
                             join_opts = join_opts.proxy(proxy);
                         }
-                        ClientBuilder::new()
+                        ClientBuilder::new_without_plugins()
+                            // Same plugin set `ClientBuilder::new()` gives us, minus
+                            // `AcceptResourcePacksPlugin`: that one answers a pack request
+                            // with Accepted + SuccessfullyLoaded inside the same ECS update
+                            // without downloading anything, which no real client can do.
+                            // Ours delays the "finished loading" reply to a plausible span
+                            // and logs the request. See `bot/resource_packs.rs`.
+                            .add_plugins(azalea::DefaultPlugins)
+                            .add_plugins(
+                                azalea::bot::DefaultBotPlugins.build().disable::<
+                                    azalea::accept_resource_packs::AcceptResourcePacksPlugin,
+                                >(),
+                            )
+                            .add_plugins(crate::bot::RealisticResourcePacksPlugin)
                             .add_plugins(plugin)
                             .set_handler(event_handler)
                             .set_state(handler_state_clone.clone())
@@ -2615,6 +2630,20 @@ async fn event_handler(bot: Client, event: Event, state: BotClientState) -> Resu
     match event {
         Event::Login => {
             info!("Bot logged in successfully");
+
+            // Announce game options that a real player actually has.
+            //
+            // azalea's `ClientInformation` defaults are not vanilla's:
+            // `allows_listing` ships as `false`, while vanilla's "Allow Server
+            // Listings" option is ON by default, so every unconfigured azalea bot
+            // tells the server it is one of the essentially-nobody who turned
+            // that off. Sent as a normal option update, which players do.
+            bot.set_client_information(ClientInformation {
+                allows_listing: true,
+                view_distance: 12,
+                ..Default::default()
+            });
+
             if state.event_tx.send(BotEvent::Login).is_err() {
                 debug!("Failed to send Login event - receiver dropped");
             }
@@ -4175,9 +4204,13 @@ async fn execute_command(bot: &Client, command: &QueuedCommand, state: &BotClien
                         // if it isn't open in time the Confirm Purchase handler clicks
                         // when it actually opens.
                         let next_wid = if window_id == 255 { 1u8 } else { window_id + 1 };
-                        fast_state.skip_click_sent.store(true, Ordering::Relaxed);
                         info!("[AH] Fast-path skip: pre-clicking confirm slot 11 on window {} (same burst)", next_wid);
-                        send_raw_click(&fast_bot, next_wid, 11);
+                        // Only claim the pre-click happened if the spacing floor let it
+                        // out; otherwise the Confirm Purchase handler must click itself.
+                        let pre_clicked = send_raw_click(&fast_bot, next_wid, 11);
+                        fast_state
+                            .skip_click_sent
+                            .store(pre_clicked, Ordering::Relaxed);
                     } else {
                         info!("[AH] Fast-path: gold_nugget confirmed — buy click sent");
                     }
@@ -4623,6 +4656,11 @@ async fn handle_window_interaction(
                     // throttles window clicks to ~5 per 500ms, so the burst is capped
                     // to that budget (CLICK_BUDGET / CLICK_WINDOW) — 5 clicks across
                     // ~100ms land right on the deadline without tripping the throttle.
+                    //
+                    // These clicks land under one client tick apart, which a vanilla
+                    // client cannot emit. Left as-is on purpose: the win rate is the
+                    // product, `click_gate` counts them, and `BAF_CLICK_GAP_MS` is the
+                    // knob if the measurement ever justifies paying for it.
                     const BED_TIMING_CLICK_INTERVAL_MS: u64 = 20;
                     const BED_WAIT_POLL_MS: u64 = 20;
                     const MAX_FAILED_CLICKS: usize = 5;
@@ -4871,8 +4909,8 @@ async fn handle_window_interaction(
                             // Confirm Purchase handler clicks on window-open.
                             let next_wid = if window_id == 255 { 1u8 } else { window_id + 1 };
                             info!("[AH] Skip: pre-clicking confirm slot 11 on window {} (same burst, fallback)", next_wid);
-                            state.skip_click_sent.store(true, Ordering::Relaxed);
-                            send_raw_click(bot, next_wid, 11);
+                            let pre_clicked = send_raw_click(bot, next_wid, 11);
+                            state.skip_click_sent.store(pre_clicked, Ordering::Relaxed);
                         } else {
                             info!("[AH] gold_nugget confirmed — buy click sent (fallback)");
                         }
@@ -8369,23 +8407,204 @@ fn send_raw_chat_command(bot: &Client, content: &str) {
     });
 }
 
+/// Opt-out switch for the legacy zeroed click packet, for A/B testing on a
+/// throwaway account. `BAF_VANILLA_CLICK=0` reproduces the old behaviour.
+static LEGACY_CLICK_SHAPE: Lazy<bool> =
+    Lazy::new(|| matches!(std::env::var("BAF_VANILLA_CLICK").as_deref(), Ok("0")));
+
+/// `(state_id, carried, clicked_slot)` for a click packet.
+type ClickState = (
+    u32,
+    azalea_inventory::ItemStack,
+    azalea_inventory::ItemStack,
+);
+
+/// Snapshot the live container state a click packet has to agree with.
+///
+/// Returns `None` when the inventory component is not there yet (before login),
+/// which falls back to the legacy packet shape.
+///
+/// The ECS read guard is dropped here on purpose: `with_raw_connection_mut`
+/// takes a write lock on the same `RwLock` and would deadlock if it were held.
+fn live_container_state(bot: &Client, slot: i16) -> Option<ClickState> {
+    use azalea::entity::inventory::Inventory;
+    bot.get_component::<Inventory>().map(|inv| {
+        (
+            inv.state_id,
+            inv.carried.clone(),
+            inv.menu()
+                .slots()
+                .get(slot as usize)
+                .cloned()
+                .unwrap_or(azalea_inventory::ItemStack::Empty),
+        )
+    })
+}
+
+/// Monotonic milliseconds since process start.
+fn mono_ms() -> u64 {
+    static START: Lazy<std::time::Instant> = Lazy::new(std::time::Instant::now);
+    START.elapsed().as_millis() as u64
+}
+
+/// Minimum spacing between two container clicks that are allowed to reach the
+/// server.
+///
+/// A vanilla client flushes its packet queue on the client tick, so two clicks
+/// closer together than one tick (50ms), or two clicks inside one flush, cannot
+/// be produced by the game client. 60 leaves headroom. This is a *timing*
+/// impossibility: no amount of correct packet content hides it.
+///
+/// **Off by default.** Bed timing pays for every millisecond here, and there is
+/// no observation showing a fast click caused a ban; the click-spacing argument
+/// is about what a reviewing human concludes, not about an automatic rule. So
+/// the floor is opt-in: set `BAF_CLICK_GAP_MS=60` (or higher) to enforce it,
+/// leave it unset for today's behaviour. The counters run either way, so the
+/// size of the trade is measurable before you take it.
+fn click_gap_floor_ms() -> u64 {
+    static FLOOR: Lazy<u64> = Lazy::new(|| {
+        std::env::var("BAF_CLICK_GAP_MS")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(0)
+    });
+    *FLOOR
+}
+
+/// Clicks sent this session, and how many of them were not physically
+/// producible by a Minecraft client.
+static CLICKS_SENT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static CLICKS_UNDER_TICK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static CLICKS_SUPPRESSED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static LAST_CLICK_AT_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Session click fingerprint, as `(sent, under_one_tick_apart, suppressed)`.
+///
+/// `under` counts clicks closer together than one 50ms client tick. A vanilla
+/// client cannot produce those, so it is the honest measure of how far this
+/// session's click timing sits outside what the game client can do. Counted
+/// whether or not the spacing floor is enforced, so accounts that survive and
+/// accounts that die can be compared on numbers instead of impressions.
+pub fn click_fingerprint() -> (u64, u64, u64) {
+    (
+        CLICKS_SENT.load(Ordering::Relaxed),
+        CLICKS_UNDER_TICK.load(Ordering::Relaxed),
+        CLICKS_SUPPRESSED.load(Ordering::Relaxed),
+    )
+}
+
+/// Enforce the click spacing floor and keep the session's click fingerprint.
+///
+/// Returns `false` when the click must not be sent. Suppressing is safe by
+/// design: every caller is a poll loop or a bounded retry.
+fn click_gate(window_id: u8, slot: i16) -> bool {
+    let floor = click_gap_floor_ms();
+    let now = mono_ms();
+    let last = LAST_CLICK_AT_MS.load(Ordering::Relaxed);
+    let gap = now.saturating_sub(last);
+
+    if floor > 0 && last > 0 && gap < floor {
+        let n = CLICKS_SUPPRESSED.fetch_add(1, Ordering::Relaxed) + 1;
+        warn!(
+            "Click spacing floor: suppressed slot {} in window {} ({}ms since the last click, floor {}ms, {} suppressed)",
+            slot, window_id, gap, floor, n
+        );
+        return false;
+    }
+
+    // Measurement only: a vanilla client cannot emit two clicks inside one tick,
+    // so this count is how often we do something it cannot.
+    if last > 0 && gap < 50 {
+        CLICKS_UNDER_TICK.fetch_add(1, Ordering::Relaxed);
+    }
+
+    LAST_CLICK_AT_MS.store(now, Ordering::Relaxed);
+    let total = CLICKS_SENT.fetch_add(1, Ordering::Relaxed) + 1;
+    if total.is_multiple_of(50) {
+        info!(
+            "Click fingerprint: {} sent, {} under 50ms apart, {} suppressed (floor {}ms{})",
+            total,
+            CLICKS_UNDER_TICK.load(Ordering::Relaxed),
+            CLICKS_SUPPRESSED.load(Ordering::Relaxed),
+            floor,
+            if floor == 0 { ", disabled" } else { "" }
+        );
+    }
+    true
+}
+
 /// Send a container click packet directly to the TCP socket via
 /// `with_raw_connection_mut`, bypassing the ECS command queue.
 ///
 /// Used for time-critical slot clicks (buy button, confirm button) on the
 /// auction purchase path where every millisecond matters.
-fn send_raw_click(bot: &Client, window_id: u8, slot: i16) {
+///
+/// The packet carries the REAL container state instead of fabricated defaults:
+/// the `state_id` the server last sent us, the stack actually on the cursor, and
+/// the slot change a vanilla client would have predicted. A real client applies
+/// the click locally *before* sending it, so a left click on a Hypixel menu
+/// button always reports "that slot became empty and its item is on my cursor";
+/// the server cancels the move and resyncs, which is what a human produces.
+/// Sending `state_id: 0` with an empty `changed_slots` map on every click of
+/// every session is a packet no Minecraft client can emit.
+///
+/// Returns `true` when the click went out. `false` only when an opt-in spacing
+/// floor (`BAF_CLICK_GAP_MS`, off by default) suppressed it.
+fn send_raw_click(bot: &Client, window_id: u8, slot: i16) -> bool {
     use azalea_protocol::packets::game::s_container_click::{
         HashedStack, ServerboundContainerClick,
     };
-    let packet = ServerboundContainerClick {
-        container_id: window_id as i32,
-        state_id: 0,
-        slot_num: slot,
-        button_num: 0,
-        click_type: ClickType::Pickup,
-        changed_slots: Default::default(),
-        carried_item: HashedStack(None),
+
+    if !click_gate(window_id, slot) {
+        return false;
+    }
+
+    let snapshot = if *LEGACY_CLICK_SHAPE {
+        None
+    } else {
+        live_container_state(bot, slot)
+    };
+    // Echoed into the packet and logged, so a stale azalea-tracked state_id is
+    // visible in the log instead of being an invisible assumption.
+    let echoed_state_id = snapshot.as_ref().map(|(id, _, _)| *id).unwrap_or(0);
+
+    let packet = match snapshot {
+        None => ServerboundContainerClick {
+            container_id: window_id as i32,
+            state_id: 0,
+            slot_num: slot,
+            button_num: 0,
+            click_type: ClickType::Pickup,
+            changed_slots: Default::default(),
+            carried_item: HashedStack(None),
+        },
+        Some((state_id, carried, clicked)) => bot.with_registry_holder(|reg| {
+            use azalea_inventory::ItemStack;
+            // Vanilla prediction for Pickup with an empty cursor: the clicked
+            // stack moves onto the cursor and the slot becomes empty.
+            let pickup = matches!(carried, ItemStack::Empty) && clicked.is_present();
+            ServerboundContainerClick {
+                container_id: window_id as i32,
+                state_id,
+                slot_num: slot,
+                button_num: 0,
+                click_type: ClickType::Pickup,
+                changed_slots: if pickup {
+                    [(
+                        slot as u16,
+                        HashedStack::from_item_stack(&ItemStack::Empty, reg),
+                    )]
+                    .into_iter()
+                    .collect()
+                } else {
+                    Default::default()
+                },
+                carried_item: HashedStack::from_item_stack(
+                    if pickup { &clicked } else { &carried },
+                    reg,
+                ),
+            }
+        }),
     };
     bot.with_raw_connection_mut(|mut raw_conn| {
         if let Err(e) = raw_conn.write(packet) {
@@ -8395,7 +8614,13 @@ fn send_raw_click(bot: &Client, window_id: u8, slot: i16) {
             );
         }
     });
-    info!("Raw-clicked slot {} in window {}", slot, window_id);
+    // If azalea's tracked state_id is itself always 0, the echo is cosmetic and
+    // the desync signal lives somewhere else.
+    info!(
+        "Raw-clicked slot {} in window {} (state_id {})",
+        slot, window_id, echoed_state_id
+    );
+    true
 }
 
 // ═══════════════════════════ Drill part-out ═══════════════════════════
@@ -8537,14 +8762,48 @@ fn send_raw_shift_click(bot: &Client, window_id: u8, slot: i16) {
     use azalea_protocol::packets::game::s_container_click::{
         HashedStack, ServerboundContainerClick,
     };
-    let packet = ServerboundContainerClick {
-        container_id: window_id as i32,
-        state_id: 0,
-        slot_num: slot,
-        button_num: 0,
-        click_type: ClickType::QuickMove,
-        changed_slots: Default::default(),
-        carried_item: HashedStack(None),
+    if !click_gate(window_id, slot) {
+        return;
+    }
+    let snapshot = if *LEGACY_CLICK_SHAPE {
+        None
+    } else {
+        live_container_state(bot, slot)
+    };
+    let packet = match snapshot {
+        None => ServerboundContainerClick {
+            container_id: window_id as i32,
+            state_id: 0,
+            slot_num: slot,
+            button_num: 0,
+            click_type: ClickType::QuickMove,
+            changed_slots: Default::default(),
+            carried_item: HashedStack(None),
+        },
+        Some((state_id, carried, clicked)) => bot.with_registry_holder(|reg| {
+            use azalea_inventory::ItemStack;
+            // QUICK_MOVE empties the source slot; the destination is chosen by
+            // the server-side menu, so only the source is claimed here.
+            let moved = clicked.is_present();
+            ServerboundContainerClick {
+                container_id: window_id as i32,
+                state_id,
+                slot_num: slot,
+                button_num: 0,
+                click_type: ClickType::QuickMove,
+                changed_slots: if moved {
+                    [(
+                        slot as u16,
+                        HashedStack::from_item_stack(&ItemStack::Empty, reg),
+                    )]
+                    .into_iter()
+                    .collect()
+                } else {
+                    Default::default()
+                },
+                carried_item: HashedStack::from_item_stack(&carried, reg),
+            }
+        }),
     };
     bot.with_raw_connection_mut(|mut raw_conn| {
         if let Err(e) = raw_conn.write(packet) {
@@ -8931,12 +9190,22 @@ async fn click_window_slot_carrying(
     use azalea_protocol::packets::game::s_container_click::{
         HashedStack, ServerboundContainerClick,
     };
+    if !click_gate(window_id, slot) {
+        return;
+    }
 
+    let state_id = if *LEGACY_CLICK_SHAPE {
+        0
+    } else {
+        live_container_state(bot, slot)
+            .map(|(id, _, _)| id)
+            .unwrap_or(0)
+    };
     let carried_item = bot.with_registry_holder(|reg| HashedStack::from_item_stack(carried, reg));
 
     let packet = ServerboundContainerClick {
         container_id: window_id as i32,
-        state_id: 0,
+        state_id,
         slot_num: slot,
         button_num: 0,
         click_type: ClickType::Pickup,

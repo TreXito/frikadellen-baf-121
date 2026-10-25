@@ -329,6 +329,19 @@ impl FlipHandler {
             return Ok(());
         }
 
+        // Earnings envelope: refuse new purchases once this session has already
+        // gained more than the hourly band. Selling and listing keep running, so
+        // a capped session drains inventory instead of stalling. Off unless
+        // `BAF_MAX_GAIN_PER_HOUR` is set.
+        if crate::state::earnings::ENVELOPE.capped() {
+            warn!(
+                "Earnings envelope: refusing flip '{}' — {}",
+                flip.item_name,
+                crate::state::earnings::ENVELOPE.summary()
+            );
+            return Ok(());
+        }
+
         // Store current flip
         *self.current_flip.write() = Some(flip.clone());
 
