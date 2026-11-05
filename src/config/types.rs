@@ -170,6 +170,29 @@ pub struct Config {
     #[serde(default = "default_true", alias = "freemoney")]
     pub bedtiming: bool,
 
+    /// Humanise container-click timing.  When true (default) the bot waits a
+    /// random human-plausible reaction time after a window's contents arrive
+    /// before clicking, jitters every fixed click interval, and echoes the
+    /// real container state in click packets.  This removes the three most
+    /// obvious anti-cheat fingerprints of the old behaviour: a 0ms reaction
+    /// to `ContainerSetContent` (physically impossible for a human),
+    /// metronome-exact click intervals (only a `sleep(K)` loop fires at
+    /// exactly K), and `state_id: 0` with an empty `changed_slots` map on
+    /// every click (no Minecraft client can emit that).  Set to false to
+    /// restore the old instantly-competitive behaviour at your own risk.
+    #[serde(default = "default_true")]
+    pub humanize_clicks: bool,
+
+    /// Lower bound of the random reaction delay (ms) applied after a window's
+    /// contents are confirmed before the click goes out.  Only used when
+    /// `humanize_clicks = true`.  Default: 110ms (fast human).
+    #[serde(default = "default_click_reaction_min_ms")]
+    pub click_reaction_ms_min: u64,
+
+    /// Upper bound of the random reaction delay (ms).  Default: 260ms.
+    #[serde(default = "default_click_reaction_ms_max")]
+    pub click_reaction_ms_max: u64,
+
     // ═══════════════════════ Timing / delays ═══════════════════════
     /// Minimum delay between consecutive queued commands in milliseconds.
     /// Prevents back-to-back Hypixel interactions from overlapping.
@@ -501,6 +524,14 @@ fn default_true() -> bool {
     true
 }
 
+fn default_click_reaction_min_ms() -> u64 {
+    110
+}
+
+fn default_click_reaction_max_ms() -> u64 {
+    260
+}
+
 fn default_humanization_min_interval_minutes() -> u64 {
     45
 }
@@ -541,6 +572,9 @@ impl Default for Config {
             remove_drill_parts: false,
             skip: false,
             bedtiming: true,
+            humanize_clicks: true,
+            click_reaction_ms_min: default_click_reaction_min_ms(),
+            click_reaction_ms_max: default_click_reaction_max_ms(),
             // Timing / delays
             command_delay_ms: default_command_delay_ms(),
             bed_spam_click_delay: default_bed_spam_click_delay(),

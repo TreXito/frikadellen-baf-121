@@ -1321,6 +1321,21 @@ async fn main() -> Result<()> {
         }
     );
     frikadellen_baf::bot::set_remove_drill_parts(config.remove_drill_parts);
+    info!(
+        "Humanized Click Timing: {} (reaction {}-{}ms)",
+        if config.humanize_clicks {
+            "ENABLED"
+        } else {
+            "DISABLED (legacy instant clicks, ban-prone)"
+        },
+        config.click_reaction_ms_min,
+        config.click_reaction_ms_max
+    );
+    frikadellen_baf::bot::set_humanize_clicks(
+        config.humanize_clicks,
+        config.click_reaction_ms_min,
+        config.click_reaction_ms_max,
+    );
     match &config.visitfriend {
         Some(friend) if !friend.trim().is_empty() => {
             info!("Visit Friend: flipping on {}'s island", friend.trim())

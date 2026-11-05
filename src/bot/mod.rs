@@ -1,5 +1,5 @@
 mod client;
 mod handlers;
 
-pub use client::{set_remove_drill_parts, BotClient, BotEvent};
+pub use client::{BotClient, BotEvent, set_humanize_clicks, set_remove_drill_parts};
 pub use handlers::BotEventHandlers;

@@ -13,7 +13,7 @@ use bevy_app::AppExit;
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
@@ -4129,6 +4129,12 @@ async fn execute_command(bot: &Client, command: &QueuedCommand, state: &BotClien
                         );
                     }
 
+                    // Human-plausible reaction pause: without one the click
+                    // reaches the server in the same tick the menu rendered,
+                    // a timing no human can produce.  No-op when
+                    // `humanize_clicks` is off.
+                    humanized_reaction_pause("fast-path buy click").await;
+
                     // Buy click on the confirmed window/slot 31.
                     send_raw_click(&fast_bot, window_id, 31);
 
@@ -4741,6 +4747,9 @@ async fn handle_window_interaction(
                             info!("[AH] Bed timing: gold_nugget appeared, clicking slot 31");
                             state.bed_timing_active.store(false, Ordering::Relaxed);
                             if *state.last_window_id.read() == window_id {
+                                // Short, jittered reaction (the bed race is still
+                                // speed-critical), instead of a 0ms machine click.
+                                humanized_reaction_pause("bed gold_nugget buy click").await;
                                 send_raw_click(bot, window_id, 31);
                             }
                             break;
@@ -4765,9 +4774,14 @@ async fn handle_window_interaction(
                                 }
                                 // Fire at the 20ms burst cadence, but only while we still
                                 // have throttle budget left in the current 500ms window.
+                                // The cadence interval itself is jittered (±40%) so
+                                // the pre-clicks do not land at metronome-exact
+                                // multiples of click_interval_ms, an obvious
+                                // `sleep(K)`-loop signature.
+                                let cadence_ms = jittered_ms(click_interval_ms, 40);
                                 let cadence_ok = last_bed_click.is_none_or(|t| {
                                     now.duration_since(t)
-                                        >= tokio::time::Duration::from_millis(click_interval_ms)
+                                        >= tokio::time::Duration::from_millis(cadence_ms)
                                 });
                                 let budget_ok = recent_clicks.len() < CLICK_BUDGET;
                                 if cadence_ok && budget_ok {
@@ -4824,6 +4838,10 @@ async fn handle_window_interaction(
                                 t0.elapsed().as_secs_f64() * 1000.0
                             );
                         }
+                        // Human-plausible reaction pause before the fallback
+                        // buy click (no 0ms machine reaction to fresh contents).
+                        humanized_reaction_pause("fallback buy click").await;
+
                         // Buy click on the confirmed window/slot 31.
                         send_raw_click(bot, window_id, 31);
 
@@ -4904,12 +4922,18 @@ async fn handle_window_interaction(
                 //    can't churn escrow indefinitely.
                 let skip_was_sent = state.skip_click_sent.swap(false, Ordering::Relaxed);
                 if !skip_was_sent {
+                    // The confirm window JUST opened; clicking 0ms after open is
+                    // physically impossible for a player.  Wait one read-the-window
+                    // reaction (this path already costs a full RTT vs skip, so the
+                    // extra pause is off the critical race).
+                    humanized_reaction_pause("confirm purchase click").await;
                     send_raw_click(bot, window_id, 11);
                 }
 
-                tokio::time::sleep(tokio::time::Duration::from_millis(
+                tokio::time::sleep(tokio::time::Duration::from_millis(jittered_ms(
                     CONFIRM_PURCHASE_RETRY_MS,
-                ))
+                    40,
+                )))
                 .await;
 
                 // Bounded safety retry: only while the window is still the Confirm
@@ -4926,9 +4950,10 @@ async fn handle_window_interaction(
                 {
                     send_raw_click(bot, window_id, 11);
                     retries += 1;
-                    tokio::time::sleep(tokio::time::Duration::from_millis(
+                    tokio::time::sleep(tokio::time::Duration::from_millis(jittered_ms(
                         CONFIRM_PURCHASE_RETRY_MS,
-                    ))
+                        40,
+                    )))
                     .await;
                 }
 
@@ -8332,23 +8357,209 @@ fn send_raw_chat_command(bot: &Client, content: &str) {
     });
 }
 
+// ═══════════════════════════ Human-plausible click fingerprint ═══════════
+// Why this block exists: Hypixel flagged and banned accounts running this bot.
+// The old behaviour produced the same three impossible signals on every single
+// buy, on every session, regardless of config (skip users AND non-skip users):
+//
+//  1. Zero reaction time.  The buy/confirm click went out the very ECS cycle
+//     the window's ContainerSetContent was processed, so the click reached the
+//     server 0-50ms after the menu rendered.  Fastest measured human reactions
+//     to a visual stimulus are ~100-150ms; 0ms is a machine signature.
+//  2. Metronome intervals.  Retry and burst loops slept fixed constants
+//     (50ms, 20ms, 100ms), so click timestamps quantized to exact multiples.
+//     Humans jitter; only a `tokio::time::sleep(K)` loop fires at exactly K.
+//  3. Impossible packet content.  Every click sent `state_id: 0` with an empty
+//     `changed_slots` map and empty `carried_item`.  A vanilla client tracks
+//     the server's inventory state id and predicts its own click, so it echoes
+//     the real state id and the move it just made.  `state_id: 0` forever is a
+//     packet no Minecraft client can emit.
+//
+// `humanize_clicks` (config, default ON) removes all three.  Turning it off
+// restores the old competitive-but-flagged behaviour.
+
+/// Master switch, set once from config at startup.
+pub static HUMANIZE_CLICKS: AtomicBool = AtomicBool::new(true);
+/// Reaction-delay window (milliseconds), set once from config at startup.
+static CLICK_REACTION_MIN_MS: AtomicU64 = AtomicU64::new(110);
+static CLICK_REACTION_MAX_MS: AtomicU64 = AtomicU64::new(260);
+
+/// Configure humanized click timing from the loaded config (called from main).
+pub fn set_humanize_clicks(enabled: bool, reaction_min_ms: u64, reaction_max_ms: u64) {
+    HUMANIZE_CLICKS.store(enabled, Ordering::Relaxed);
+    CLICK_REACTION_MIN_MS.store(reaction_min_ms, Ordering::Relaxed);
+    CLICK_REACTION_MAX_MS.store(reaction_max_ms.max(reaction_min_ms), Ordering::Relaxed);
+}
+
+fn humanize_enabled() -> bool {
+    HUMANIZE_CLICKS.load(Ordering::Relaxed)
+}
+
+/// Random millisecond count in `[min, max]` (max clamped to >= min).
+fn random_range_ms(min: u64, max: u64) -> u64 {
+    use rand::Rng;
+    rand::rng().random_range(min..=max.max(min))
+}
+
+/// A jittered variant of a fixed interval: ±`pct`%, applied only when
+/// humanize is on.  Removes metronome-exact click timings without changing
+/// the average rate.
+fn jittered_ms(base: u64, pct: u64) -> u64 {
+    if !humanize_enabled() || base == 0 {
+        return base;
+    }
+    let wobble = base.saturating_mul(pct) / 100;
+    let lo = base.saturating_sub(wobble).max(1);
+    let hi = base + wobble;
+    random_range_ms(lo, hi)
+}
+
+/// Wait a human-plausible reaction time before acting on window contents the
+/// server just sent.  No-op when humanize is disabled.  The delay is sampled
+/// fresh every time so the bot has a reaction-time distribution, not a delay.
+async fn humanized_reaction_pause(what: &str) {
+    if !humanize_enabled() {
+        return;
+    }
+    let ms = random_range_ms(
+        CLICK_REACTION_MIN_MS.load(Ordering::Relaxed),
+        CLICK_REACTION_MAX_MS.load(Ordering::Relaxed),
+    );
+    debug!("[Humanize] {}ms reaction pause before {}", ms, what);
+    tokio::time::sleep(tokio::time::Duration::from_millis(ms)).await;
+}
+
+/// Minimum spacing between two container clicks allowed to reach the server.
+/// Catches burst ticks (same-burst double-clicks, 20ms bed spam) that fall
+/// below what rapid-but-real input hardware produces.  Override with
+/// `BAF_CLICK_GAP_MS`; `0` disables the floor entirely.
+fn click_gap_floor_ms() -> u64 {
+    static FLOOR: std::sync::LazyLock<u64> = std::sync::LazyLock::new(|| {
+        std::env::var("BAF_CLICK_GAP_MS")
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(40)
+    });
+    *FLOOR
+}
+
+/// Enforce the click spacing floor and track the session's click fingerprint.
+///
+/// Returns `false` when the click must not be sent.  Suppressing is safe by
+/// design: every call site is inside a poll loop or bounded retry that fires
+/// again, and a click below the floor is one no human could have made.
+fn click_gate(window_id: u8, slot: i16) -> bool {
+    use std::sync::Mutex;
+    static LAST_CLICK_AT: Mutex<Option<tokio::time::Instant>> = Mutex::new(None);
+    static SUPPRESSED: AtomicU64 = AtomicU64::new(0);
+
+    let floor = click_gap_floor_ms();
+    if floor > 0 && humanize_enabled() {
+        let mut last = LAST_CLICK_AT.lock().unwrap();
+        if let Some(t) = *last {
+            let gap = t.elapsed().as_millis() as u64;
+            if gap < floor {
+                let n = SUPPRESSED.fetch_add(1, Ordering::Relaxed) + 1;
+                warn!(
+                    "Click spacing floor: suppressed slot {} in window {} \
+                     ({}ms since last click, floor {}ms, {} suppressed this session)",
+                    slot, window_id, gap, floor, n
+                );
+                return false;
+            }
+        }
+        *last = Some(tokio::time::Instant::now());
+    }
+    true
+}
+
+/// `(state_id, carried, clicked_slot)` for a click packet.
+type ClickState = (u32, azalea_inventory::ItemStack, azalea_inventory::ItemStack);
+
+/// Snapshot the live container state a click packet has to agree with.
+///
+/// The ECS read guard is dropped here on purpose: `with_raw_connection_mut`
+/// takes a write lock on the same `RwLock` and would deadlock if it were
+/// still held.
+fn live_container_state(bot: &Client, slot: i16) -> Option<ClickState> {
+    use azalea::entity::inventory::Inventory;
+    bot.get_component::<Inventory>().map(|inv| {
+        (
+            inv.state_id,
+            inv.carried.clone(),
+            inv.menu()
+                .slots()
+                .get(slot as usize)
+                .cloned()
+                .unwrap_or(azalea_inventory::ItemStack::Empty),
+        )
+    })
+}
+
 /// Send a container click packet directly to the TCP socket via
 /// `with_raw_connection_mut`, bypassing the ECS command queue.
 ///
 /// Used for time-critical slot clicks (buy button, confirm button) on the
 /// auction purchase path where every millisecond matters.
+///
+/// When `humanize_clicks` is on, the packet carries the REAL container state,
+/// not fabricated defaults: the `state_id` the server last sent us, the stack
+/// actually on the cursor, and the slot change a vanilla client would have
+/// predicted.  A real client applies the click locally *before* sending it,
+/// so a left click on a Hypixel menu button always reports "that slot became
+/// empty and its item is on my cursor"; the server cancels the move and
+/// resyncs, which is exactly what a human produces.  Suppressed by the click
+/// spacing floor when it would land below the humanly possible gap.
 fn send_raw_click(bot: &Client, window_id: u8, slot: i16) {
     use azalea_protocol::packets::game::s_container_click::{
         HashedStack, ServerboundContainerClick,
     };
-    let packet = ServerboundContainerClick {
-        container_id: window_id as i32,
-        state_id: 0,
-        slot_num: slot,
-        button_num: 0,
-        click_type: ClickType::Pickup,
-        changed_slots: Default::default(),
-        carried_item: HashedStack(None),
+
+    if !click_gate(window_id, slot) {
+        return;
+    }
+
+    let snapshot = if humanize_enabled() {
+        live_container_state(bot, slot)
+    } else {
+        None
+    };
+    let echoed_state_id = snapshot.as_ref().map(|(id, _, _)| *id).unwrap_or(0);
+
+    let packet = match snapshot {
+        None => ServerboundContainerClick {
+            container_id: window_id as i32,
+            state_id: 0,
+            slot_num: slot,
+            button_num: 0,
+            click_type: ClickType::Pickup,
+            changed_slots: Default::default(),
+            carried_item: HashedStack(None),
+        },
+        Some((state_id, carried, clicked)) => bot.with_registry_holder(|reg| {
+            use azalea_inventory::ItemStack;
+            // Vanilla prediction for Pickup with an empty cursor: the clicked
+            // stack moves onto the cursor and the slot becomes empty.
+            let pickup = matches!(carried, ItemStack::Empty) && clicked.is_present();
+            ServerboundContainerClick {
+                container_id: window_id as i32,
+                state_id,
+                slot_num: slot,
+                button_num: 0,
+                click_type: ClickType::Pickup,
+                changed_slots: if pickup {
+                    [(slot as u16, HashedStack::from_item_stack(&ItemStack::Empty, reg))]
+                        .into_iter()
+                        .collect()
+                } else {
+                    Default::default()
+                },
+                carried_item: HashedStack::from_item_stack(
+                    if pickup { &clicked } else { &carried },
+                    reg,
+                ),
+            }
+        }),
     };
     bot.with_raw_connection_mut(|mut raw_conn| {
         if let Err(e) = raw_conn.write(packet) {
@@ -8358,7 +8569,10 @@ fn send_raw_click(bot: &Client, window_id: u8, slot: i16) {
             );
         }
     });
-    info!("Raw-clicked slot {} in window {}", slot, window_id);
+    info!(
+        "Raw-clicked slot {} in window {} (state_id {})",
+        slot, window_id, echoed_state_id
+    );
 }
 
 // ═══════════════════════════ Drill part-out ═══════════════════════════
