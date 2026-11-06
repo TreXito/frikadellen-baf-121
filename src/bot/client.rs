@@ -8502,10 +8502,9 @@ fn live_container_state(bot: &Client, slot: i16) -> Option<ClickState> {
 /// Used for time-critical slot clicks (buy button, confirm button) on the
 /// auction purchase path where every millisecond matters.
 ///
-/// When `humanize_clicks` is on, the packet carries the REAL container state,
-/// not fabricated defaults: the `state_id` the server last sent us, the stack
-/// actually on the cursor, and the slot change a vanilla client would have
-/// predicted.  A real client applies the click locally *before* sending it,
+/// The packet carries the REAL container state, not fabricated defaults:
+/// the `state_id` the server last sent us, the stack actually on the cursor,
+/// and the slot change a vanilla client would have predicted.  A real client applies the click locally *before* sending it,
 /// so a left click on a Hypixel menu button always reports "that slot became
 /// empty and its item is on my cursor"; the server cancels the move and
 /// resyncs, which is exactly what a human produces.  Suppressed by the click
@@ -8519,11 +8518,12 @@ fn send_raw_click(bot: &Client, window_id: u8, slot: i16) {
         return;
     }
 
-    let snapshot = if humanize_enabled() {
-        live_container_state(bot, slot)
-    } else {
-        None
-    };
+    // The real container state is echoed unconditionally: it costs nothing
+    // (one ECS read) and `state_id: 0` with an empty changed_slots map is a
+    // deterministic per-packet tell the server can check on every click,
+    // independent of timing.  Only the *timing* humanization is gated on
+    // `humanize_clicks`.
+    let snapshot = live_container_state(bot, slot);
     let echoed_state_id = snapshot.as_ref().map(|(id, _, _)| *id).unwrap_or(0);
 
     let packet = match snapshot {
