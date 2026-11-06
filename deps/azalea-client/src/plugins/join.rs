@@ -140,7 +140,19 @@ pub fn handle_start_join_server_event(
             // in
             LocalEntity,
             // this is inserted early so the user can always access and modify it
-            ClientInformation::default(),
+            ClientInformation {
+                // Vanilla's defaults: "Allow Server Listings" is ON and the
+                // default render distance is 12; azalea's protocol-level
+                // Default ships allows_listing=false and view_distance=8.
+                // The configuration-state ServerboundClientInformation packet
+                // echoes this component verbatim as the FIRST client packet of
+                // the config state on every login, before any user-side
+                // set_client_information can correct it, so the component must
+                // match a fresh vanilla install here.
+                allows_listing: true,
+                view_distance: 12,
+                ..Default::default()
+            },
             // ConnectOpts is inserted as a component here
             event.connect_opts.clone(),
             // we don't insert InLoginState until we actually create the connection. note that

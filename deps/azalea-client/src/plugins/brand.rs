@@ -13,7 +13,12 @@ use crate::{client_information::send_client_information, packet::login::InLoginS
 pub struct BrandPlugin;
 impl Plugin for BrandPlugin {
     fn build(&self, app: &mut App) {
-        app.add_systems(Update, send_brand.before(send_client_information));
+        // Vanilla order: the very first client packet in the configuration
+        // state is ServerboundClientInformation (sent unconditionally on
+        // entering configuration), the mc:brand plugin message follows it.
+        // Sending brand first reverses the order every real client produces,
+        // once per login, identically on every azalea bot.
+        app.add_systems(Update, send_brand.after(send_client_information));
     }
 }
 
