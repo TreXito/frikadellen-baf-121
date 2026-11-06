@@ -8993,7 +8993,27 @@ async fn drill_parts_inner(
 /// fire on the next command.  Clearing eagerly is harmless: if the server
 /// does send `ClientboundContainerClose`, the `ContainerClose` handler
 /// re-clears the already-`None` fields.
+/// Send a ContainerClose, but ONLY if we still believe that exact window is
+/// open.
+///
+/// A vanilla client only emits ServerboundContainerClose when its own GUI is
+/// closed by input on a window it knows is open.  When the server has already
+/// torn the container down (e.g. a successful purchase: the server closes the
+/// Confirm Purchase window and re-renders the auction view), a close for that
+/// id is a packet no real client produces — and this path fired it on every
+/// single buy.  Same class of "impossible action" as the stale click from
+/// #01E34397, one packet category up.
 fn send_raw_close(bot: &Client, window_id: u8, handlers: &BotEventHandlers) {
+    if handlers.current_window_id() != Some(window_id) {
+        debug!(
+            "Not closing window {} (currently tracked open window: {:?}) — \
+             server-side close/rebuild already unwound it",
+            window_id,
+            handlers.current_window_id()
+        );
+        handlers.clear_window_tracking();
+        return;
+    }
     bot.with_raw_connection_mut(|mut raw_conn| {
         if let Err(e) = raw_conn.write(ServerboundContainerClose {
             container_id: window_id as i32,
