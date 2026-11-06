@@ -13,9 +13,7 @@ use crate::{brand::send_brand, packet::login::InLoginState};
 pub struct ClientInformationPlugin;
 impl Plugin for ClientInformationPlugin {
     fn build(&self, app: &mut App) {
-        // First client packet of the configuration state in vanilla; the
-        // mc:brand plugin message is sent after it (see BrandPlugin).
-        app.add_systems(Update, send_client_information.before(send_brand));
+        app.add_systems(Update, send_client_information.after(send_brand));
     }
 }
 
