@@ -3,7 +3,6 @@ mod events;
 use std::{collections::HashSet, sync::Arc};
 
 use azalea_core::{
-    delta::PositionDelta8,
     entity_id::MinecraftEntityId,
     game_type::GameMode,
     position::{ChunkPos, Vec3},
@@ -16,30 +15,30 @@ use azalea_entity::{
     inventory::Inventory,
     metadata::{Health, apply_metadata},
 };
-use azalea_protocol::{
-    common::movements::MoveFlags,
-    packets::{
-        ConnectionProtocol,
-        game::{c_move_entity_pos_rot::CompactLookDirection, *},
+use azalea_protocol::packets::{
+    ConnectionProtocol,
+    game::{
+        c_move_entity_pos_rot::{CompactLookDirection, VecDelta},
+        *,
     },
 };
 use azalea_registry::builtin::EntityKind;
 use azalea_world::{PartialWorld, WorldName, Worlds};
-use bevy_ecs::{prelude::*, system::SystemState};
+use bevy_ecs::prelude::*;
 pub use events::*;
 use tracing::{debug, error, warn};
 
 use crate::{
     ClientInformation,
     block_update::QueuedServerBlockUpdates,
-    chat::{ChatPacket, ChatReceivedEvent},
     chunks,
+    client_chat::{ChatPacket, ChatReceivedEvent},
     connection::RawConnection,
     cookies::{RequestCookieEvent, StoreCookieEvent},
     disconnect::DisconnectEvent,
     interact::BlockStatePredictionHandler,
     inventory::{ClientsideCloseContainerEvent, MenuOpenedEvent, SetContainerContentEvent},
-    local_player::{Experience, Hunger, LocalGameMode, TabList, WorldHolder},
+    local_player::{Experience, Hunger, PreviousGameMode, TabList, TabListResource, WorldHolder},
     movement::{KnockbackData, KnockbackEvent},
     packet::{
         as_system, declare_packet_handlers,
@@ -52,7 +51,8 @@ use crate::{
 pub fn process_packet(ecs: &mut World, player: Entity, packet: &ClientboundGamePacket) {
     let mut handler = GamePacketHandler { player, ecs };
 
-    // the order of these doesn't matter, that's decided by the protocol library
+    // the order of these doesn't matter, packet ids are chosen by the protocol
+    // library
     declare_packet_handlers!(
         ClientboundGamePacket,
         packet,
@@ -199,6 +199,9 @@ pub fn process_packet(ecs: &mut World, player: Entity, packet: &ClientboundGameP
             game_test_highlight_pos,
             low_disk_space_warning,
             game_rule_values,
+            post_effects,
+            swing_animation,
+            add_transient_block,
         ]
     );
 }
@@ -308,10 +311,8 @@ impl GamePacketHandler<'_> {
                 // insert our components into the ecs :)
                 commands.entity(self.player).insert((
                     entity_id,
-                    LocalGameMode {
-                        current: p.common.game_type,
-                        previous: p.common.previous_game_type.into(),
-                    },
+                    p.common.game_type,
+                    PreviousGameMode(p.common.previous_game_type.into()),
                     entity_bundle,
                     TicksConnected(0),
                 ));
@@ -437,16 +438,14 @@ impl GamePacketHandler<'_> {
             // send the relevant packets
             commands.trigger(SendGamePacketEvent::new(
                 self.player,
-                ServerboundAcceptTeleportation { id: p.id },
-            ));
-            commands.trigger(SendGamePacketEvent::new(
-                self.player,
-                ServerboundMovePlayerPosRot {
-                    pos: **position,
-                    look_direction: *direction,
-                    flags: MoveFlags::default(),
+                ServerboundAcceptTeleportation {
+                    id: p.id,
+                    position: **position,
+                    direction: *direction,
                 },
             ));
+
+            // TODO: stopDestroyBlock is called here
         });
     }
 
@@ -457,7 +456,7 @@ impl GamePacketHandler<'_> {
             Query<&mut TabList>,
             MessageWriter<AddPlayerEvent>,
             MessageWriter<UpdatePlayerEvent>,
-            ResMut<TabList>,
+            ResMut<TabListResource>,
         )>(
             self.ecs,
             |(
@@ -505,7 +504,7 @@ impl GamePacketHandler<'_> {
                     }
                 }
 
-                *tab_list_resource = tab_list.clone();
+                *tab_list_resource = tab_list.clone().into();
             },
         );
     }
@@ -516,7 +515,7 @@ impl GamePacketHandler<'_> {
         as_system::<(
             Query<&mut TabList>,
             MessageWriter<RemovePlayerEvent>,
-            ResMut<TabList>,
+            ResMut<TabListResource>,
         )>(
             self.ecs,
             |(mut query, mut remove_player_events, mut tab_list_resource)| {
@@ -703,15 +702,14 @@ impl GamePacketHandler<'_> {
                 move |entity| {
                     let entity_id = entity.id();
                     entity.world_scope(|world| {
-                        let mut commands_system_state = SystemState::<Commands>::new(world);
-                        let mut commands = commands_system_state.get_mut(world);
+                        let mut commands = world.commands();
                         let mut entity_commands = commands.entity(entity_id);
                         if let Err(e) =
                             apply_metadata(&mut entity_commands, entity_kind, packed_items)
                         {
                             warn!("{e}");
                         }
-                        commands_system_state.apply(world);
+                        world.flush();
                     });
                 },
             ));
@@ -862,9 +860,9 @@ impl GamePacketHandler<'_> {
                     commands,
                     MoveEntity {
                         entity_id: p.entity_id,
-                        delta: Some(p.delta),
+                        delta: Some(p.delta.clone()),
                         look_direction: None,
-                        on_ground: p.on_ground,
+                        on_ground: p.properties.on_ground(),
                     },
                     player_query,
                     entity_query,
@@ -887,9 +885,9 @@ impl GamePacketHandler<'_> {
                     commands,
                     MoveEntity {
                         entity_id: p.entity_id,
-                        delta: Some(p.delta),
+                        delta: Some(p.delta.clone()),
                         look_direction: Some(p.look_direction),
-                        on_ground: p.on_ground,
+                        on_ground: p.properties.on_ground(),
                     },
                     player_query,
                     entity_query,
@@ -1047,10 +1045,10 @@ impl GamePacketHandler<'_> {
         #[allow(clippy::single_match)]
         match p.event {
             EventType::ChangeGameMode => {
-                as_system::<Query<&mut LocalGameMode>>(self.ecs, |mut query| {
-                    let mut local_game_mode = query.get_mut(self.player).unwrap();
+                as_system::<Query<&mut GameMode>>(self.ecs, |mut query| {
+                    let mut game_mode = query.get_mut(self.player).unwrap();
                     if let Some(new_game_mode) = GameMode::from_id(p.param as u8) {
-                        local_game_mode.current = new_game_mode;
+                        *game_mode = new_game_mode;
                     }
                 });
             }
@@ -1445,10 +1443,8 @@ impl GamePacketHandler<'_> {
                 );
                 // update the local gamemode and metadata things
                 commands.entity(self.player).insert((
-                    LocalGameMode {
-                        current: p.common.game_type,
-                        previous: p.common.previous_game_type.into(),
-                    },
+                    p.common.game_type,
+                    PreviousGameMode(p.common.previous_game_type.into()),
                     entity_bundle,
                 ));
 
@@ -1508,9 +1504,9 @@ impl GamePacketHandler<'_> {
                     return;
                 };
 
-                let new_position = p.values.pos;
+                let new_position = p.position.end_position();
                 let new_on_ground = p.on_ground;
-                let new_look_direction = p.values.look_direction;
+                let new_look_direction = p.look_direction;
 
                 if !should_apply_entity_update(
                     &mut commands,
@@ -1654,11 +1650,21 @@ impl GamePacketHandler<'_> {
     pub fn game_rule_values(&mut self, p: &ClientboundGameRuleValues) {
         debug!("Got game rule values packet {p:?}");
     }
+
+    pub fn post_effects(&mut self, p: &ClientboundPostEffects) {
+        debug!("Got post effects packet {p:?}");
+    }
+    pub fn swing_animation(&mut self, p: &ClientboundSwingAnimation) {
+        debug!("Got swing animation packet {p:?}");
+    }
+    pub fn add_transient_block(&mut self, p: &ClientboundAddTransientBlock) {
+        debug!("Got add transient block packet {p:?}");
+    }
 }
 
 struct MoveEntity {
     pub entity_id: MinecraftEntityId,
-    pub delta: Option<PositionDelta8>,
+    pub delta: Option<VecDelta>,
     pub look_direction: Option<CompactLookDirection>,
     pub on_ground: bool,
 }
@@ -1700,7 +1706,7 @@ fn move_entity(
     }
 
     if let Some(new_delta) = p.delta {
-        let new_position = physics.vec_delta_codec.decode(&new_delta);
+        let new_position = new_delta.decode(&physics.vec_delta_codec).end_position();
         physics.vec_delta_codec.set_base(new_position);
 
         if new_position != **position {

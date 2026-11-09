@@ -1,4 +1,6 @@
-use azalea_client::{PhysicsState, SprintDirection, StartSprintEvent, test_utils::prelude::*};
+use azalea_client::{
+    ClientMovementState, SprintDirection, StartSprintEvent, test_utils::prelude::*,
+};
 use azalea_core::position::{BlockPos, ChunkPos, Vec3};
 use azalea_entity::LookDirection;
 use azalea_protocol::{
@@ -85,7 +87,7 @@ fn test_correct_sprint_sneak_movement() {
     });
     sent_packets.expect_tick_end();
     sent_packets.expect_empty();
-    simulation.with_component_mut::<PhysicsState>(|p| p.trying_to_crouch = true);
+    simulation.with_component_mut::<ClientMovementState>(|p| p.trying_to_crouch = true);
 
     simulation.tick();
     sent_packets.expect("PlayerInput", |p| {

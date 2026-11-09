@@ -22,12 +22,12 @@ use azalea_entity::{
 };
 use azalea_inventory::{ItemStack, ItemStackData, components};
 use azalea_physics::{
-    PhysicsSystems, collision::entity_collisions::update_last_bounding_box,
-    local_player::PhysicsState,
+    PhysicsSystems, client_movement::ClientMovementState,
+    collision::entity_collisions::update_last_bounding_box,
 };
 use azalea_protocol::packets::game::{
-    ServerboundInteract, ServerboundUseItem, s_interact::InteractionHand,
-    s_swing::ServerboundSwing, s_use_item_on::ServerboundUseItemOn,
+    ServerboundInteract, ServerboundPunch, ServerboundUseItem, s_interact::InteractionHand,
+    s_use_item_on::ServerboundUseItemOn,
 };
 use azalea_world::World;
 use bevy_app::{App, Plugin, Update};
@@ -39,7 +39,7 @@ use crate::{
     attack::handle_attack_event,
     interact::pick::{HitResultComponent, update_hit_result_component},
     inventory::InventorySystems,
-    local_player::{LocalGameMode, PermissionLevel},
+    local_player::PermissionLevel,
     movement::MoveEventsSystems,
     packet::game::SendGamePacketEvent,
     respawn::perform_respawn,
@@ -312,7 +312,7 @@ pub struct EntityInteractEvent {
 pub fn handle_entity_interact(
     trigger: On<EntityInteractEvent>,
     mut commands: Commands,
-    client_query: Query<(&PhysicsState, &EntityIdIndex, &HitResultComponent)>,
+    client_query: Query<(&ClientMovementState, &EntityIdIndex, &HitResultComponent)>,
     target_query: Query<&Position>,
 ) {
     let Some((physics_state, entity_id_index, hit_result)) = client_query.get(trigger.client).ok()
@@ -441,20 +441,15 @@ pub struct SwingArmEvent {
     pub entity: Entity,
 }
 pub fn handle_swing_arm_trigger(swing_arm: On<SwingArmEvent>, mut commands: Commands) {
-    commands.trigger(SendGamePacketEvent::new(
-        swing_arm.entity,
-        ServerboundSwing {
-            hand: InteractionHand::MainHand,
-        },
-    ));
+    commands.trigger(SendGamePacketEvent::new(swing_arm.entity, ServerboundPunch));
 }
 
 #[allow(clippy::type_complexity)]
 fn update_attributes_for_gamemode(
-    query: Query<(&mut Attributes, &LocalGameMode), (With<LocalEntity>, Changed<LocalGameMode>)>,
+    query: Query<(&mut Attributes, &GameMode), (With<LocalEntity>, Changed<GameMode>)>,
 ) {
-    for (mut attributes, game_mode) in query {
-        if game_mode.current == GameMode::Creative {
+    for (mut attributes, &game_mode) in query {
+        if game_mode == GameMode::Creative {
             attributes
                 .block_interaction_range
                 .insert(creative_block_interaction_range_modifier());

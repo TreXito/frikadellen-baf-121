@@ -365,7 +365,9 @@ fn execute_query(action: &str, deps: &BackendDeps) -> Option<Value> {
             "freeSlots": deps.bot_client.empty_slot_count(),
             "listings": deps.bot_client.active_auction_count(),
             "adaptiveBed": crate::hypixel_ping::adaptive_bed_enabled(),
-            "nodelay": azalea_client::TCP_NODELAY.load(Ordering::Relaxed),
+            // Azalea 26.3 enables TCP_NODELAY on direct connections, and our
+            // vendored join patch enables it for proxied connections too.
+            "nodelay": true,
         })),
         _ => None,
     }
@@ -411,35 +413,30 @@ fn execute_command(action: &str, args: Option<&Value>, deps: &BackendDeps) -> (b
                 Err(e) => (false, format!("failed to load config: {}", e)),
             }
         }
-        // Backend-only toggles. Not surfaced in config or the instance web panel
-        // — controlled solely from the operator backend. Args: `bed`
-        // (ping-adaptive bed lead) and `nodelay` (TCP_NODELAY). Legacy `enabled`
-        // sets `bed`. There is intentionally no tick-safe "skip" toggle — the
-        // skip pre-click is always same-burst, driven only by the `skip` config
-        // option.
+        // Backend-only toggles controlled solely from the operator backend.
+        // Legacy `enabled` sets `bed`. MC 26.3 uses TCP_NODELAY on both direct
+        // and proxied sockets, so `nodelay` is a read-only compatibility field.
         "set_adaptive_timing" => {
             let get_bool = |k: &str| args.and_then(|a| a.get(k)).and_then(|v| v.as_bool());
+            if get_bool("nodelay") == Some(false) {
+                return (
+                    false,
+                    "nodelay cannot be disabled on Minecraft 26.3".to_string(),
+                );
+            }
             if let Some(enabled) = get_bool("enabled") {
                 crate::hypixel_ping::ADAPTIVE_BED_TIMING.store(enabled, Ordering::Relaxed);
             }
             if let Some(bed) = get_bool("bed") {
                 crate::hypixel_ping::ADAPTIVE_BED_TIMING.store(bed, Ordering::Relaxed);
             }
-            // TCP_NODELAY (disable Nagle). Takes full effect on the next
-            // reconnect, when the join plugin reads the flag while building the
-            // socket; the backend re-applies the stored value on reconnect.
-            if let Some(nodelay) = get_bool("nodelay") {
-                azalea_client::TCP_NODELAY.store(nodelay, Ordering::Relaxed);
-            }
             let bed = crate::hypixel_ping::adaptive_bed_enabled();
-            let nodelay = azalea_client::TCP_NODELAY.load(Ordering::Relaxed);
-            info!("[Backend] timing: bed={} nodelay={}", bed, nodelay);
+            info!("[Backend] timing: bed={} nodelay=true", bed);
             (
                 true,
                 format!(
-                    "timing: bed-rtt {} / nodelay {}",
-                    if bed { "on" } else { "off" },
-                    if nodelay { "on" } else { "off" }
+                    "timing: bed-rtt {} / nodelay on",
+                    if bed { "on" } else { "off" }
                 ),
             )
         }
@@ -486,11 +483,7 @@ fn execute_command(action: &str, args: Option<&Value>, deps: &BackendDeps) -> (b
                 } else {
                     "off"
                 },
-                if azalea_client::TCP_NODELAY.load(Ordering::Relaxed) {
-                    "on"
-                } else {
-                    "off"
-                },
+                "on",
             );
             (true, msg)
         }

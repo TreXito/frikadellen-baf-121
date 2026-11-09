@@ -20,7 +20,7 @@ use crate::{
         check_is_interaction_restricted, pick::HitResultComponent,
     },
     inventory::InventorySystems,
-    local_player::{LocalGameMode, PermissionLevel, WorldHolder},
+    local_player::{PermissionLevel, WorldHolder},
     movement::MoveEventsSystems,
     packet::game::SendGamePacketEvent,
 };
@@ -130,6 +130,7 @@ fn handle_auto_mine(
 ///
 /// This is only present if we're currently mining a block.
 #[derive(Clone, Component, Debug)]
+#[component(storage = "SparseSet")]
 pub struct Mining {
     pub pos: BlockPos,
     pub dir: Direction,
@@ -220,7 +221,7 @@ pub fn handle_mining_queued(
         Entity,
         &MiningQueued,
         &WorldHolder,
-        &LocalGameMode,
+        &GameMode,
         &Inventory,
         &ActiveEffects,
         &FluidOnEyes,
@@ -241,7 +242,7 @@ pub fn handle_mining_queued(
         entity,
         mining_queued,
         world_holder,
-        game_mode,
+        &game_mode,
         inventory,
         active_effects,
         fluid_on_eyes,
@@ -262,12 +263,7 @@ pub fn handle_mining_queued(
         commands.entity(entity).remove::<MiningQueued>();
 
         let world = world_holder.shared.read();
-        if check_is_interaction_restricted(
-            &world,
-            mining_queued.position,
-            &game_mode.current,
-            inventory,
-        ) {
+        if check_is_interaction_restricted(&world, mining_queued.position, &game_mode, inventory) {
             continue;
         }
         // TODO (when world border is implemented): vanilla ignores if the block
@@ -280,7 +276,7 @@ pub fn handle_mining_queued(
             }
         }
 
-        if game_mode.current == GameMode::Creative {
+        if game_mode == GameMode::Creative {
             // In creative mode, first send START_DESTROY_BLOCK packet then immediately
             // finish mining
             commands.trigger(SendGamePacketEvent::new(
@@ -325,7 +321,9 @@ pub fn handle_mining_queued(
                 .unwrap_or_default();
 
             // we can't break blocks if they don't have a bounding box
-            let block_is_solid = !target_block_state.outline_shape().is_empty();
+            let block_is_solid = !target_block_state
+                .outline_shape(mining_queued.position)
+                .is_empty();
 
             if block_is_solid && **mine_progress == 0. {
                 // interact with the block (like note block left click) here
@@ -473,7 +471,7 @@ pub fn handle_finish_mining_block_observer(
     finish_mining_block: On<FinishMiningBlockEvent>,
     mut query: Query<(
         &WorldName,
-        &LocalGameMode,
+        &GameMode,
         &Inventory,
         &PlayerAbilities,
         &PermissionLevel,
@@ -486,7 +484,7 @@ pub fn handle_finish_mining_block_observer(
 
     let (
         world_name,
-        game_mode,
+        &game_mode,
         inventory,
         abilities,
         permission_level,
@@ -495,11 +493,11 @@ pub fn handle_finish_mining_block_observer(
     ) = query.get_mut(finish_mining_block.entity).unwrap();
     let world_lock = worlds.get(world_name).unwrap();
     let world = world_lock.read();
-    if check_is_interaction_restricted(&world, event.position, &game_mode.current, inventory) {
+    if check_is_interaction_restricted(&world, event.position, &game_mode, inventory) {
         return;
     }
 
-    if game_mode.current == GameMode::Creative {
+    if game_mode == GameMode::Creative {
         let held_item = inventory.held_item().kind();
         if matches!(held_item, ItemKind::Trident | ItemKind::DebugStick)
             || azalea_registry::tags::items::SWORDS.contains(&held_item)
@@ -582,7 +580,7 @@ pub fn continue_mining_block(
     mut query: Query<(
         Entity,
         &WorldName,
-        &LocalGameMode,
+        &GameMode,
         &Inventory,
         &MineBlockPos,
         &MineItem,
@@ -603,7 +601,7 @@ pub fn continue_mining_block(
     for (
         entity,
         world_name,
-        game_mode,
+        &game_mode,
         inventory,
         current_mining_pos,
         current_mining_item,
@@ -618,7 +616,7 @@ pub fn continue_mining_block(
         mut prediction_handler,
     ) in query.iter_mut()
     {
-        if game_mode.current == GameMode::Creative {
+        if game_mode == GameMode::Creative {
             // TODO: worldborder check
             **mine_delay = 5;
             commands.trigger(SendGamePacketEvent::new(

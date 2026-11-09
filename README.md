@@ -17,6 +17,8 @@ A high-performance, Rust-powered macro that automates auction house sniping, baz
 
 > **⚠️ Use at your own risk.** This is a macro — using it may result in a ban. If you do get banned, please share your logs in the [Discord server](https://discord.gg/42DvX6T9jh) so we can improve detection evasion.
 
+> **Compatibility:** Minecraft Java Edition **26.3** (protocol **777**), using Azalea **0.16.0+mc26.3**. The exact upstream revision is pinned in `Cargo.toml` because this Minecraft version has not been published to crates.io.
+
 ---
 
 ## Table of Contents
@@ -448,15 +450,14 @@ The `config.toml` file is created automatically on first run. You can edit it wi
 
 ## Building from Source
 
-Requires the Rust **nightly** toolchain:
+The repository pins the tested Rust toolchain in `rust-toolchain.toml`:
 
 ```bash
 # Install Rust (if you don't have it)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-# Install nightly toolchain
-rustup install nightly
-rustup default nightly
+# Install the pinned nightly toolchain
+rustup toolchain install nightly-2026-08-19 --component rustfmt,clippy
 
 # Clone and build
 git clone https://github.com/TreXito/frikadellen-baf-121.git
