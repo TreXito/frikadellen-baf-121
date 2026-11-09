@@ -37,7 +37,7 @@ use bevy_ecs::{
     component::Mutable,
     prelude::*,
     query::{QueryData, QueryItem},
-    schedule::ExecutorKind,
+    schedule::SingleThreadedExecutor,
 };
 use parking_lot::{Mutex, RwLock};
 use simdnbt::owned::{NbtCompound, NbtTag};
@@ -87,10 +87,13 @@ impl Simulation {
                     registry_id: Identifier::new("minecraft:dimension_type"),
                     entries: vec![(
                         Identifier::new("minecraft:overworld"),
-                        Some(NbtCompound::from_values(vec![
-                            ("height".into(), NbtTag::Int(384)),
-                            ("min_y".into(), NbtTag::Int(-64)),
-                        ])),
+                        Some(
+                            NbtCompound::from_values(vec![
+                                ("height".into(), NbtTag::Int(384)),
+                                ("min_y".into(), NbtTag::Int(-64)),
+                            ])
+                            .into(),
+                        ),
                     )]
                     .into_iter()
                     .collect(),
@@ -170,7 +173,7 @@ impl Simulation {
     pub fn with_resource<T: Resource>(&self, f: impl FnOnce(&T)) {
         f(self.app.world().get_resource::<T>().unwrap());
     }
-    pub fn with_resource_mut<T: Resource>(&mut self, f: impl FnOnce(Mut<T>)) {
+    pub fn with_resource_mut<T: Resource<Mutability = Mutable>>(&mut self, f: impl FnOnce(Mut<T>)) {
         f(self.app.world_mut().get_resource_mut::<T>().unwrap());
     }
 
@@ -312,7 +315,7 @@ fn create_simulation_app() -> App {
 
     app.edit_schedule(bevy_app::Main, |schedule| {
         // makes test results more reproducible
-        schedule.set_executor_kind(ExecutorKind::SingleThreaded);
+        schedule.set_executor(SingleThreadedExecutor::new());
     });
     app
 }
@@ -356,6 +359,7 @@ pub fn make_basic_login_packet(
             sea_level: 63,
         },
         enforces_secure_chat: false,
+        online_mode: false,
     }
 }
 
@@ -401,7 +405,7 @@ pub fn make_basic_empty_chunk(
         z: pos.z,
         chunk_data: ClientboundLevelChunkPacketData {
             heightmaps: Default::default(),
-            data: Arc::new(chunk_bytes.into()),
+            buffer: Arc::new(chunk_bytes.into()),
             block_entities: vec![],
         },
         light_data: ClientboundLightUpdatePacketData::default(),

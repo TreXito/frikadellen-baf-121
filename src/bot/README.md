@@ -4,7 +4,7 @@ This module implements the core Azalea bot client for Frikadellen BAF (Bazaar Au
 
 ## ✅ Implementation Complete
 
-The bot client now provides full integration with Azalea 0.15:
+The bot client provides full integration with Azalea 0.16 for Minecraft 26.3:
 
 ### Implemented Features
 
@@ -21,7 +21,7 @@ The bot client now provides full integration with Azalea 0.15:
 
 ### Architecture
 
-The implementation follows azalea 0.15's plugin architecture:
+The implementation follows Azalea 0.16's plugin architecture:
 
 1. **BotClient** - Main wrapper providing high-level API
 2. **BotClientState** - ECS Component holding shared state across event handlers
@@ -198,7 +198,7 @@ Current test coverage:
 - **FastWindowClick**: `/tmp/frikadellen-baf/src/fastWindowClick.ts`
 - **Bazaar Handler**: `/tmp/frikadellen-baf/src/bazaarFlipHandler.ts`
 - **Azalea Examples**: https://github.com/azalea-rs/azalea/tree/main/azalea/examples
-- **Azalea 0.15 Docs**: Generated with `cargo doc --open`
+- **Azalea 0.16 Docs**: Generated with `cargo doc --open`
 
 ## Notes
 
@@ -206,4 +206,4 @@ Current test coverage:
 - Window clicks and chat messages should be sent from within event handlers where the Client is accessible
 - The action counter is incremented automatically for each window click to prevent server-side detection
 - Window IDs are tracked automatically when windows are opened
-- All stub implementations have been replaced with full azalea 0.15 integration
+- All stub implementations have been replaced with full Azalea 0.16 integration

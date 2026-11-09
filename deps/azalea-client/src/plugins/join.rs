@@ -142,13 +142,9 @@ pub fn handle_start_join_server_event(
             // this is inserted early so the user can always access and modify it
             ClientInformation {
                 // Vanilla's defaults: "Allow Server Listings" is ON and the
-                // default render distance is 12; azalea's protocol-level
-                // Default ships allows_listing=false and view_distance=8.
-                // The configuration-state ServerboundClientInformation packet
-                // echoes this component verbatim as the FIRST client packet of
-                // the config state on every login, before any user-side
-                // set_client_information can correct it, so the component must
-                // match a fresh vanilla install here.
+                // default render distance is 12. This component is echoed as
+                // the first client packet of the configuration state, before
+                // any user-side set_client_information can correct it.
                 allows_listing: true,
                 view_distance: 12,
                 ..Default::default()
@@ -179,13 +175,11 @@ async fn create_conn_and_send_intention_packet(
         Connection::new(&opts.address.socket).await?
     };
 
-    // Force TCP_NODELAY per the global flag. Upstream's `new_with_proxy` never
-    // sets it, so proxied sockets otherwise keep Nagle's algorithm on and delay
-    // small latency-critical packets. Reunite → set → re-wrap (no cipher or
-    // compression is active at the handshake stage, so wrapping is lossless).
+    // Azalea enables TCP_NODELAY on direct connections in mc26.3, but not on
+    // SOCKS-proxied sockets. Keep the proxy path consistent by setting it here.
     let mut conn = match conn.unwrap() {
         Ok(stream) => {
-            let _ = stream.set_nodelay(crate::TCP_NODELAY.load(std::sync::atomic::Ordering::Relaxed));
+            let _ = stream.set_nodelay(true);
             Connection::wrap(stream)
         }
         // Reuniting the two halves of a socket we just split cannot fail.

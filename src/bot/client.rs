@@ -2,7 +2,7 @@ use anyhow::{anyhow, Result};
 use azalea::app::PluginGroup;
 use azalea::prelude::*;
 use azalea::ClientInformation;
-use azalea_client::chat::ChatPacket;
+use azalea_client::client_chat::ChatPacket;
 use azalea_client::inventory::{MenuOpenedEvent, SetContainerContentEvent};
 use azalea_inventory::operations::ClickType;
 use azalea_protocol::packets::game::{
@@ -363,7 +363,7 @@ fn on_container_set_content(
 
 /// Main bot client wrapper for Azalea
 ///
-/// Provides integration with azalea 0.15 for Minecraft bot functionality on Hypixel.
+/// Provides integration with Azalea 0.16 for Minecraft 26.3 on Hypixel.
 ///
 /// ## Key Features
 ///
@@ -648,7 +648,7 @@ impl BotClient {
 
     /// Connect to Hypixel with Microsoft authentication
     ///
-    /// Uses azalea 0.15 ClientBuilder API to:
+    /// Uses Azalea 0.16's ClientBuilder API to:
     /// - Authenticate with Microsoft account
     /// - Connect to mc.hypixel.net
     /// - Set up event handlers for chat, window, and inventory events
@@ -2638,11 +2638,13 @@ async fn event_handler(bot: Client, event: Event, state: BotClientState) -> Resu
             // Listings" option is ON by default, so every unconfigured azalea bot
             // tells the server it is one of the essentially-nobody who turned
             // that off. Sent as a normal option update, which players do.
-            bot.set_client_information(ClientInformation {
+            if let Err(error) = bot.set_client_information(ClientInformation {
                 allows_listing: true,
                 view_distance: 12,
                 ..Default::default()
-            });
+            }) {
+                debug!("Could not send client information during login: {error}");
+            }
 
             if state.event_tx.send(BotEvent::Login).is_err() {
                 debug!("Failed to send Login event - receiver dropped");
@@ -3198,7 +3200,8 @@ async fn event_handler(bot: Client, event: Event, state: BotClientState) -> Resu
                                     break;
                                 }
                                 let current_kind = {
-                                    let menu = bot_clone.menu();
+                                    let menu =
+                                        bot_clone.menu().expect("client inventory unavailable");
                                     let slots = menu.slots();
                                     slots
                                         .get(31)
@@ -4150,7 +4153,7 @@ async fn execute_command(bot: &Client, command: &QueuedCommand, state: &BotClien
                         let mut kind;
                         loop {
                             let notified = fast_state.slot_data_notify.notified();
-                            let menu = fast_bot.menu();
+                            let menu = fast_bot.menu().expect("client inventory unavailable");
                             let slots = menu.slots();
                             kind = slots
                                 .get(31)
@@ -4516,7 +4519,7 @@ async fn handle_window_interaction(
     if is_my_auctions_window_title(window_title) {
         // Give ContainerSetContent a moment to arrive
         tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
-        let menu = bot.menu();
+        let menu = bot.menu().expect("client inventory unavailable");
         let slots = menu.slots();
         build_cached_my_auctions_json(&slots, state);
     }
@@ -4600,7 +4603,7 @@ async fn handle_window_interaction(
                         // deadline.  Registering first guarantees we capture it.
                         let notified = state.slot_data_notify.notified();
 
-                        let menu = bot.menu();
+                        let menu = bot.menu().expect("client inventory unavailable");
                         let slots = menu.slots();
                         kind = slots
                             .get(31)
@@ -4710,7 +4713,7 @@ async fn handle_window_interaction(
                             // the bed item Hypixel placed in slot 31 — it renders the
                             // remaining grace as "M:SS" in the item name/lore.
                             .or_else(|| {
-                                let menu = bot.menu();
+                                let menu = bot.menu().expect("client inventory unavailable");
                                 let slots = menu.slots();
                                 let secs = slots.get(31).and_then(parse_bed_remaining_secs)?;
                                 info!("[AH] Bed timing: no COFL purchaseAt — using bed's own countdown ({}s remaining)", secs);
@@ -4729,7 +4732,8 @@ async fn handle_window_interaction(
                                         break;
                                     }
                                     let kind_now = {
-                                        let menu = bot.menu();
+                                        let menu =
+                                            bot.menu().expect("client inventory unavailable");
                                         let slots = menu.slots();
                                         slots
                                             .get(31)
@@ -4792,7 +4796,7 @@ async fn handle_window_interaction(
                         }
 
                         let current_kind = {
-                            let menu = bot.menu();
+                            let menu = bot.menu().expect("client inventory unavailable");
                             let slots = menu.slots();
                             slots
                                 .get(31)
@@ -5048,7 +5052,7 @@ async fn handle_window_interaction(
 
             // Helper: read the current slots from the menu
             let read_slots = || {
-                let menu = bot.menu();
+                let menu = bot.menu().expect("client inventory unavailable");
                 menu.slots()
             };
 
@@ -5352,7 +5356,7 @@ async fn handle_window_interaction(
                     if *state.last_window_id.read() != window_id {
                         return;
                     }
-                    let slots = bot.menu().slots();
+                    let slots = bot.menu().expect("client inventory unavailable").slots();
                     if let Some(i) = find_slot_by_name(&slots, &item_name) {
                         break Some(i);
                     }
@@ -5388,7 +5392,7 @@ async fn handle_window_interaction(
                     if *state.last_window_id.read() != window_id {
                         return;
                     }
-                    let slots = bot.menu().slots();
+                    let slots = bot.menu().expect("client inventory unavailable").slots();
                     if let Some(i) = find_slot_by_name(&slots, "Sell Instantly") {
                         break Some(i);
                     }
@@ -5423,7 +5427,7 @@ async fn handle_window_interaction(
                     if *state.last_window_id.read() != window_id {
                         return;
                     }
-                    let slots = bot.menu().slots();
+                    let slots = bot.menu().expect("client inventory unavailable").slots();
                     if let Some(i) = find_slot_by_name(&slots, "Confirm") {
                         break Some(i);
                     }
@@ -5467,7 +5471,7 @@ async fn handle_window_interaction(
                 info!("[ClaimPurchased] Your Bids opened - looking for Claim All or Sold item");
                 // Wait for ContainerSetContent to arrive and populate slots
                 tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
-                let menu = bot.menu();
+                let menu = bot.menu().expect("client inventory unavailable");
                 let slots = menu.slots();
                 let mut found = false;
                 // First look for Claim All by name (most reliable, matches TypeScript pattern)
@@ -5523,7 +5527,7 @@ async fn handle_window_interaction(
                 info!("[ClaimSold] Auction House opened - navigating to Manage Auctions (slot 15)");
                 // Wait for ContainerSetContent to arrive and populate slots
                 tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
-                let menu = bot.menu();
+                let menu = bot.menu().expect("client inventory unavailable");
                 let slots = menu.slots();
                 // Prefer name-based match so a Hypixel UI shift is handled automatically;
                 // fall back to the well-known slot 15 (same fixed slot the Selling flow uses).
@@ -5540,7 +5544,7 @@ async fn handle_window_interaction(
                 info!("[ClaimSold] My/Manage Auctions opened - looking for claimable items");
                 // Wait for ContainerSetContent to arrive and populate slots
                 tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
-                let menu = bot.menu();
+                let menu = bot.menu().expect("client inventory unavailable");
                 let slots = menu.slots();
                 // Only scan the window slots (typically 0..27 for a 3-row GUI),
                 // not the player inventory at the bottom, to avoid false matches.
@@ -5602,7 +5606,7 @@ async fn handle_window_interaction(
             {
                 info!("[ClaimSold] Auction detail opened - looking for Claim button");
                 tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-                let menu = bot.menu();
+                let menu = bot.menu().expect("client inventory unavailable");
                 let slots = menu.slots();
                 // Prefer fixed slot 31 in auction detail; use name matching only as fallback.
                 let slot_31_name = slots
@@ -5672,7 +5676,7 @@ async fn handle_window_interaction(
             if window_title.contains("Auction House") {
                 info!("[CancelAuction] Auction House opened - navigating to Manage Auctions");
                 tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
-                let menu = bot.menu();
+                let menu = bot.menu().expect("client inventory unavailable");
                 let slots = menu.slots();
                 if let Some(i) = find_slot_by_name(&slots, "Manage Auctions")
                     .or_else(|| find_slot_by_name(&slots, "My Auctions"))
@@ -5686,7 +5690,7 @@ async fn handle_window_interaction(
             } else if is_my_auctions_window_title(window_title) {
                 info!("[CancelAuction] Manage Auctions opened - searching for target auction");
                 tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
-                let menu = bot.menu();
+                let menu = bot.menu().expect("client inventory unavailable");
                 let slots = menu.slots();
                 let target_name = state.cancel_auction_item_name.read().clone();
                 let target_bid = *state.cancel_auction_starting_bid.read();
@@ -5739,7 +5743,7 @@ async fn handle_window_interaction(
             {
                 info!("[CancelAuction] Auction detail opened - looking for Cancel Auction button");
                 tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-                let menu = bot.menu();
+                let menu = bot.menu().expect("client inventory unavailable");
                 let slots = menu.slots();
                 if let Some(i) = find_slot_by_name(&slots, "Cancel Auction") {
                     info!("[CancelAuction] Clicking Cancel Auction at slot {}", i);
@@ -5761,7 +5765,7 @@ async fn handle_window_interaction(
             } else if window_title.contains("Confirm") {
                 info!("[CancelAuction] Confirm window opened - confirming cancellation");
                 tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
-                let menu = bot.menu();
+                let menu = bot.menu().expect("client inventory unavailable");
                 let slots = menu.slots();
                 // Click Confirm button — typically slot 11 or find by name
                 if let Some(i) = find_slot_by_name(&slots, "Confirm") {
@@ -5800,7 +5804,7 @@ async fn handle_window_interaction(
             let step = *state.auction_step.read();
             let item_name = state.auction_item_name.read().clone();
             let item_slot_opt = *state.auction_item_slot.read();
-            let menu = bot.menu();
+            let menu = bot.menu().expect("client inventory unavailable");
             let slots = menu.slots();
 
             info!("[Auction] Window: \"{}\" | step: {:?}", window_title, step);
@@ -6180,7 +6184,7 @@ async fn handle_window_interaction(
                 if *state.last_window_id.read() != window_id {
                     return;
                 }
-                let slots = bot.menu().slots();
+                let slots = bot.menu().expect("client inventory unavailable").slots();
                 let manage_slot = find_slot_by_name(&slots, "Manage Orders")
                     .unwrap_or(MANAGE_ORDERS_FALLBACK_SLOT);
                 info!(
@@ -6213,7 +6217,7 @@ async fn handle_window_interaction(
                     return;
                 }
 
-                let slots = bot.menu().slots();
+                let slots = bot.menu().expect("client inventory unavailable").slots();
 
                 // ── Scan all order slots and pick the highest-priority one ──
                 // Priority (collect-only mode): claimable/filled orders first,
@@ -6658,7 +6662,8 @@ async fn handle_window_interaction(
                             if *state.last_window_id.read() != window_id {
                                 break;
                             }
-                            let slots_probe = bot.menu().slots();
+                            let slots_probe =
+                                bot.menu().expect("client inventory unavailable").slots();
                             collect_slot_probe = find_slot_by_name(&slots_probe, "Collect")
                                 .or_else(|| find_slot_by_name(&slots_probe, "Claim"))
                                 .or_else(|| {
@@ -6713,20 +6718,28 @@ async fn handle_window_interaction(
                                         // Skip if order is too young (< 5 min) — give it
                                         // more time to fill.
                                         if *ctx_is_buy && !too_young_to_cancel {
-                                            let cancel_slot =
-                                                find_slot_by_name(&bot.menu().slots(), "Cancel")
-                                                    .or_else(|| {
-                                                        find_slot_by_lore_contains(
-                                                            &bot.menu().slots(),
-                                                            "click to cancel",
-                                                        )
-                                                    })
-                                                    .or_else(|| {
-                                                        find_slot_by_lore_contains(
-                                                            &bot.menu().slots(),
-                                                            "cancel order",
-                                                        )
-                                                    });
+                                            let cancel_slot = find_slot_by_name(
+                                                &bot.menu()
+                                                    .expect("client inventory unavailable")
+                                                    .slots(),
+                                                "Cancel",
+                                            )
+                                            .or_else(|| {
+                                                find_slot_by_lore_contains(
+                                                    &bot.menu()
+                                                        .expect("client inventory unavailable")
+                                                        .slots(),
+                                                    "click to cancel",
+                                                )
+                                            })
+                                            .or_else(|| {
+                                                find_slot_by_lore_contains(
+                                                    &bot.menu()
+                                                        .expect("client inventory unavailable")
+                                                        .slots(),
+                                                    "cancel order",
+                                                )
+                                            });
                                             if let Some(cs) = cancel_slot {
                                                 if *state.last_window_id.read() == window_id {
                                                     info!("[ManageOrders] Cancelling remaining BUY order \"{}\" after partial collect — prefer immediate sell via cofl", order_name);
@@ -6824,7 +6837,7 @@ async fn handle_window_interaction(
                             if *state.last_window_id.read() != window_id {
                                 break;
                             }
-                            let slots2 = bot.menu().slots();
+                            let slots2 = bot.menu().expect("client inventory unavailable").slots();
                             collect_slot = find_slot_by_name(&slots2, "Collect")
                                 .or_else(|| find_slot_by_name(&slots2, "Claim"))
                                 .or_else(|| find_slot_by_lore_contains(&slots2, "click to collect"))
@@ -6891,9 +6904,10 @@ async fn handle_window_interaction(
                                     warn!("[ManageOrders] Collect click for \"{}\" was not confirmed in Order options", order_name);
                                 }
                                 if (cancel_open || cancel_due_to_age) && !cancel_exceeded {
-                                    if let Some(cancel_after) =
-                                        find_slot_by_name(&bot.menu().slots(), "Cancel")
-                                    {
+                                    if let Some(cancel_after) = find_slot_by_name(
+                                        &bot.menu().expect("client inventory unavailable").slots(),
+                                        "Cancel",
+                                    ) {
                                         if *state.last_window_id.read() == window_id {
                                             info!("[ManageOrders] Clicking Cancel at slot {} after collecting in Order options", cancel_after);
                                             click_window_slot(
@@ -7055,7 +7069,7 @@ async fn handle_window_interaction(
                 if *state.last_window_id.read() != window_id {
                     return;
                 }
-                let slots = bot.menu().slots();
+                let slots = bot.menu().expect("client inventory unavailable").slots();
                 let sell_inv_slot = find_slot_by_name(&slots, "Sell Inventory Now")
                     .unwrap_or(SELL_INVENTORY_NOW_FALLBACK_SLOT);
                 info!("[SellInventoryBz] Bazaar window open — clicking 'Sell Inventory Now' at slot {}", sell_inv_slot);
@@ -7082,7 +7096,7 @@ async fn handle_window_interaction(
             // (lore contains "Duration:"). Matches TypeScript cookieHandler.ts slot 51 check.
             info!("[Cookie] /sbmenu window opened — scanning for cookie buff...");
             tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
-            let menu = bot.menu();
+            let menu = bot.menu().expect("client inventory unavailable");
             let slots = menu.slots();
             let auto_cookie_hours = *state.auto_cookie_hours.read();
 
@@ -7207,7 +7221,7 @@ async fn handle_window_interaction(
 
                 // Find cookie in inventory and consume it by right-clicking.
                 // Matches TypeScript: bot.equip(item, 'hand') → bot.activateItem() → click slot 11.
-                let menu = bot.menu();
+                let menu = bot.menu().expect("client inventory unavailable");
                 let all_slots = menu.slots();
                 let player_range = menu.player_slots_range();
                 let cookie_slot =
@@ -7517,7 +7531,7 @@ fn resolve_pet_tag(tag: &str, nbt_data: &serde_json::Value) -> String {
 /// `BotClient::get_cached_inventory_json()` always returns fresh data.
 /// The serialised format matches TypeScript `JSON.stringify(bot.inventory)`.
 fn rebuild_cached_inventory_json(bot: &Client, state: &BotClientState) {
-    let menu = bot.menu();
+    let menu = bot.menu().expect("client inventory unavailable");
     let all_slots = menu.slots();
     let player_range = menu.player_slots_range();
 
@@ -7742,7 +7756,7 @@ fn rebuild_cached_window_json(bot: &Client, state: &BotClientState) {
     };
 
     // Read ALL window slots (GUI slots + player inventory in the window)
-    let menu = bot.menu();
+    let menu = bot.menu().expect("client inventory unavailable");
     let all_slots = menu.slots();
 
     let mut slots_json: Vec<serde_json::Value> = Vec::with_capacity(all_slots.len());
@@ -8305,7 +8319,7 @@ fn log_pending_claim(order_name: &str) {
 /// Count the number of empty (air) slots in the player's inventory (36 slots).
 /// Used to verify whether inventory is actually full before skipping BUY orders.
 fn count_empty_player_slots(bot: &Client) -> usize {
-    let menu = bot.menu();
+    let menu = bot.menu().expect("client inventory unavailable");
     let all_slots = menu.slots();
     let player_range = menu.player_slots_range();
     let player_slots = &all_slots[player_range];
@@ -8382,11 +8396,13 @@ fn send_ping_request(bot: &Client) {
     use azalea_protocol::packets::game::s_ping_request::ServerboundPingRequest;
     let token = crate::hypixel_ping::ping_request_started();
     let packet = ServerboundPingRequest { time: token };
-    bot.with_raw_connection_mut(|mut raw_conn| {
+    if let Err(error) = bot.with_raw_connection_mut(|mut raw_conn| {
         if let Err(e) = raw_conn.write(packet) {
             debug!("ping request write failed: {e}");
         }
-    });
+    }) {
+        debug!("Cannot send ping without an active connection: {error}");
+    }
 }
 
 fn send_raw_chat_command(bot: &Client, content: &str) {
@@ -8400,11 +8416,13 @@ fn send_raw_chat_command(bot: &Client, content: &str) {
     let cmd_packet = ServerboundChatCommand {
         command: command.to_string(),
     };
-    bot.with_raw_connection_mut(|mut raw_conn| {
+    if let Err(error) = bot.with_raw_connection_mut(|mut raw_conn| {
         if let Err(e) = raw_conn.write(cmd_packet) {
             error!("raw chat command write failed: {e}");
         }
-    });
+    }) {
+        error!("Cannot send raw chat command without an active connection: {error}");
+    }
 }
 
 /// Opt-out switch for the legacy zeroed click packet, for A/B testing on a
@@ -8428,7 +8446,7 @@ type ClickState = (
 /// takes a write lock on the same `RwLock` and would deadlock if it were held.
 fn live_container_state(bot: &Client, slot: i16) -> Option<ClickState> {
     use azalea::entity::inventory::Inventory;
-    bot.get_component::<Inventory>().map(|inv| {
+    bot.component::<Inventory>().ok().map(|inv| {
         (
             inv.state_id,
             inv.carried.clone(),
@@ -8578,7 +8596,7 @@ fn send_raw_click(bot: &Client, window_id: u8, slot: i16) -> bool {
             changed_slots: Default::default(),
             carried_item: HashedStack(None),
         },
-        Some((state_id, carried, clicked)) => bot.with_registry_holder(|reg| {
+        Some((state_id, carried, clicked)) => match bot.with_registry_holder(|reg| {
             use azalea_inventory::ItemStack;
             // Vanilla prediction for Pickup with an empty cursor: the clicked
             // stack moves onto the cursor and the slot becomes empty.
@@ -8604,16 +8622,25 @@ fn send_raw_click(bot: &Client, window_id: u8, slot: i16) -> bool {
                     reg,
                 ),
             }
-        }),
+        }) {
+            Ok(packet) => packet,
+            Err(error) => {
+                error!("Cannot build click without the active registry holder: {error}");
+                return false;
+            }
+        },
     };
-    bot.with_raw_connection_mut(|mut raw_conn| {
+    if let Err(error) = bot.with_raw_connection_mut(|mut raw_conn| {
         if let Err(e) = raw_conn.write(packet) {
             error!(
                 "raw click write failed (window {} slot {}): {e}",
                 window_id, slot
             );
         }
-    });
+    }) {
+        error!("Cannot send raw click without an active connection: {error}");
+        return false;
+    }
     // If azalea's tracked state_id is itself always 0, the echo is cosmetic and
     // the desync signal lives somewhere else.
     info!(
@@ -8671,7 +8698,7 @@ fn drill_parts_installed(item_data: &azalea_inventory::ItemStackData) -> [bool; 
 /// Locate a drill WITH at least one removable part in the player inventory.
 /// Returns the player-range-relative index and the item's display name.
 fn find_drill_with_parts(bot: &Client) -> Option<(usize, String)> {
-    let menu = bot.menu();
+    let menu = bot.menu().expect("client inventory unavailable");
     let slots = menu.slots();
     let range = menu.player_slots_range();
     for (i, item) in slots[range.clone()].iter().enumerate() {
@@ -8690,7 +8717,7 @@ fn find_drill_with_parts(bot: &Client) -> Option<(usize, String)> {
 /// First player-inventory item whose (lowercased) name matches `pred`.
 /// Returns the player-range-relative index and the display name.
 fn find_in_player_inv<F: Fn(&str) -> bool>(bot: &Client, pred: F) -> Option<(usize, String)> {
-    let menu = bot.menu();
+    let menu = bot.menu().expect("client inventory unavailable");
     let slots = menu.slots();
     let range = menu.player_slots_range();
     for (i, item) in slots[range.clone()].iter().enumerate() {
@@ -8704,7 +8731,7 @@ fn find_in_player_inv<F: Fn(&str) -> bool>(bot: &Client, pred: F) -> Option<(usi
 
 /// First slot in the currently open window whose name contains `needle`.
 fn find_window_slot_named(bot: &Client, needle: &str) -> Option<i16> {
-    let menu = bot.menu();
+    let menu = bot.menu().expect("client inventory unavailable");
     let slots = menu.slots();
     let needle = needle.to_lowercase();
     for (i, item) in slots.iter().enumerate() {
@@ -8780,7 +8807,7 @@ fn send_raw_shift_click(bot: &Client, window_id: u8, slot: i16) {
             changed_slots: Default::default(),
             carried_item: HashedStack(None),
         },
-        Some((state_id, carried, clicked)) => bot.with_registry_holder(|reg| {
+        Some((state_id, carried, clicked)) => match bot.with_registry_holder(|reg| {
             use azalea_inventory::ItemStack;
             // QUICK_MOVE empties the source slot; the destination is chosen by
             // the server-side menu, so only the source is claimed here.
@@ -8803,23 +8830,36 @@ fn send_raw_shift_click(bot: &Client, window_id: u8, slot: i16) {
                 },
                 carried_item: HashedStack::from_item_stack(&carried, reg),
             }
-        }),
+        }) {
+            Ok(packet) => packet,
+            Err(error) => {
+                error!("Cannot build shift-click without the active registry holder: {error}");
+                return;
+            }
+        },
     };
-    bot.with_raw_connection_mut(|mut raw_conn| {
+    if let Err(error) = bot.with_raw_connection_mut(|mut raw_conn| {
         if let Err(e) = raw_conn.write(packet) {
             error!(
                 "raw shift-click write failed (window {} slot {}): {e}",
                 window_id, slot
             );
         }
-    });
+    }) {
+        error!("Cannot send raw shift-click without an active connection: {error}");
+        return;
+    }
     info!("Raw shift-clicked slot {} in window {}", slot, window_id);
 }
 
 /// Move the player-inventory item at player-range-relative index `rel_idx` into a
 /// hotbar slot, select it, and right-click to use it (opens the Abiphone).
 async fn select_and_use_item(bot: &Client, state: &BotClientState, rel_idx: usize) {
-    let player_start = *bot.menu().player_slots_range().start();
+    let player_start = *bot
+        .menu()
+        .expect("client inventory unavailable")
+        .player_slots_range()
+        .start();
     let hotbar_slot: u16 = if rel_idx >= 27 {
         // Already in the hotbar (indices 27-35 → hotbar 0-8).
         (rel_idx - 27) as u16
@@ -9014,7 +9054,7 @@ fn send_raw_close(bot: &Client, window_id: u8, handlers: &BotEventHandlers) {
         handlers.clear_window_tracking();
         return;
     }
-    bot.with_raw_connection_mut(|mut raw_conn| {
+    if let Err(error) = bot.with_raw_connection_mut(|mut raw_conn| {
         if let Err(e) = raw_conn.write(ServerboundContainerClose {
             container_id: window_id as i32,
         }) {
@@ -9023,7 +9063,9 @@ fn send_raw_close(bot: &Client, window_id: u8, handlers: &BotEventHandlers) {
                 window_id
             );
         }
-    });
+    }) {
+        error!("Cannot send raw container close without an active connection: {error}");
+    }
     handlers.clear_window_tracking();
     debug!("Raw-closed window {}", window_id);
 }
@@ -9046,7 +9088,7 @@ async fn wait_for_cancel_confirmation(
             return true;
         }
         // Cancel button gone — cancellation confirmed
-        let slots = bot.menu().slots();
+        let slots = bot.menu().expect("client inventory unavailable").slots();
         if find_slot_by_name(&slots, "Cancel").is_none() {
             return true;
         }
@@ -9074,7 +9116,7 @@ async fn wait_for_collect_confirmation(
             return true;
         }
         // Collect button gone — collection confirmed
-        let slots = bot.menu().slots();
+        let slots = bot.menu().expect("client inventory unavailable").slots();
         if find_slot_by_name(&slots, "Collect").is_none()
             && find_slot_by_name(&slots, "Claim").is_none()
         {
@@ -9221,7 +9263,15 @@ async fn click_window_slot_carrying(
             .map(|(id, _, _)| id)
             .unwrap_or(0)
     };
-    let carried_item = bot.with_registry_holder(|reg| HashedStack::from_item_stack(carried, reg));
+    let carried_item = match bot
+        .with_registry_holder(|reg| HashedStack::from_item_stack(carried, reg))
+    {
+        Ok(item) => item,
+        Err(error) => {
+            error!("Cannot build carried-item click without the active registry holder: {error}");
+            return;
+        }
+    };
 
     let packet = ServerboundContainerClick {
         container_id: window_id as i32,
@@ -9233,14 +9283,17 @@ async fn click_window_slot_carrying(
         carried_item,
     };
 
-    bot.with_raw_connection_mut(|mut raw_conn| {
+    if let Err(error) = bot.with_raw_connection_mut(|mut raw_conn| {
         if let Err(e) = raw_conn.write(packet) {
             error!(
                 "raw click (carrying) write failed (window {} slot {}): {e}",
                 window_id, slot
             );
         }
-    });
+    }) {
+        error!("Cannot send carried-item click without an active connection: {error}");
+        return;
+    }
     info!(
         "Raw-clicked slot {} in window {} (carrying item)",
         slot, window_id

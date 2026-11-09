@@ -15,14 +15,15 @@ name = "FrikadellenBAF-loader"
 path = "src/loader.rs"
 
 [dependencies]
-# Azalea Minecraft bot framework
-azalea = "0.16"
-azalea-protocol = "0.16"
-azalea-inventory = "0.16"
-azalea-client = "0.16"
-azalea-chat = "0.16"
-bevy_app = "0.18"
-bevy_ecs = "0.18"
+# Azalea Minecraft bot framework, pinned to the upstream 26.3 branch.
+# 0.16.0+mc26.3 has not been published to crates.io, so a revision is required.
+azalea = { git = "https://github.com/azalea-rs/azalea", rev = "8041a14706fbdb2b8c481d2e8960d7411e850796" }
+azalea-protocol = { git = "https://github.com/azalea-rs/azalea", rev = "8041a14706fbdb2b8c481d2e8960d7411e850796" }
+azalea-inventory = { git = "https://github.com/azalea-rs/azalea", rev = "8041a14706fbdb2b8c481d2e8960d7411e850796" }
+azalea-client = { git = "https://github.com/azalea-rs/azalea", rev = "8041a14706fbdb2b8c481d2e8960d7411e850796" }
+azalea-chat = { git = "https://github.com/azalea-rs/azalea", rev = "8041a14706fbdb2b8c481d2e8960d7411e850796" }
+bevy_app = "0.19"
+bevy_ecs = "0.19"
 
 # Async runtime
 tokio = { version = "1.40", features = ["full"] }
@@ -33,7 +34,7 @@ futures = "0.3"
 # Networking
 reqwest = { version = "0.13", features = ["json", "blocking", "socks"] }
 # SOCKS5 client handshake, same crate azalea-protocol uses for `Connection::new_with_proxy`
-socks5-impl = { version = "0.8.1", features = ["client"] }
+socks5-impl = { version = "0.9.1", features = ["client"] }
 
 # HMAC-SHA256 for signing relay notifications (keeps webhook URLs out of source)
 hmac = "0.12"
@@ -85,9 +86,7 @@ lto = true
 codegen-units = 1
 strip = true
 
-[patch.crates-io]
-# Use a locally patched azalea-client that runs the ECS Update schedule at
-# 300 fps instead of the default 60 fps.  This reduces average packet-detection
-# latency from ~8.3 ms to ~1.65 ms, helping purchases complete in 2 server
-# ticks instead of 3 on borderline connections.
+[patch."https://github.com/azalea-rs/azalea"]
+# Use the mc26.3 azalea-client with our 300 Hz ECS Update schedule instead of
+# the default 60 Hz. This keeps average packet-detection latency near 1.65 ms.
 azalea-client = { path = "deps/azalea-client" }

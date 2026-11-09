@@ -157,7 +157,7 @@ pub async fn ping_once(host: &str, port: u16, timeout: Duration) -> Result<Durat
         // Handshake → next_state = 1 (status).
         let mut hs = Vec::new();
         write_varint(&mut hs, 0x00); // packet id
-        write_varint(&mut hs, 767); // protocol version (any recent value)
+        write_varint(&mut hs, azalea_protocol::packets::PROTOCOL_VERSION as u32);
         write_string(&mut hs, host);
         hs.extend_from_slice(&port.to_be_bytes());
         write_varint(&mut hs, 1); // next state
@@ -248,4 +248,13 @@ pub fn spawn_background_refresher(interval: Duration) {
             tokio::time::sleep(interval).await;
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn targets_minecraft_26_3_protocol() {
+        assert_eq!(azalea_protocol::packets::VERSION_NAME, "26.3");
+        assert_eq!(azalea_protocol::packets::PROTOCOL_VERSION, 777);
+    }
 }

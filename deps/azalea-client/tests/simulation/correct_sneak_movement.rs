@@ -1,4 +1,4 @@
-use azalea_client::{PhysicsState, StartWalkEvent, WalkDirection, test_utils::prelude::*};
+use azalea_client::{ClientMovementState, StartWalkEvent, WalkDirection, test_utils::prelude::*};
 use azalea_core::position::{BlockPos, ChunkPos, Vec3};
 use azalea_entity::LookDirection;
 use azalea_protocol::{
@@ -49,7 +49,7 @@ fn test_correct_sneak_movement() {
     simulation.tick();
     sent_packets.clear();
 
-    simulation.with_component_mut::<PhysicsState>(|p| p.trying_to_crouch = true);
+    simulation.with_component_mut::<ClientMovementState>(|p| p.trying_to_crouch = true);
     simulation.tick();
     sent_packets.expect("PlayerInput", |p| {
         matches!(
