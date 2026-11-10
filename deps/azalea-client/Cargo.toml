@@ -12,18 +12,18 @@ build = "build.rs"
 # ECS, component, and packet types even though their version numbers match.
 [dependencies]
 async-compat = "0.2.5"
-azalea-auth = { git = "https://github.com/TreXito/azalea", rev = "202db34d44dcf532e828e7869aacf3ba9a03b16b", default-features = false }
-azalea-block = { git = "https://github.com/TreXito/azalea", rev = "202db34d44dcf532e828e7869aacf3ba9a03b16b", default-features = false }
-azalea-buf = { git = "https://github.com/TreXito/azalea", rev = "202db34d44dcf532e828e7869aacf3ba9a03b16b", default-features = false }
-azalea-chat = { git = "https://github.com/TreXito/azalea", rev = "202db34d44dcf532e828e7869aacf3ba9a03b16b", default-features = false }
-azalea-core = { git = "https://github.com/TreXito/azalea", rev = "202db34d44dcf532e828e7869aacf3ba9a03b16b", default-features = false }
-azalea-crypto = { git = "https://github.com/TreXito/azalea", rev = "202db34d44dcf532e828e7869aacf3ba9a03b16b", default-features = false }
-azalea-entity = { git = "https://github.com/TreXito/azalea", rev = "202db34d44dcf532e828e7869aacf3ba9a03b16b", default-features = false }
-azalea-inventory = { git = "https://github.com/TreXito/azalea", rev = "202db34d44dcf532e828e7869aacf3ba9a03b16b", default-features = false }
-azalea-physics = { git = "https://github.com/TreXito/azalea", rev = "202db34d44dcf532e828e7869aacf3ba9a03b16b", default-features = false }
-azalea-protocol = { git = "https://github.com/TreXito/azalea", rev = "202db34d44dcf532e828e7869aacf3ba9a03b16b", default-features = false, features = ["connecting", "bevy_ecs"] }
-azalea-registry = { git = "https://github.com/TreXito/azalea", rev = "202db34d44dcf532e828e7869aacf3ba9a03b16b", default-features = false }
-azalea-world = { git = "https://github.com/TreXito/azalea", rev = "202db34d44dcf532e828e7869aacf3ba9a03b16b", default-features = false }
+azalea-auth = { git = "https://github.com/TreXito/azalea", rev = "ca7f3740845eb64e0f0ed7890962db3bc4468e2f", default-features = false }
+azalea-block = { git = "https://github.com/TreXito/azalea", rev = "ca7f3740845eb64e0f0ed7890962db3bc4468e2f", default-features = false }
+azalea-buf = { git = "https://github.com/TreXito/azalea", rev = "ca7f3740845eb64e0f0ed7890962db3bc4468e2f", default-features = false }
+azalea-chat = { git = "https://github.com/TreXito/azalea", rev = "ca7f3740845eb64e0f0ed7890962db3bc4468e2f", default-features = false }
+azalea-core = { git = "https://github.com/TreXito/azalea", rev = "ca7f3740845eb64e0f0ed7890962db3bc4468e2f", default-features = false }
+azalea-crypto = { git = "https://github.com/TreXito/azalea", rev = "ca7f3740845eb64e0f0ed7890962db3bc4468e2f", default-features = false }
+azalea-entity = { git = "https://github.com/TreXito/azalea", rev = "ca7f3740845eb64e0f0ed7890962db3bc4468e2f", default-features = false }
+azalea-inventory = { git = "https://github.com/TreXito/azalea", rev = "ca7f3740845eb64e0f0ed7890962db3bc4468e2f", default-features = false }
+azalea-physics = { git = "https://github.com/TreXito/azalea", rev = "ca7f3740845eb64e0f0ed7890962db3bc4468e2f", default-features = false }
+azalea-protocol = { git = "https://github.com/TreXito/azalea", rev = "ca7f3740845eb64e0f0ed7890962db3bc4468e2f", default-features = false, features = ["connecting", "bevy_ecs"] }
+azalea-registry = { git = "https://github.com/TreXito/azalea", rev = "ca7f3740845eb64e0f0ed7890962db3bc4468e2f", default-features = false }
+azalea-world = { git = "https://github.com/TreXito/azalea", rev = "ca7f3740845eb64e0f0ed7890962db3bc4468e2f", default-features = false }
 bevy_app = "0.19.0"
 bevy_ecs = { version = "0.19.0", default-features = false, features = ["multi_threaded"] }
 bevy_log = { version = "0.19.0", optional = true }

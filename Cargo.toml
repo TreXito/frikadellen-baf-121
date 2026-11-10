@@ -15,13 +15,13 @@ name = "FrikadellenBAF-loader"
 path = "src/loader.rs"
 
 [dependencies]
-# Azalea 26.3 plus the SignTextSlot wire-format fix, based on upstream 26.3.
+# Azalea 26.3 plus the SignTextSlot and level-particle wire-format fixes.
 # mc26.3 has not been published to crates.io, so a fixed revision is required.
-azalea = { git = "https://github.com/TreXito/azalea", rev = "202db34d44dcf532e828e7869aacf3ba9a03b16b" }
-azalea-protocol = { git = "https://github.com/TreXito/azalea", rev = "202db34d44dcf532e828e7869aacf3ba9a03b16b" }
-azalea-inventory = { git = "https://github.com/TreXito/azalea", rev = "202db34d44dcf532e828e7869aacf3ba9a03b16b" }
-azalea-client = { git = "https://github.com/TreXito/azalea", rev = "202db34d44dcf532e828e7869aacf3ba9a03b16b" }
-azalea-chat = { git = "https://github.com/TreXito/azalea", rev = "202db34d44dcf532e828e7869aacf3ba9a03b16b" }
+azalea = { git = "https://github.com/TreXito/azalea", rev = "ca7f3740845eb64e0f0ed7890962db3bc4468e2f" }
+azalea-protocol = { git = "https://github.com/TreXito/azalea", rev = "ca7f3740845eb64e0f0ed7890962db3bc4468e2f" }
+azalea-inventory = { git = "https://github.com/TreXito/azalea", rev = "ca7f3740845eb64e0f0ed7890962db3bc4468e2f" }
+azalea-client = { git = "https://github.com/TreXito/azalea", rev = "ca7f3740845eb64e0f0ed7890962db3bc4468e2f" }
+azalea-chat = { git = "https://github.com/TreXito/azalea", rev = "ca7f3740845eb64e0f0ed7890962db3bc4468e2f" }
 bevy_app = "0.19"
 bevy_ecs = "0.19"
 
