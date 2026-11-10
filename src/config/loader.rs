@@ -1,7 +1,7 @@
 use super::types::Config;
 use anyhow::{Context, Result};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use tracing::{info, warn};
 
 pub struct ConfigLoader {
@@ -43,7 +43,7 @@ impl ConfigLoader {
             );
             let mut config = Config::default();
             if let Some(password) = config.ensure_web_gui_password() {
-                Self::announce_web_password(&password, config.web_gui_port, true);
+                println!("{}", Self::password_box(&password, config.web_gui_port));
             }
             self.save(&config)?;
             return Ok(config);
@@ -70,14 +70,17 @@ impl ConfigLoader {
         // Copy the file aside BEFORE the save below rewrites it, so a bad
         // migration is one `mv` away from being undone.
         self.backup_before_migration(&contents, generated_password.is_some());
-        // Always show it, whether freshly generated or not, so a forgotten
-        // password is one restart away rather than a support conversation.
-        match (&generated_password, config.web_gui_password.as_deref()) {
-            (Some(password), _) => Self::announce_web_password(password, config.web_gui_port, true),
-            (None, Some(existing)) if !existing.is_empty() => {
-                Self::announce_web_password(existing, config.web_gui_port, false)
-            }
-            _ => {}
+        // Only a freshly generated password is ever shown. Once the panel is
+        // initialised the secret stays in config.toml: echoing it on every start
+        // meant anyone watching a stream or a screen-share of the console got the
+        // keys to the panel.
+        if let Some(notice) = Self::panel_notice(
+            generated_password.as_deref(),
+            config.web_gui_password.as_deref(),
+            config.web_gui_port,
+            &self.config_path,
+        ) {
+            println!("{notice}");
         }
 
         // Re-save after every load so that newly added config fields
@@ -136,40 +139,63 @@ impl ConfigLoader {
         }
     }
 
-    /// Print a freshly generated panel password where the user cannot miss it.
+    /// What the console says about the panel at startup, if anything.
     ///
-    /// `warn!` rather than `info!` on purpose: this is the one line that decides
-    /// whether the user can still reach their own panel, so it must survive a
-    /// terse log filter and stand out in a startup scroll.
-    /// Show the panel password on the console — and ONLY the console.
+    /// The password appears ONLY when `generated` is set, i.e. on the one start
+    /// that created it. For an already-initialised panel the notice names the
+    /// file the password lives in, never the password.
+    fn panel_notice(
+        generated: Option<&str>,
+        existing: Option<&str>,
+        port: u16,
+        config_path: &Path,
+    ) -> Option<String> {
+        match (generated, existing) {
+            (Some(password), _) => Some(Self::password_box(password, port)),
+            (None, Some(e)) if !e.is_empty() => Some(Self::panel_location(port, config_path)),
+            _ => None,
+        }
+    }
+
+    /// The box shown once, when a panel password is first generated.
     ///
-    /// Deliberately `println!` rather than `warn!`. Every warning is also
-    /// written to latest.log, which the panel offers as a download and which
-    /// users routinely paste into Discord when asking for help. This password
-    /// can pause the bot, read its chat and rewrite its config, so it must never
-    /// sit in a file that gets shared around. The console belongs to whoever
-    /// started the bot, and config.toml already holds the same value in plain
-    /// text right next to them.
+    /// Printed with `println!` rather than `warn!` on purpose: every warning is
+    /// also written to latest.log, which the panel offers as a download and which
+    /// users paste into Discord for support. This password can pause the bot,
+    /// read its chat and rewrite its config, so it must never sit in that file.
+    /// The console belongs to whoever started the bot, and config.toml holds the
+    /// same value in plain text.
     ///
-    /// Printed on EVERY start, not just when generated: a user who scrolled past
-    /// it once had no way to recover it short of being talked through opening
-    /// config.toml ("Fuck. I forgit password."). Restarting is something they
-    /// can already do.
-    fn announce_web_password(password: &str, port: u16, generated: bool) {
+    /// It used to print on every start so a forgotten password was one restart
+    /// away, but a console that is streamed or screen-shared then leaked the
+    /// panel on each launch.
+    fn password_box(password: &str, port: u16) -> String {
+        use crate::logging::mc_to_ansi;
         // Each line is padded to the same inner width so the box lines up for
-        // any port or password length.
-        let row = |text: String| println!("║  {:<54}  ║", text);
-        println!("╔══════════════════════════════════════════════════════════╗");
-        row(if generated {
-            "WEB PANEL PASSWORD GENERATED".to_string()
-        } else {
-            "WEB PANEL PASSWORD".to_string()
-        });
-        row(password.to_string());
-        row(format!("Open https://localhost:{port} and log in with it."));
-        row("Stored in config.toml as web_gui_password — change".to_string());
-        row("it there or in the panel if you want your own.".to_string());
-        println!("╚══════════════════════════════════════════════════════════╝");
+        // any port or password length; colour is applied after padding.
+        let line = |color: &str, text: &str| mc_to_ansi(&format!("§8║  {color}{:<54}§8  ║", text));
+        [
+            mc_to_ansi("§8╔══════════════════════════════════════════════════════════╗"),
+            line("§a§l", "WEB PANEL PASSWORD GENERATED"),
+            line("§e", password),
+            line(
+                "§7",
+                &format!("Open https://localhost:{port} and log in with it."),
+            ),
+            line("§7", "Shown this once. It is stored in config.toml as"),
+            line("§7", "web_gui_password; change it there or in the panel."),
+            mc_to_ansi("§8╚══════════════════════════════════════════════════════════╝"),
+        ]
+        .join("\n")
+    }
+
+    /// One line for every start after the first: where the panel is and where
+    /// its password lives, never the password itself.
+    fn panel_location(port: u16, config_path: &Path) -> String {
+        crate::logging::mc_to_ansi(&format!(
+            "§f[§4BAF§f]: §7Web panel: §bhttps://localhost:{port}§7, password is web_gui_password in §f{}",
+            config_path.display()
+        ))
     }
 
     fn parse_config(contents: &str) -> Result<Config> {
@@ -345,14 +371,49 @@ mod tests {
         let captured = Arc::new(Mutex::new(String::new()));
         let subscriber = tracing_subscriber::registry().with(Capture(captured.clone()));
         tracing::subscriber::with_default(subscriber, || {
-            ConfigLoader::announce_web_password(secret, 8080, true);
-            ConfigLoader::announce_web_password(secret, 8080, false);
+            tracing::info!(
+                "{}",
+                ConfigLoader::panel_location(8080, Path::new("config.toml"))
+            );
+            let _ = ConfigLoader::panel_notice(None, Some(secret), 8080, Path::new("config.toml"));
         });
 
         let logged = captured.lock().unwrap().clone();
         assert!(
             !logged.contains(secret),
             "the panel password must not appear in any log event, got: {logged:?}"
+        );
+    }
+
+    /// Streaming the console must not leak the panel: after the first start the
+    /// password is never part of what gets printed.
+    #[test]
+    fn an_initialised_panel_never_prints_its_password() {
+        let secret = "SuperSecretPanelPw123";
+        let path = Path::new("/srv/baf/config.toml");
+        let notice = ConfigLoader::panel_notice(None, Some(secret), 8080, path)
+            .expect("a location line should still be shown");
+        assert!(!notice.contains(secret), "password leaked: {notice:?}");
+        assert!(
+            notice.contains("8080") && notice.contains("config.toml"),
+            "got {notice:?}"
+        );
+    }
+
+    #[test]
+    fn the_password_is_shown_once_when_generated() {
+        let secret = "SuperSecretPanelPw123";
+        let notice =
+            ConfigLoader::panel_notice(Some(secret), Some(secret), 8080, Path::new("config.toml"))
+                .expect("a generated password must be announced");
+        assert!(notice.contains(secret));
+    }
+
+    #[test]
+    fn a_missing_password_prints_nothing() {
+        assert!(ConfigLoader::panel_notice(None, None, 8080, Path::new("config.toml")).is_none());
+        assert!(
+            ConfigLoader::panel_notice(None, Some(""), 8080, Path::new("config.toml")).is_none()
         );
     }
 

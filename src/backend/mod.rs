@@ -11,13 +11,37 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use futures::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 use tokio::sync::mpsc;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::{
+    connect_async,
+    tungstenite::{error::ProtocolError, Error as WsError, Message},
+};
 use tracing::{debug, info, warn};
+
+/// A connection that dies sooner than this after connecting is flapping, not
+/// just recycled by the network, and is worth a warning.
+const FLAPPING_BELOW: Duration = Duration::from_secs(20);
+
+/// Whether a socket error is the routine "the network path dropped a long-lived
+/// TCP connection" kind. The backend sits behind Cloudflare and the bot runs
+/// behind home NAT, and either may RST a socket at any time. The bot reconnects
+/// within seconds, so this is not something the user can act on.
+fn is_transient_drop(e: &WsError) -> bool {
+    use std::io::ErrorKind::{BrokenPipe, ConnectionAborted, ConnectionReset, UnexpectedEof};
+    match e {
+        WsError::Io(io) => matches!(
+            io.kind(),
+            ConnectionReset | ConnectionAborted | BrokenPipe | UnexpectedEof
+        ),
+        WsError::Protocol(ProtocolError::ResetWithoutClosingHandshake) => true,
+        WsError::ConnectionClosed | WsError::AlreadyClosed => true,
+        _ => false,
+    }
+}
 
 use crate::bot::BotClient;
 use crate::profit::ProfitTracker;
@@ -192,6 +216,7 @@ async fn run(
             Ok((ws, _)) => {
                 info!("[Backend] connected to {}", deps.url);
                 backoff = 5;
+                let connected_at = Instant::now();
                 let (mut write, mut read) = ws.split();
 
                 // First frame: hello (auth + identity + link code).
@@ -236,7 +261,17 @@ async fn run(
                                     break;
                                 }
                                 Some(Err(e)) => {
-                                    warn!("[Backend] socket error: {}", e);
+                                    if is_transient_drop(&e) && connected_at.elapsed() >= FLAPPING_BELOW {
+                                        // Routine: reconnects below. Kept at debug so a
+                                        // normal network blip is not console spam.
+                                        debug!(
+                                            "[Backend] connection dropped after {}s ({}), reconnecting",
+                                            connected_at.elapsed().as_secs(),
+                                            e
+                                        );
+                                    } else {
+                                        warn!("[Backend] socket error: {}", e);
+                                    }
                                     break;
                                 }
                                 None => break,

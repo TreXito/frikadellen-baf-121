@@ -2799,11 +2799,11 @@ async fn event_handler(bot: Client, event: Event, state: BotClientState) -> Resu
 
             let message = chat.message().to_string();
             state.handlers.handle_chat_message(&message).await;
-            if state
-                .event_tx
-                .send(BotEvent::ChatMessage(message.clone()))
-                .is_err()
-            {
+            // The event carries the styled form so the terminal and web panel show
+            // Hypixel's own colors; every consumer already strips `§` codes before
+            // matching, and the plain `message` above stays the matching source.
+            let styled = crate::logging::formatted_to_legacy(&chat.message());
+            if state.event_tx.send(BotEvent::ChatMessage(styled)).is_err() {
                 debug!("Failed to send ChatMessage event - receiver dropped");
             }
 
