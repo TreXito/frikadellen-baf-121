@@ -15,13 +15,13 @@ name = "FrikadellenBAF-loader"
 path = "src/loader.rs"
 
 [dependencies]
-# Azalea Minecraft bot framework, pinned to the upstream 26.3 branch.
-# 0.16.0+mc26.3 has not been published to crates.io, so a revision is required.
-azalea = { git = "https://github.com/azalea-rs/azalea", rev = "8041a14706fbdb2b8c481d2e8960d7411e850796" }
-azalea-protocol = { git = "https://github.com/azalea-rs/azalea", rev = "8041a14706fbdb2b8c481d2e8960d7411e850796" }
-azalea-inventory = { git = "https://github.com/azalea-rs/azalea", rev = "8041a14706fbdb2b8c481d2e8960d7411e850796" }
-azalea-client = { git = "https://github.com/azalea-rs/azalea", rev = "8041a14706fbdb2b8c481d2e8960d7411e850796" }
-azalea-chat = { git = "https://github.com/azalea-rs/azalea", rev = "8041a14706fbdb2b8c481d2e8960d7411e850796" }
+# Azalea 26.3 plus the SignTextSlot wire-format fix, based on upstream 26.3.
+# mc26.3 has not been published to crates.io, so a fixed revision is required.
+azalea = { git = "https://github.com/TreXito/azalea", rev = "202db34d44dcf532e828e7869aacf3ba9a03b16b" }
+azalea-protocol = { git = "https://github.com/TreXito/azalea", rev = "202db34d44dcf532e828e7869aacf3ba9a03b16b" }
+azalea-inventory = { git = "https://github.com/TreXito/azalea", rev = "202db34d44dcf532e828e7869aacf3ba9a03b16b" }
+azalea-client = { git = "https://github.com/TreXito/azalea", rev = "202db34d44dcf532e828e7869aacf3ba9a03b16b" }
+azalea-chat = { git = "https://github.com/TreXito/azalea", rev = "202db34d44dcf532e828e7869aacf3ba9a03b16b" }
 bevy_app = "0.19"
 bevy_ecs = "0.19"
 
@@ -86,7 +86,7 @@ lto = true
 codegen-units = 1
 strip = true
 
-[patch."https://github.com/azalea-rs/azalea"]
+[patch."https://github.com/TreXito/azalea"]
 # Use the mc26.3 azalea-client with our 300 Hz ECS Update schedule instead of
 # the default 60 Hz. This keeps average packet-detection latency near 1.65 ms.
 azalea-client = { path = "deps/azalea-client" }
