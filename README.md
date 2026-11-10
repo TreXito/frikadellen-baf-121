@@ -17,7 +17,7 @@ A high-performance, Rust-powered macro that automates auction house sniping, baz
 
 > **⚠️ Use at your own risk.** This is a macro — using it may result in a ban. If you do get banned, please share your logs in the [Discord server](https://discord.gg/42DvX6T9jh) so we can improve detection evasion.
 
-> **Compatibility:** Minecraft Java Edition **26.3** (protocol **777**), using Azalea **0.16.0+mc26.3**. The exact upstream revision is pinned in `Cargo.toml` because this Minecraft version has not been published to crates.io.
+> **Compatibility:** Minecraft Java Edition **26.3** (protocol **777**), using Azalea **0.16.0+mc26.3**. The exact corrected Azalea revision is pinned in `Cargo.toml` because this Minecraft version has not been published to crates.io.
 
 ---
 

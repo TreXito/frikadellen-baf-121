@@ -3729,7 +3729,7 @@ async fn event_handler(bot: Client, event: Event, state: BotClientState) -> Resu
                     if bot_state == BotState::Bazaar {
                         let step = *state.bazaar_step.read();
                         let pos = pkt.pos;
-                        let is_front = pkt.is_front_text;
+                        let slot = pkt.slot;
 
                         let text_to_write = match step {
                             BazaarStep::SetAmount => {
@@ -3766,7 +3766,7 @@ async fn event_handler(bot: Client, event: Event, state: BotClientState) -> Resu
                         // text3, text4: empty
                         let packet = ServerboundSignUpdate {
                             pos,
-                            is_front_text: is_front,
+                            slot,
                             lines: [
                                 text_to_write,
                                 "^^^^^^^^^^^^^^^".to_string(),
@@ -3784,7 +3784,7 @@ async fn event_handler(bot: Client, event: Event, state: BotClientState) -> Resu
                         }
                         let step = *state.auction_step.read();
                         let pos = pkt.pos;
-                        let is_front = pkt.is_front_text;
+                        let slot = pkt.slot;
 
                         let (text_to_write, next_step) = match step {
                             AuctionStep::PriceSign => {
@@ -3809,7 +3809,7 @@ async fn event_handler(bot: Client, event: Event, state: BotClientState) -> Resu
                         *state.auction_step.write() = next_step;
                         let packet = ServerboundSignUpdate {
                             pos,
-                            is_front_text: is_front,
+                            slot,
                             lines: [text_to_write, String::new(), String::new(), String::new()],
                         };
                         bot.write_packet(packet);
