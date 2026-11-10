@@ -245,6 +245,81 @@ pub fn mc_to_ansi(text: &str) -> String {
         + "\x1b[0m" // Always reset at the end
 }
 
+/// Nearest of the 16 legacy chat colors for an RGB value. Hypixel almost
+/// always sends named colors, but a hex color must still land on something
+/// the `§` pipeline (and the terminal) can show.
+fn nearest_legacy_color(rgb: u32) -> char {
+    use azalea_chat::style::ChatFormatting;
+    let (r, g, b) = ((rgb >> 16) & 0xff, (rgb >> 8) & 0xff, rgb & 0xff);
+    let dist = |c: u32| {
+        let (cr, cg, cb) = ((c >> 16) & 0xff, (c >> 8) & 0xff, c & 0xff);
+        let d = |a: u32, b: u32| (a as i64 - b as i64).pow(2);
+        d(r, cr) + d(g, cg) + d(b, cb)
+    };
+    ChatFormatting::FORMATTERS
+        .iter()
+        .filter_map(|f| f.color().map(|c| (f, dist(c))))
+        .min_by_key(|(_, d)| *d)
+        .map(|(f, _)| f.code())
+        .unwrap_or('f')
+}
+
+/// The `§` prefix that moves the terminal from style `running` to style `new`.
+///
+/// Empty when nothing changed, otherwise a full restate (`§r` then color then
+/// each format). Restating is longer than diffing but cannot get stuck in a
+/// stale bold/italic, which legacy codes have no way to switch back off.
+fn legacy_style_prefix(
+    running: &azalea_chat::style::Style,
+    new: &azalea_chat::style::Style,
+) -> String {
+    use azalea_chat::style::ChatFormatting;
+    if running == new {
+        return String::new();
+    }
+    let mut out = String::from("§r");
+    if let Some(color) = &new.color {
+        let code = color
+            .name
+            .as_deref()
+            .and_then(ChatFormatting::from_name)
+            .map(|f| f.code())
+            .unwrap_or_else(|| nearest_legacy_color(color.value));
+        out.push('§');
+        out.push(code);
+    }
+    for (on, code) in [
+        (new.bold, 'l'),
+        (new.italic, 'o'),
+        (new.underlined, 'n'),
+        (new.strikethrough, 'm'),
+    ] {
+        if on.unwrap_or(false) {
+            out.push('§');
+            out.push(code);
+        }
+    }
+    out
+}
+
+/// Render a server chat component as a legacy `§`-coded string.
+///
+/// azalea's `to_string()` drops all styling, which is why Hypixel chat used to
+/// print as flat uncoloured text: the colors travel as JSON style fields, not
+/// as `§` characters in the text. Re-encoding them as `§` codes lets the one
+/// path every other message already uses (`print_mc_chat`, the web panel's
+/// `mcToHtml`, `remove_color_codes`) show them without any of it changing.
+/// Obfuscated text is left plain on purpose, it is unreadable in a terminal.
+pub fn formatted_to_legacy(text: &azalea_chat::FormattedText) -> String {
+    let default = azalea_chat::style::Style::default();
+    text.to_custom_format(
+        |running, new| (legacy_style_prefix(running, new), String::new()),
+        |t| t.to_owned(),
+        |_| String::new(),
+        &default,
+    )
+}
+
 /// Print a Minecraft chat message to console (with color code processing)
 pub fn print_mc_chat(message: &str) {
     let prefix = vps_prefix();
@@ -296,6 +371,45 @@ mod tests {
         // Test formatting codes
         assert!(mc_to_ansi("§l").contains("\x1b[1m")); // Bold
         assert!(mc_to_ansi("§r").contains("\x1b[0m")); // Reset
+    }
+
+    #[test]
+    fn formatted_to_legacy_keeps_hypixel_colors() {
+        use azalea_chat::FormattedText;
+        use serde::de::Deserialize;
+        let component = FormattedText::deserialize(&serde_json::json!({
+            "text": "",
+            "extra": [
+                {"text": "[MVP+] ", "color": "aqua"},
+                {"text": "Steve", "color": "aqua", "bold": true},
+                {"text": ": hi", "color": "white"}
+            ]
+        }))
+        .unwrap();
+        let legacy = formatted_to_legacy(&component);
+        assert_eq!(remove_color_codes(&legacy), "[MVP+] Steve: hi");
+        assert!(legacy.starts_with("§r§b[MVP+] "), "got {legacy:?}");
+        assert!(
+            legacy.contains("§r§b§lSteve"),
+            "bold must be restated, got {legacy:?}"
+        );
+        assert!(legacy.ends_with("§r§f: hi"), "got {legacy:?}");
+        // and it reaches the terminal as real ANSI
+        assert!(mc_to_ansi(&legacy).contains("\x1b[96m"));
+    }
+
+    #[test]
+    fn unstyled_chat_gets_no_codes() {
+        use azalea_chat::FormattedText;
+        use serde::de::Deserialize;
+        let component = FormattedText::deserialize(&serde_json::json!({"text": "plain"})).unwrap();
+        assert_eq!(formatted_to_legacy(&component), "plain");
+    }
+
+    #[test]
+    fn hex_colors_fall_back_to_the_nearest_legacy_color() {
+        assert_eq!(nearest_legacy_color(0xFF5555), 'c'); // red
+        assert_eq!(nearest_legacy_color(0x0000AA), '1'); // dark blue
     }
 
     use std::sync::{Arc, Mutex};

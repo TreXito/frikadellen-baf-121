@@ -203,7 +203,7 @@ If running on a VPS, replace `localhost` with your server's IP address. Change t
 
 The panel can pause the bot, edit every setting and read your game chat, so it protects itself with no setup required:
 
-- **A random password is generated on first run.** It is printed in the console in a box you cannot miss, and stored as `web_gui_password` in `config.toml`. Change it there or in the Config tab — but it cannot be left empty. Blanking it just generates a new one.
+- **A random password is generated on first run.** It is printed in the console in a box you cannot miss, **that one time only** (later starts never print it, so a streamed console does not leak the panel), and stored as `web_gui_password` in `config.toml`. Change it there or in the Config tab — but it cannot be left empty. Blanking it just generates a new one.
 - **HTTPS is always on.** The bot issues and renews its own certificate (kept next to the logs), so your password is never sent over the network in the clear. It is self-signed, so your browser shows a one-time "not private" warning the first time — click through it once and it will not ask again.
 - **If you terminate TLS yourself** (nginx, Caddy, a Cloudflare tunnel), set the environment variable `BAF_WEB_PLAIN_HTTP=1` to serve plain HTTP behind your proxy. Do not use this to expose the panel directly.
 
