@@ -5173,7 +5173,9 @@ async fn main() -> Result<()> {
                                     duration_hours: dur,
                                     item_slot: None,
                                     item_id: None,
-                                    priced_count: frikadellen_baf::types::list_instruction_count(it),
+                                    priced_count: frikadellen_baf::types::list_instruction_count(
+                                        it,
+                                    ),
                                 },
                                 frikadellen_baf::types::CommandPriority::Normal,
                                 false,
@@ -5500,11 +5502,26 @@ async fn main() -> Result<()> {
                 let deadline =
                     std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
                 let mut interrupted = false;
+                // The bot stays Idle for up to WINDOW_CLOSE_DELAY_MS (150 ms) after
+                // picking a command up when it first has to close a stale window,
+                // so "Idle" right after sending does NOT mean the command finished.
+                // The old 250 ms poll hid that by luck; at 25 ms it would declare the
+                // command done and dispatch the next one into the same GUI flow,
+                // which is the overlapping-window click pattern Watchdog bans
+                // (#01E34397). Trust Idle only once the bot has been seen busy, or
+                // after the old 250 ms for commands that never go busy (SendChat).
+                let sent_at = std::time::Instant::now();
+                let mut seen_busy = false;
                 loop {
-                    sleep(Duration::from_millis(250)).await;
-                    if bot_client_clone.state().allows_commands()
-                        || std::time::Instant::now() >= deadline
-                    {
+                    // 25 ms, not 250: a Critical buy queued mid-command waited up
+                    // to a full poll period before this loop re-checked state or
+                    // preemption (part of the 22% of buys >100 ms to /viewauction).
+                    sleep(Duration::from_millis(25)).await;
+                    let idle = bot_client_clone.state().allows_commands();
+                    seen_busy |= !idle;
+                    let finished =
+                        idle && (seen_busy || sent_at.elapsed() >= Duration::from_millis(250));
+                    if finished || std::time::Instant::now() >= deadline {
                         break;
                     }
 
@@ -5539,10 +5556,12 @@ async fn main() -> Result<()> {
 
                 command_queue_processor.complete_current();
 
-                // Always wait the configurable inter-command delay so Hypixel interactions
+                // Wait the configurable inter-command delay so Hypixel interactions
                 // don't run back-to-back.  Skip the delay when we interrupted for an
                 // AH flip so it is picked up immediately.
                 // Use a longer delay after auction listings to prevent "Sending packets too fast" kicks.
+                // The rest is cut short the moment a Critical buy is queued: it was
+                // unconditional, so a flip arriving after a listing sat up to 800 ms.
                 if !interrupted {
                     let delay = if matches!(
                         cmd.command_type,
@@ -5552,7 +5571,20 @@ async fn main() -> Result<()> {
                     } else {
                         command_delay_ms
                     };
-                    sleep(Duration::from_millis(delay)).await;
+                    const REST_STEP_MS: u64 = 20;
+                    let mut waited = 0u64;
+                    while waited < delay {
+                        if command_queue_processor.critical_queued() {
+                            debug!(
+                                "[Queue] Critical command waiting — cutting {}ms rest short after {}ms",
+                                delay, waited
+                            );
+                            break;
+                        }
+                        let step = REST_STEP_MS.min(delay - waited);
+                        sleep(Duration::from_millis(step)).await;
+                        waited += step;
+                    }
                 }
             } else {
                 // Queue is empty — wait for a notification instead of busy-polling.

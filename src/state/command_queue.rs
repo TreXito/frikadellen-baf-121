@@ -184,6 +184,16 @@ impl CommandQueue {
         self.queue.read().front().cloned()
     }
 
+    /// True when a Critical command (an AH buy) is waiting in the queue. The
+    /// processor loop polls this during the inter-command rest so a buy never
+    /// sits through the 200-800 ms anti-spam delay of the previous command.
+    pub fn critical_queued(&self) -> bool {
+        self.queue
+            .read()
+            .front()
+            .is_some_and(|c| c.priority == CommandPriority::Critical)
+    }
+
     /// Clear all bazaar orders from queue
     pub fn clear_bazaar_orders(&self) {
         let mut queue = self.queue.write();
@@ -397,6 +407,19 @@ mod tests {
         // currently-executing Critical one
         let next = q.peek_queued().unwrap();
         assert_eq!(next.priority, CommandPriority::Normal);
+    }
+
+    #[test]
+    fn critical_queued_sees_only_waiting_buys() {
+        let q = CommandQueue::new();
+        assert!(!q.critical_queued());
+        q.enqueue(dummy_bazaar_buy(), CommandPriority::Normal, true);
+        assert!(!q.critical_queued());
+        q.enqueue(dummy_purchase_auction(), CommandPriority::Critical, false);
+        assert!(q.critical_queued());
+        // once the buy is running it is no longer "waiting"
+        let _ = q.start_current();
+        assert!(!q.critical_queued());
     }
 
     #[test]
