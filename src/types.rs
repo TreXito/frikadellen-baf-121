@@ -491,7 +491,10 @@ mod list_instruction_count_tests {
 
     #[test]
     fn reads_finder_count() {
-        assert_eq!(list_instruction_count(&json!({"listAt": 22885000, "count": 32})), 32);
+        assert_eq!(
+            list_instruction_count(&json!({"listAt": 22885000, "count": 32})),
+            32
+        );
         assert_eq!(list_instruction_count(&json!({"count": 32.0})), 32);
     }
 

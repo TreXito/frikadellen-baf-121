@@ -5173,7 +5173,9 @@ async fn main() -> Result<()> {
                                     duration_hours: dur,
                                     item_slot: None,
                                     item_id: None,
-                                    priced_count: frikadellen_baf::types::list_instruction_count(it),
+                                    priced_count: frikadellen_baf::types::list_instruction_count(
+                                        it,
+                                    ),
                                 },
                                 frikadellen_baf::types::CommandPriority::Normal,
                                 false,
