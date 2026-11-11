@@ -5500,14 +5500,26 @@ async fn main() -> Result<()> {
                 let deadline =
                     std::time::Instant::now() + std::time::Duration::from_secs(timeout_secs);
                 let mut interrupted = false;
+                // The bot stays Idle for up to WINDOW_CLOSE_DELAY_MS (150 ms) after
+                // picking a command up when it first has to close a stale window,
+                // so "Idle" right after sending does NOT mean the command finished.
+                // The old 250 ms poll hid that by luck; at 25 ms it would declare the
+                // command done and dispatch the next one into the same GUI flow,
+                // which is the overlapping-window click pattern Watchdog bans
+                // (#01E34397). Trust Idle only once the bot has been seen busy, or
+                // after the old 250 ms for commands that never go busy (SendChat).
+                let sent_at = std::time::Instant::now();
+                let mut seen_busy = false;
                 loop {
                     // 25 ms, not 250: a Critical buy queued mid-command waited up
                     // to a full poll period before this loop re-checked state or
                     // preemption (part of the 22% of buys >100 ms to /viewauction).
                     sleep(Duration::from_millis(25)).await;
-                    if bot_client_clone.state().allows_commands()
-                        || std::time::Instant::now() >= deadline
-                    {
+                    let idle = bot_client_clone.state().allows_commands();
+                    seen_busy |= !idle;
+                    let finished =
+                        idle && (seen_busy || sent_at.elapsed() >= Duration::from_millis(250));
+                    if finished || std::time::Instant::now() >= deadline {
                         break;
                     }
 
