@@ -1507,6 +1507,8 @@ async fn list_item(
             duration_hours: duration,
             item_slot: Some(payload.item_slot),
             item_id: None,
+            // manual price is for ONE item
+            priced_count: 1,
         },
         CommandPriority::Critical,
         false,
