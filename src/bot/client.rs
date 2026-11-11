@@ -576,9 +576,13 @@ pub enum BotEvent {
         item_name: String,
         starting_bid: u64,
     },
-    /// Listing refused because the resolved slot holds more than one copy while
-    /// the listing price is a per-unit price (see `refuse_stacked_listing`).
-    AuctionRefusedStacked { item_name: String, count: u32 },
+    /// Listing refused because the resolved slot's stack size differs from the
+    /// count the listing price was computed for (see `stack_price_mismatch`).
+    AuctionRefusedStacked {
+        item_name: String,
+        count: u32,
+        priced_count: u32,
+    },
     /// Reconciliation snapshot: the set of orders visible in the in-game
     /// Bazaar Orders window.  Each entry is (item_name, is_buy_order, amount, price_per_unit).
     /// The tracker should remove any orders not in this list.
@@ -711,6 +715,7 @@ impl BotClient {
             bazaar_step: Arc::new(RwLock::new(BazaarStep::Initial)),
             auction_item_name: Arc::new(RwLock::new(String::new())),
             auction_starting_bid: Arc::new(RwLock::new(0)),
+            auction_priced_count: Arc::new(RwLock::new(1)),
             auction_duration_hours: Arc::new(RwLock::new(24)),
             auction_item_slot: Arc::new(RwLock::new(None)),
             auction_item_id: Arc::new(RwLock::new(None)),
@@ -1417,6 +1422,8 @@ pub struct BotClientState {
     pub auction_item_name: Arc<RwLock<String>>,
     /// Starting bid for current auction
     pub auction_starting_bid: Arc<RwLock<u64>>,
+    /// Stack size `auction_starting_bid` was priced for (see `SellToAuction::priced_count`)
+    pub auction_priced_count: Arc<RwLock<u32>>,
     /// Duration in hours for current auction
     pub auction_duration_hours: Arc<RwLock<u64>>,
     /// Mineflayer inventory slot (9-44) for item to auction
@@ -1635,6 +1642,7 @@ impl Default for BotClientState {
             bazaar_step: Arc::new(RwLock::new(BazaarStep::Initial)),
             auction_item_name: Arc::new(RwLock::new(String::new())),
             auction_starting_bid: Arc::new(RwLock::new(0)),
+            auction_priced_count: Arc::new(RwLock::new(1)),
             auction_duration_hours: Arc::new(RwLock::new(24)),
             auction_item_slot: Arc::new(RwLock::new(None)),
             auction_item_id: Arc::new(RwLock::new(None)),
@@ -4328,14 +4336,16 @@ async fn execute_command(bot: &Client, command: &QueuedCommand, state: &BotClien
             duration_hours,
             item_slot,
             item_id,
+            priced_count,
         } => {
             info!(
-                "Creating auction: {} at {} coins for {} hours",
-                item_name, starting_bid, duration_hours
+                "Creating auction: {} at {} coins for {} hours (priced for {}x)",
+                item_name, starting_bid, duration_hours, priced_count
             );
             // Store context for window/sign handlers (matches TypeScript sellHandler.ts)
             *state.auction_item_name.write() = item_name.clone();
             *state.auction_starting_bid.write() = *starting_bid;
+            *state.auction_priced_count.write() = (*priced_count).max(1);
             *state.auction_duration_hours.write() = *duration_hours;
             *state.auction_item_slot.write() = *item_slot;
             *state.auction_item_id.write() = item_id.clone();
@@ -5895,7 +5905,10 @@ async fn handle_window_interaction(
                             i >= player_start && i < slots.len() && !slots[i].is_empty()
                         });
                         if let Some(i) = target_slot {
-                            if slots[i].count() > 1 {
+                            if stack_price_mismatch(
+                                slots[i].count(),
+                                *state.auction_priced_count.read(),
+                            ) {
                                 refuse_stacked_listing(
                                     bot,
                                     state,
@@ -5975,7 +5988,10 @@ async fn handle_window_interaction(
                                 find_inventory_slot_by_name(&slots, player_start, &item_name)
                             });
                         if let Some(i) = target_slot {
-                            if slots[i].count() > 1 {
+                            if stack_price_mismatch(
+                                slots[i].count(),
+                                *state.auction_priced_count.read(),
+                            ) {
                                 refuse_stacked_listing(
                                     bot,
                                     state,
@@ -6064,7 +6080,10 @@ async fn handle_window_interaction(
                                 find_inventory_slot_by_name(&slots, player_start, &item_name)
                             });
                         if let Some(i) = target_slot {
-                            if slots[i].count() > 1 {
+                            if stack_price_mismatch(
+                                slots[i].count(),
+                                *state.auction_priced_count.read(),
+                            ) {
                                 refuse_stacked_listing(
                                     bot,
                                     state,
@@ -9169,15 +9188,22 @@ async fn close_window_and_reopen_bz(bot: &Client, state: &BotClientState, window
     }
 }
 
-/// Refuse to list a slot whose stack count is greater than one: warn, emit an
-/// event for the chat/panel layer, close the window and go idle.
+/// True when the slot's stack size differs from the count the listing price
+/// was computed for, i.e. listing the slot as-is would sell the wrong quantity
+/// for `starting_bid`.
 ///
-/// Every listing price this bot uses (finder `listAt`, COFL `createAuction`)
-/// is a PER-UNIT price, while Hypixel charges the full ask for the WHOLE
-/// placed stack. Listing a count-N slot at the unit price sells N copies for
-/// the price of one (user report: two drills sold for a single drill's price,
-/// -60M). The item stays in the inventory; the operator must unstack it
-/// before the next listing attempt succeeds.
+/// The finder prices the WHOLE held stack (key `ID x{count}`, `listAt` is the
+/// price of all N) and tells us N, so a 32x slot priced for 32 lists as-is.
+/// COFL `createAuction` and manual listings price ONE item (priced_count 1):
+/// listing a count-N slot at that price sells N copies for the price of one
+/// (user report: two drills sold for a single drill's price, -60M).
+fn stack_price_mismatch(slot_count: i32, priced_count: u32) -> bool {
+    slot_count.max(1) as u32 != priced_count.max(1)
+}
+
+/// Refuse to list a slot whose stack size does not match the priced count
+/// (see `stack_price_mismatch`): warn, emit an event for the chat/panel layer,
+/// close the window and go idle. The item stays in the inventory.
 fn refuse_stacked_listing(
     bot: &Client,
     state: &BotClientState,
@@ -9185,13 +9211,15 @@ fn refuse_stacked_listing(
     item_name: &str,
     count: u32,
 ) {
+    let priced_count = (*state.auction_priced_count.read()).max(1);
     warn!(
-        "[Auction] Refusing to list \"{}\" — slot holds {}x but the listing price is for 1; unstack to list",
-        item_name, count
+        "[Auction] Refusing to list \"{}\" — slot holds {}x but the listing price is for {}x",
+        item_name, count, priced_count
     );
     let _ = state.event_tx.send(BotEvent::AuctionRefusedStacked {
         item_name: item_name.to_string(),
         count,
+        priced_count,
     });
     send_raw_close(bot, window_id, &state.handlers);
     *state.bot_state.write() = BotState::Idle;
@@ -9596,6 +9624,28 @@ fn extract_viewauction_uuid(msg: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn stack_priced_for_whole_stack_lists() {
+        // finder prices the 32x Kat Flower stack as a whole
+        assert!(!super::stack_price_mismatch(32, 32));
+    }
+
+    #[test]
+    fn stack_with_per_unit_price_refuses() {
+        // COFL createAuction per-unit price on a 32x stack
+        assert!(super::stack_price_mismatch(32, 1));
+        assert!(super::stack_price_mismatch(2, 1));
+        // finder priced 32 but the slot now holds 31
+        assert!(super::stack_price_mismatch(31, 32));
+    }
+
+    #[test]
+    fn single_item_lists() {
+        assert!(!super::stack_price_mismatch(1, 1));
+        // missing/zero priced count is treated as 1
+        assert!(!super::stack_price_mismatch(1, 0));
+    }
     use super::*;
     use azalea::registry::builtin::ItemKind;
     use azalea_inventory::components::MapId;

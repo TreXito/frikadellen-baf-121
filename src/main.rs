@@ -3458,7 +3458,11 @@ async fn main() -> Result<()> {
                         });
                     }
                 }
-                frikadellen_baf::bot::BotEvent::AuctionRefusedStacked { item_name, count } => {
+                frikadellen_baf::bot::BotEvent::AuctionRefusedStacked {
+                    item_name,
+                    count,
+                    priced_count,
+                } => {
                     let now = std::time::Instant::now();
                     let due = !last_stacked_warn
                         .get(&item_name)
@@ -3466,8 +3470,8 @@ async fn main() -> Result<()> {
                     if due {
                         last_stacked_warn.insert(item_name.clone(), now);
                         let baf_msg = format!(
-                            "§f[§4BAF§f]: §eWon't list §f{}§e — {}x stacked in one slot, price is for 1. Unstack it.",
-                            item_name, count
+                            "§f[§4BAF§f]: §eWon't list §f{}§e — slot holds {}x but the price is for {}x.",
+                            item_name, count, priced_count
                         );
                         print_mc_chat(&baf_msg);
                         let _ = chat_tx_events.send(baf_msg);
@@ -4888,6 +4892,8 @@ async fn main() -> Result<()> {
                                         duration_hours: duration,
                                         item_slot,
                                         item_id,
+                                        // COFL createAuction prices ONE item
+                                        priced_count: 1,
                                     };
                                     // If bazaar flips are paused (AH flip window active), defer
                                     // listing until the window ends so the listing flow does not
@@ -5167,6 +5173,7 @@ async fn main() -> Result<()> {
                                     duration_hours: dur,
                                     item_slot: None,
                                     item_id: None,
+                                    priced_count: frikadellen_baf::types::list_instruction_count(it),
                                 },
                                 frikadellen_baf::types::CommandPriority::Normal,
                                 false,
@@ -7070,6 +7077,7 @@ async fn main() -> Result<()> {
                                                         duration_hours: dur,
                                                         item_slot: None,
                                                         item_id: None,
+                                                        priced_count: frikadellen_baf::types::list_instruction_count(it),
                                                     },
                                                     frikadellen_baf::types::CommandPriority::Normal,
                                                     false,

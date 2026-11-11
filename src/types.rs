@@ -335,6 +335,11 @@ pub enum CommandType {
         item_slot: Option<u64>,
         /// ExtraAttributes.id from COFL for item identity verification
         item_id: Option<String>,
+        /// Stack size `starting_bid` was priced for. The finder prices the whole
+        /// held stack (`listAt` for a 32x stack is the 32x price) and sends that
+        /// count; COFL `createAuction` and manual listings price ONE item, so 1.
+        /// The lister only lists a slot whose count equals this value.
+        priced_count: u32,
     },
     /// Trigger a bazaar order management cycle.
     /// When `cancel_open` is true (startup), all open orders are cancelled in addition
@@ -465,5 +470,35 @@ mod purchase_at_json_tests {
             purchase_at_from_json(&json!({"purchaseAt": "2026-03-18T12:36:16.208Z"})),
             Some(1_773_837_376_208)
         );
+    }
+}
+
+/// Stack size a finder `listInstructions` item was priced for. The finder
+/// prices the whole held stack and sends it as `count`; older finders omit it,
+/// which means the price is for one item.
+pub fn list_instruction_count(item: &serde_json::Value) -> u32 {
+    item.get("count")
+        .and_then(|c| c.as_u64().or_else(|| c.as_f64().map(|f| f as u64)))
+        .filter(|&c| c >= 1)
+        .map(|c| c.min(u32::MAX as u64) as u32)
+        .unwrap_or(1)
+}
+
+#[cfg(test)]
+mod list_instruction_count_tests {
+    use super::list_instruction_count;
+    use serde_json::json;
+
+    #[test]
+    fn reads_finder_count() {
+        assert_eq!(list_instruction_count(&json!({"listAt": 22885000, "count": 32})), 32);
+        assert_eq!(list_instruction_count(&json!({"count": 32.0})), 32);
+    }
+
+    #[test]
+    fn missing_or_zero_count_is_one() {
+        assert_eq!(list_instruction_count(&json!({"listAt": 5})), 1);
+        assert_eq!(list_instruction_count(&json!({"count": 0})), 1);
+        assert_eq!(list_instruction_count(&json!({"count": "32"})), 1);
     }
 }

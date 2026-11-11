@@ -548,6 +548,8 @@ fn execute_command(action: &str, args: Option<&Value>, deps: &BackendDeps) -> (b
                     duration_hours: 24,
                     item_slot,
                     item_id: None,
+                    // manual price is for ONE item
+                    priced_count: 1,
                 },
                 CommandPriority::Normal,
                 false,
