@@ -21,6 +21,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use super::handlers::BotEventHandlers;
+use super::sign_text;
 use super::vanilla_stack;
 use crate::state::CommandQueue;
 use crate::types::{BotState, QueuedCommand};
@@ -3751,6 +3752,16 @@ async fn event_handler(bot: Client, event: Event, state: BotClientState) -> Resu
                     }
                 }
 
+                // Sign prompts are client-side signs: BlockUpdate places the sign,
+                // BlockEntityData fills its text, OpenSignEditor opens it. Track
+                // the text so the reply echoes the pre-filled lines like vanilla.
+                ClientboundGamePacket::BlockUpdate(pkt) => {
+                    sign_text::on_block_update(pkt.pos);
+                }
+                ClientboundGamePacket::BlockEntityData(pkt) => {
+                    sign_text::on_block_entity_data(pkt.pos, &pkt.tag);
+                }
+
                 ClientboundGamePacket::OpenSignEditor(pkt) => {
                     // Hypixel sends this when the bot clicks "Custom Amount", "Custom Price"
                     // (bazaar), slot 31 (auction price), or slot 16 in "Auction Duration".
@@ -3791,20 +3802,11 @@ async fn event_handler(bot: Client, event: Event, state: BotClientState) -> Resu
                             }
                         };
 
-                        // Sign format exactly matching TypeScript bazaarFlipHandler.ts:
-                        // text1: the value (price or amount as plain string)
-                        // text2: "^^^^^^^^^^^^^^^" hint arrows (from JSON extra["^^^^^^^^^^^^^^^"])
-                        // text3, text4: empty
-                        let packet = ServerboundSignUpdate {
-                            pos,
-                            slot,
-                            lines: [
-                                text_to_write,
-                                "^^^^^^^^^^^^^^^".to_string(),
-                                String::new(),
-                                String::new(),
-                            ],
-                        };
+                        // Line 1 is the typed value, lines 2-4 echo what Hypixel
+                        // pre-filled, exactly what vanilla's SignEditScreen sends.
+                        let lines = sign_text::update_lines(pos, slot, text_to_write);
+                        info!("[Bazaar] Sign lines sent: {:?}", lines);
+                        let packet = ServerboundSignUpdate { pos, slot, lines };
                         bot.write_packet(packet);
                     } else if bot_state == BotState::Selling {
                         // Auction sign handler — matches TypeScript's setAuctionDuration and
@@ -3838,11 +3840,11 @@ async fn event_handler(bot: Client, event: Event, state: BotClientState) -> Resu
                         };
 
                         *state.auction_step.write() = next_step;
-                        let packet = ServerboundSignUpdate {
-                            pos,
-                            slot,
-                            lines: [text_to_write, String::new(), String::new(), String::new()],
-                        };
+                        // Line 1 is the typed value, lines 2-4 echo what Hypixel
+                        // pre-filled, exactly what vanilla's SignEditScreen sends.
+                        let lines = sign_text::update_lines(pos, slot, text_to_write);
+                        info!("[Auction] Sign lines sent: {:?}", lines);
+                        let packet = ServerboundSignUpdate { pos, slot, lines };
                         bot.write_packet(packet);
                     }
                 }
