@@ -1,0 +1,47 @@
+name: Vanilla oracle
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+    paths:
+      - 'tools/vanilla-oracle/**'
+      - '.github/workflows/vanilla-oracle.yml'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'tools/vanilla-oracle/**'
+      - '.github/workflows/vanilla-oracle.yml'
+
+jobs:
+  selftest:
+    name: Oracle self-test (Mojang 26.3 client code)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install Java 25
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '25'
+
+      - name: Cache Mojang jars and libraries
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/baf-vanilla-oracle
+          key: vanilla-oracle-26.3-${{ hashFiles('tools/vanilla-oracle/run.sh') }}
+
+      - name: Run self-test
+        run: tools/vanilla-oracle/run.sh --selftest "$RUNNER_TEMP/oracle-selftest.bin"
+
+      - name: Upload synthetic dump
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: oracle-selftest
+          path: ${{ runner.temp }}/oracle-selftest.bin
+          if-no-files-found: ignore

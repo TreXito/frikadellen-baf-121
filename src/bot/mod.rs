@@ -1,5 +1,6 @@
 mod client;
 mod handlers;
+pub mod packet_dump;
 mod resource_packs;
 mod sign_text;
 mod vanilla_stack;
