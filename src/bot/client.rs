@@ -105,8 +105,30 @@ const SKYBLOCK_JOIN_TIMEOUT_SECS: u64 = 45;
 /// TypeScript waits to check for "Deal!" or "Warning!" messages before accepting
 const TRADE_RESPONSE_DELAY_MS: u64 = 3400;
 const STARTUP_ENTRY_TIMEOUT_SECS: u64 = 60;
-/// Interval for safety retry clicks in the Confirm Purchase window (milliseconds).
-const CONFIRM_PURCHASE_RETRY_MS: u64 = 50;
+/// Ceiling on how long to wait for Hypixel to close the Confirm Purchase window
+/// after the one confirm click (milliseconds). Measured 2026-11-13 on 96 buys:
+/// the server closes it 45-114 ms after it opens (p50 60 ms), so this only
+/// matters for a stuck window.
+const CONFIRM_PURCHASE_SETTLE_MS: u64 = 1500;
+/// When a skip pre-click went out and the Confirm Purchase window is still open
+/// this long after it opened, the pre-click was dropped and the handler sends
+/// its one reactive click. Kept well above the slowest measured server close
+/// (114 ms) so a pre-click that landed is never doubled.
+const CONFIRM_PRECLICK_MISS_MS: u64 = 250;
+/// Poll interval while waiting for the server to close the confirm window.
+const CONFIRM_POLL_MS: u64 = 5;
+
+/// The container id Hypixel will give the next window. Hypixel numbers
+/// containers 1..=100 and wraps 100 -> 1 (measured on 79 bot logs, 37 of 37
+/// wraps), so predicting `id + 1` up to 255 sends a click for container 101,
+/// which never exists.
+fn next_container_id(window_id: u8) -> u8 {
+    if window_id >= 100 {
+        1
+    } else {
+        window_id + 1
+    }
+}
 /// Brief delay after closing a stale window so Hypixel processes the
 /// container-close packet before the next command is sent.
 const WINDOW_CLOSE_DELAY_MS: u64 = 150;
@@ -4194,6 +4216,16 @@ async fn execute_command(bot: &Client, command: &QueuedCommand, state: &BotClien
                         return;
                     }
 
+                    // Claim the buy click BEFORE sending it. The Event::Packet
+                    // fallback runs concurrently and checks this same flag; the old
+                    // code only set it after both clicks went out, so the fallback
+                    // often fired too and the buy click and the skip pre-click were
+                    // each sent twice (110 of 195 confirm windows on one account).
+                    if fast_state.fast_buy_clicked.swap(true, Ordering::AcqRel) {
+                        debug!("[AH] Fast-path: fallback already sent the buy click");
+                        return;
+                    }
+
                     // gold_nugget confirmed — slot 31 is the real, server-sent
                     // buy button, so clicking it now is clicking something that
                     // is actually there.  Click immediately (event-driven: we
@@ -4214,7 +4246,7 @@ async fn execute_command(bot: &Client, command: &QueuedCommand, state: &BotClien
                         // so the buy click deterministically opens the confirm window;
                         // if it isn't open in time the Confirm Purchase handler clicks
                         // when it actually opens.
-                        let next_wid = if window_id == 255 { 1u8 } else { window_id + 1 };
+                        let next_wid = next_container_id(window_id);
                         info!("[AH] Fast-path skip: pre-clicking confirm slot 11 on window {} (same burst)", next_wid);
                         // Only claim the pre-click happened if the spacing floor let it
                         // out; otherwise the Confirm Purchase handler must click itself.
@@ -4225,10 +4257,6 @@ async fn execute_command(bot: &Client, command: &QueuedCommand, state: &BotClien
                     } else {
                         info!("[AH] Fast-path: gold_nugget confirmed — buy click sent");
                     }
-
-                    // Signal that the fast path handled the buy click so the
-                    // Event::Packet handler doesn't send a duplicate click.
-                    fast_state.fast_buy_clicked.store(true, Ordering::Relaxed);
                 });
             }
         }
@@ -4894,11 +4922,11 @@ async fn handle_window_interaction(
                     }
                 } else if slot_31_kind.contains("gold_nugget") {
                     // ---- Buyable auction (SAFE: gold_nugget confirmed) ----
-                    // Check if the fast-path purchase task (spawned in
-                    // execute_command, triggered by ECS observer) already sent
-                    // the buy-click and skip-click.  If so, skip to avoid
-                    // duplicate clicks.
-                    if state.fast_buy_clicked.load(Ordering::Relaxed) {
+                    // Claim the buy click atomically. The fast-path task (spawned
+                    // in execute_command, triggered by the ECS observer) claims the
+                    // same flag before it clicks, so exactly one of the two paths
+                    // sends the buy click and the skip pre-click.
+                    if state.fast_buy_clicked.swap(true, Ordering::AcqRel) {
                         info!(
                             "[AH] Fast-path already sent buy click — skipping Event::Packet click"
                         );
@@ -4921,7 +4949,7 @@ async fn handle_window_interaction(
                             // click opens the confirm window). Lands an RTT early when
                             // the server opens the window in time; otherwise the
                             // Confirm Purchase handler clicks on window-open.
-                            let next_wid = if window_id == 255 { 1u8 } else { window_id + 1 };
+                            let next_wid = next_container_id(window_id);
                             info!("[AH] Skip: pre-clicking confirm slot 11 on window {} (same burst, fallback)", next_wid);
                             let pre_clicked = send_raw_click(bot, next_wid, 11);
                             state.skip_click_sent.store(pre_clicked, Ordering::Relaxed);
@@ -4981,46 +5009,46 @@ async fn handle_window_interaction(
                         t0.elapsed().as_secs_f64() * 1000.0
                     );
                 }
-                // CRITICAL: every confirm click reserves the coins in escrow, so a
-                // duplicate click on an already-bought/expired auction churns escrow
-                // (put → AUCTION_EXPIRED → refund). To avoid that:
-                //  * If a `skip` pre-click was already sent for this window, DON'T
-                //    click reactively now — that would race the pre-click and double
-                //    up. Instead wait one retry interval (~one RTT) so the pre-click's
-                //    outcome settles; the bounded retry below only fires if the window
-                //    is *still* open (i.e. the pre-click missed).
-                //  * Cap the retries so a contested/stuck Confirm Purchase window
-                //    can't churn escrow indefinitely.
+                // CRITICAL: exactly ONE confirm click per purchase. Every confirm
+                // click that reaches Hypixel runs an escrow transaction, and a
+                // second click on an auction we already bought runs another one
+                // that fails with AUCTION_EXPIRED_OR_NOT_FOUND and refunds. The old
+                // handler re-clicked every 50 ms while the window was still open,
+                // but Hypixel takes 45-114 ms to close it after a buy, so the retry
+                // almost always fired after the purchase had gone through: 180 of
+                // 195 confirm windows on juvenilemilky286 got 2+ confirm clicks and
+                // each buy ran 1.3-2.1 escrow transactions. Repeated escrow hits on
+                // one auction by one player are server-side economy data that no
+                // vanilla client produces. So: one click, then wait for the server
+                // to close the window.
                 let skip_was_sent = state.skip_click_sent.swap(false, Ordering::Relaxed);
                 if !skip_was_sent {
                     send_raw_click(bot, window_id, 11);
                 }
 
-                tokio::time::sleep(tokio::time::Duration::from_millis(
-                    CONFIRM_PURCHASE_RETRY_MS,
-                ))
-                .await;
-
-                // Bounded safety retry: only while the window is still the Confirm
-                // Purchase window (a successful or expired purchase closes it).
-                const MAX_CONFIRM_RETRIES: u32 = 3;
-                let mut retries = 0u32;
-                while retries < MAX_CONFIRM_RETRIES
-                    && state
-                        .handlers
-                        .current_window_title()
-                        .as_deref()
-                        .map(|t| t.contains("Confirm Purchase"))
-                        .unwrap_or(false)
+                let opened_at = tokio::time::Instant::now();
+                let settle_deadline =
+                    opened_at + tokio::time::Duration::from_millis(CONFIRM_PURCHASE_SETTLE_MS);
+                let preclick_miss_at =
+                    opened_at + tokio::time::Duration::from_millis(CONFIRM_PRECLICK_MISS_MS);
+                let mut reactive_click_sent = !skip_was_sent;
+                while state.handlers.current_window_id() == Some(window_id)
+                    && tokio::time::Instant::now() < settle_deadline
                 {
-                    send_raw_click(bot, window_id, 11);
-                    retries += 1;
-                    tokio::time::sleep(tokio::time::Duration::from_millis(
-                        CONFIRM_PURCHASE_RETRY_MS,
-                    ))
-                    .await;
+                    if !reactive_click_sent && tokio::time::Instant::now() >= preclick_miss_at {
+                        // The pre-click never landed (the server would have closed
+                        // the window by now). Send the one reactive click.
+                        warn!(
+                            "[AH] Skip pre-click did not land within {}ms — sending the one confirm click",
+                            CONFIRM_PRECLICK_MISS_MS
+                        );
+                        send_raw_click(bot, window_id, 11);
+                        reactive_click_sent = true;
+                    }
+                    tokio::time::sleep(tokio::time::Duration::from_millis(CONFIRM_POLL_MS)).await;
                 }
 
+                // No-op when the server already closed it (send_raw_close checks).
                 send_raw_close(bot, window_id, &state.handlers);
                 *state.bot_state.write() = BotState::Idle;
             }
@@ -9645,6 +9673,16 @@ mod tests {
         assert!(!super::stack_price_mismatch(1, 1));
         // missing/zero priced count is treated as 1
         assert!(!super::stack_price_mismatch(1, 0));
+    }
+
+    #[test]
+    fn next_container_id_wraps_at_100_like_hypixel() {
+        assert_eq!(super::next_container_id(1), 2);
+        assert_eq!(super::next_container_id(99), 100);
+        // Hypixel wraps 100 -> 1; 101 never exists.
+        assert_eq!(super::next_container_id(100), 1);
+        // Defensive: anything above 100 also restarts at 1.
+        assert_eq!(super::next_container_id(255), 1);
     }
     use super::*;
     use azalea::registry::builtin::ItemKind;
