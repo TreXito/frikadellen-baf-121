@@ -21,6 +21,7 @@ use tokio::sync::mpsc;
 use tracing::{debug, error, info, warn};
 
 use super::handlers::BotEventHandlers;
+use super::vanilla_stack;
 use crate::state::CommandQueue;
 use crate::types::{BotState, QueuedCommand};
 use crate::websocket::CoflWebSocket;
@@ -8559,12 +8560,13 @@ fn click_gate(window_id: u8, slot: i16) -> bool {
     let total = CLICKS_SENT.fetch_add(1, Ordering::Relaxed) + 1;
     if total.is_multiple_of(50) {
         info!(
-            "Click fingerprint: {} sent, {} under 50ms apart, {} suppressed (floor {}ms{})",
+            "Click fingerprint: {} sent, {} under 50ms apart, {} suppressed (floor {}ms{}), {} item hashes normalized to vanilla",
             total,
             CLICKS_UNDER_TICK.load(Ordering::Relaxed),
             CLICKS_SUPPRESSED.load(Ordering::Relaxed),
             floor,
-            if floor == 0 { ", disabled" } else { "" }
+            if floor == 0 { ", disabled" } else { "" },
+            vanilla_stack::stacks_normalized()
         );
     }
     true
@@ -8584,6 +8586,10 @@ fn click_gate(window_id: u8, slot: i16) -> bool {
 /// the server cancels the move and resyncs, which is what a human produces.
 /// Sending `state_id: 0` with an empty `changed_slots` map on every click of
 /// every session is a packet no Minecraft client can emit.
+///
+/// Item hashes go through [`vanilla_stack::hashed_stack`], not azalea's
+/// `HashedStack::from_item_stack`: vanilla hashes the patch after dropping
+/// entries equal to the item's defaults, azalea hashes the raw wire patch.
 ///
 /// Returns `true` when the click went out. `false` only when an opt-in spacing
 /// floor (`BAF_CLICK_GAP_MS`, off by default) suppressed it.
@@ -8629,14 +8635,14 @@ fn send_raw_click(bot: &Client, window_id: u8, slot: i16) -> bool {
                 changed_slots: if pickup {
                     [(
                         slot as u16,
-                        HashedStack::from_item_stack(&ItemStack::Empty, reg),
+                        vanilla_stack::hashed_stack(&ItemStack::Empty, reg),
                     )]
                     .into_iter()
                     .collect()
                 } else {
                     Default::default()
                 },
-                carried_item: HashedStack::from_item_stack(
+                carried_item: vanilla_stack::hashed_stack(
                     if pickup { &clicked } else { &carried },
                     reg,
                 ),
@@ -8840,14 +8846,14 @@ fn send_raw_shift_click(bot: &Client, window_id: u8, slot: i16) {
                 changed_slots: if moved {
                     [(
                         slot as u16,
-                        HashedStack::from_item_stack(&ItemStack::Empty, reg),
+                        vanilla_stack::hashed_stack(&ItemStack::Empty, reg),
                     )]
                     .into_iter()
                     .collect()
                 } else {
                     Default::default()
                 },
-                carried_item: HashedStack::from_item_stack(&carried, reg),
+                carried_item: vanilla_stack::hashed_stack(&carried, reg),
             }
         }) {
             Ok(packet) => packet,
@@ -9277,9 +9283,7 @@ async fn click_window_slot_carrying(
         );
         return;
     }
-    use azalea_protocol::packets::game::s_container_click::{
-        HashedStack, ServerboundContainerClick,
-    };
+    use azalea_protocol::packets::game::s_container_click::ServerboundContainerClick;
     if !click_gate(window_id, slot) {
         return;
     }
@@ -9292,7 +9296,7 @@ async fn click_window_slot_carrying(
             .unwrap_or(0)
     };
     let carried_item = match bot
-        .with_registry_holder(|reg| HashedStack::from_item_stack(carried, reg))
+        .with_registry_holder(|reg| vanilla_stack::hashed_stack(carried, reg))
     {
         Ok(item) => item,
         Err(error) => {
