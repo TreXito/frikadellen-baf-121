@@ -247,19 +247,21 @@ mod tests {
     #[test]
     fn glint_override_is_stripped_only_where_the_item_already_glints() {
         let glint = || Some(EnchantmentGlintOverride { show_glint: true }.into());
-        let book = vanilla_patch(&stack(
+        let book_stack = stack(
             ItemKind::EnchantedBook,
             vec![(DataComponentKind::EnchantmentGlintOverride, glint())],
-        ));
+        );
+        let book = vanilla_patch(&book_stack);
         assert_eq!(
             book.stripped,
             vec![DataComponentKind::EnchantmentGlintOverride]
         );
 
-        let diamond = vanilla_patch(&stack(
+        let diamond_stack = stack(
             ItemKind::Diamond,
             vec![(DataComponentKind::EnchantmentGlintOverride, glint())],
-        ));
+        );
+        let diamond = vanilla_patch(&diamond_stack);
         assert!(diamond.stripped.is_empty());
         assert_eq!(
             kinds(&diamond).0,
