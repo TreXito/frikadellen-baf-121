@@ -5,7 +5,7 @@ use std::{
     io::Cursor,
     mem,
     sync::{
-        Arc, LazyLock,
+        Arc, LazyLock, OnceLock,
         atomic::{self, AtomicBool},
     },
 };
@@ -35,6 +35,18 @@ use super::packet::{
     config::ReceiveConfigPacketEvent, game::ReceiveGamePacketEvent, login::ReceiveLoginPacketEvent,
 };
 use crate::packet::{config, game, login};
+
+/// Observer for raw packets, for offline protocol analysis.
+///
+/// Called with `(inbound, state, packet name, raw packet)`. `raw packet` is the
+/// uncompressed, decrypted frame body: the VarInt packet id followed by the
+/// packet fields, exactly as a vanilla client's codec sees it. Inbound game and
+/// configuration packets report their protocol state; outbound packets report
+/// `None`. Unset by default, so it costs one atomic load per packet.
+pub type PacketTap = fn(bool, Option<ConnectionProtocol>, &'static str, &[u8]);
+
+/// Set once by the embedding application to receive every [`PacketTap`] call.
+pub static PACKET_TAP: OnceLock<PacketTap> = OnceLock::new();
 
 pub struct ConnectionPlugin;
 impl Plugin for ConnectionPlugin {
@@ -300,6 +312,9 @@ pub fn handle_raw_packet(
         ConnectionProtocol::Game => {
             let packet = Arc::new(deserialize_packet::<ClientboundGamePacket>(stream)?);
             trace!("Packet: {packet:?}");
+            if let Some(tap) = PACKET_TAP.get() {
+                tap(true, Some(state), packet.name(), raw_packet);
+            }
             game::process_packet(ecs, entity, packet.as_ref());
             queued_packet_events
                 .game
@@ -319,6 +334,9 @@ pub fn handle_raw_packet(
         ConnectionProtocol::Configuration => {
             let packet = Arc::new(deserialize_packet::<ClientboundConfigPacket>(stream)?);
             trace!("Packet: {packet:?}");
+            if let Some(tap) = PACKET_TAP.get() {
+                tap(true, Some(state), packet.name(), raw_packet);
+            }
             config::process_packet(ecs, entity, &packet);
             queued_packet_events
                 .config
@@ -348,6 +366,9 @@ impl NetworkConnection {
     ) -> Result<(), WritePacketError> {
         let packet = packet.into_variant();
         let raw_packet = serialize_packet(&packet)?;
+        if let Some(tap) = PACKET_TAP.get() {
+            tap(false, None, packet.name(), &raw_packet);
+        }
         self.write_raw(&raw_packet)?;
 
         Ok(())

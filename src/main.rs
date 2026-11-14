@@ -1082,6 +1082,9 @@ async fn main() -> Result<()> {
     print_startup_banner();
     info!("Starting Frikadellen BAF v{}", VERSION);
 
+    // Opt-in packet recording for the vanilla-client oracle (tools/vanilla-oracle).
+    frikadellen_baf::bot::packet_dump::init_from_env();
+
     // Check for outdated version (non-loader users).
     // Runs synchronously before the main loop so the warning appears at the very top of the log.
     check_version_outdated().await;
