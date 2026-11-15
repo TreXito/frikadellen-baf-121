@@ -1,7 +1,6 @@
 use anyhow::{anyhow, Result};
 use azalea::app::PluginGroup;
 use azalea::prelude::*;
-use azalea::ClientInformation;
 use azalea_client::client_chat::ChatPacket;
 use azalea_client::inventory::{MenuOpenedEvent, SetContainerContentEvent};
 use azalea_inventory::operations::ClickType;
@@ -2244,13 +2243,31 @@ fn contains_word_ended(text: &str) -> bool {
 }
 
 /// Returns true if the item is a claimable (sold/ended/expired) auction slot.
-/// Matches TypeScript ingameMessageHandler claimableIndicators / activeIndicators.
 fn is_claimable_auction_slot(item: &azalea_inventory::ItemStack) -> bool {
-    let lore = get_item_lore_from_slot(item);
+    is_claimable_auction_lore(&get_item_lore_from_slot(item))
+}
+
+/// Claimable-auction check on plain lore lines.
+///
+/// A finished auction's `Status:` line decides: a BIN keeps its
+/// "Buy it now: N coins" line after it sold or expired ("Status: Sold!",
+/// "Status: Expired!"), so the active-auction indicators below must not veto
+/// it. They did, and expired or sold BINs were never claimed. Without a status
+/// line this matches TypeScript ingameMessageHandler claimableIndicators /
+/// activeIndicators.
+fn is_claimable_auction_lore(lore: &[String]) -> bool {
     if lore.is_empty() {
         return false;
     }
     let combined = lore.join("\n").to_lowercase();
+    let finished_status = combined.lines().any(|line| {
+        line.trim().strip_prefix("status:").is_some_and(|status| {
+            status.contains("sold") || status.contains("expired") || contains_word_ended(status)
+        })
+    });
+    if finished_status {
+        return true;
+    }
     // Must have at least one claimable indicator (from TypeScript claimableIndicators)
     let has_claimable = combined.contains("sold!")
         || contains_word_ended(&combined)
@@ -2663,20 +2680,10 @@ async fn event_handler(bot: Client, event: Event, state: BotClientState) -> Resu
         Event::Login => {
             info!("Bot logged in successfully");
 
-            // Announce game options that a real player actually has.
-            //
-            // azalea's `ClientInformation` defaults are not vanilla's:
-            // `allows_listing` ships as `false`, while vanilla's "Allow Server
-            // Listings" option is ON by default, so every unconfigured azalea bot
-            // tells the server it is one of the essentially-nobody who turned
-            // that off. Sent as a normal option update, which players do.
-            if let Err(error) = bot.set_client_information(ClientInformation {
-                allows_listing: true,
-                view_distance: 12,
-                ..Default::default()
-            }) {
-                debug!("Could not send client information during login: {error}");
-            }
+            // No client_information here. The configuration phase already sent
+            // vanilla's options (`plugins/join.rs`), and a vanilla client only
+            // sends it again from `Options.save()` when a value changed, so a
+            // resend right after login is a packet no vanilla client sends.
 
             if state.event_tx.send(BotEvent::Login).is_err() {
                 debug!("Failed to send Login event - receiver dropped");
@@ -9658,6 +9665,60 @@ fn extract_viewauction_uuid(msg: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+
+    fn lore_lines(lines: &[&str]) -> Vec<String> {
+        lines.iter().map(|line| line.to_string()).collect()
+    }
+
+    #[test]
+    fn expired_bin_is_claimable() {
+        // live Manage Auctions lore, 2026-11-14
+        assert!(super::is_claimable_auction_lore(&lore_lines(&[
+            "Seller: thomsonkills",
+            "Buy it now: 9,900,250 coins",
+            "",
+            "This is your own auction!",
+            "",
+            "Status: Expired!",
+            "",
+            "Click to inspect!",
+        ])));
+    }
+
+    #[test]
+    fn sold_bin_is_claimable() {
+        assert!(super::is_claimable_auction_lore(&lore_lines(&[
+            "Seller: thomsonkills",
+            "Buyer: someone",
+            "Buy it now: 1,250,000 coins",
+            "",
+            "Status: Sold!",
+            "Click to inspect!",
+        ])));
+    }
+
+    #[test]
+    fn active_bin_is_not_claimable() {
+        assert!(!super::is_claimable_auction_lore(&lore_lines(&[
+            "Seller: thomsonkills",
+            "Buy it now: 9,900,250 coins",
+            "",
+            "Ends in: 13h 59m",
+            "",
+            "Click to inspect!",
+        ])));
+        assert!(!super::is_claimable_auction_lore(&[]));
+    }
+
+    #[test]
+    fn ended_auction_without_status_line_is_claimable() {
+        assert!(super::is_claimable_auction_lore(&lore_lines(&[
+            "Seller: thomsonkills",
+            "Highest bid: 500,000 coins",
+            "Auction ended!",
+            "Click to claim!",
+        ])));
+    }
 
     #[test]
     fn stack_priced_for_whole_stack_lists() {

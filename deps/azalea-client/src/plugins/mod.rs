@@ -14,6 +14,7 @@ pub mod disconnect;
 pub mod interact;
 pub mod inventory;
 pub mod join;
+pub mod known_packs;
 pub mod loading;
 pub mod login;
 pub mod mining;
