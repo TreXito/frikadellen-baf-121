@@ -55,6 +55,7 @@ per category. A summary with counts per category ends the report.
 | `OUT_OF_RANGE` | slot outside the menu; vanilla throws before sending |
 | `ORDER` | same content, changed-slot entries in a different order than vanilla |
 | `BYTES` | other byte difference |
+| `COMPONENT_ORDER` | same packet, but an item's component hashes are in another order. Not a difference: vanilla collects them in an `IdentityHashMap`, so its order changes from one client JVM to the next, and the server decodes them into a map |
 | `DECODE` | vanilla cannot decode the packet, or it has trailing bytes |
 | `UNSIMULATED` | click the oracle does not simulate (player inventory shift-click, some special slots); item hashes are still checked |
 | `LOGIN` | login or configuration packet that differs from vanilla: brand, known packs reply, a client_information resend vanilla would never send |

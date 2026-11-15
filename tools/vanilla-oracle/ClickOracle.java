@@ -175,6 +175,7 @@ public final class ClickOracle {
         OUT_OF_RANGE("slot outside the menu; vanilla crashes before sending"),
         ORDER("same content, changed-slot entries in a different order than vanilla"),
         BYTES("decodes the same but the bytes differ from vanilla's encoding"),
+        COMPONENT_ORDER("same packet, an item's component hashes in another order; vanilla's order is IdentityHashMap order and differs between client JVMs, so this is not a difference"),
         DECODE("vanilla's codec rejects the packet"),
         UNSIMULATED("click type not simulated; item hashes still checked"),
         LOGIN("login/configuration packet differs from vanilla");
@@ -183,6 +184,11 @@ public final class ClickOracle {
 
         Cat(String meaning) {
             this.meaning = meaning;
+        }
+
+        /** Not a difference a server could see: vanilla clients vary here themselves. */
+        boolean clean() {
+            return this == OK || this == COMPONENT_ORDER;
         }
     }
 
@@ -203,7 +209,10 @@ public final class ClickOracle {
         }
 
         boolean ok() {
-            return lines.isEmpty() || (lines.size() == 1 && lines.containsKey(Cat.OK));
+            for (Cat c : lines.keySet()) {
+                if (!c.clean()) return false;
+            }
+            return true;
         }
     }
 
@@ -854,6 +863,11 @@ public final class ClickOracle {
                 List<Integer> vanillaOrder = new ArrayList<>(changed.keySet());
                 if (botOrder != null && !botOrder.equals(vanillaOrder) && new HashSet<>(botOrder).equals(new HashSet<>(vanillaOrder))) {
                     f.add(Cat.ORDER, "bot " + botOrder + ", vanilla (Int2ObjectOpenHashMap) " + vanillaOrder);
+                } else if (p.equals(vanilla)) {
+                    // HashedPatchMap.create collects the component hashes in an IdentityHashMap,
+                    // so vanilla's order follows the identity hash codes of the running JVM. The
+                    // server decodes them into a HashMap and never sees an order.
+                    f.add(Cat.COMPONENT_ORDER, "");
                 } else {
                     f.add(Cat.BYTES, "bot " + hex(r.raw) + "\n          vanilla " + hex(vanillaBytes));
                 }
@@ -1215,8 +1229,8 @@ public final class ClickOracle {
         for (Cat c : Cat.values()) {
             int n = counts.getOrDefault(c, 0);
             if (n == 0) continue;
-            if (c != Cat.OK) bad += n;
-            System.out.printf("   %-12s %6d  %s%n", c, n, c.meaning);
+            if (!c.clean()) bad += n;
+            System.out.printf("   %-16s %6d  %s%n", c, n, c.meaning);
         }
         System.out.println(bad == 0 ? "   every checked packet is what vanilla 26.3 sends" : "   see the lines above for each difference");
     }
@@ -1610,6 +1624,16 @@ public final class ClickOracle {
             HashedStack badBoots = new HashedStack.ActualItem(good.item(), good.count(), new HashedPatchMap(added, good.components().removedComponents()));
             add(OUT, "container_click", click(win, state, 12, 0, ContainerInput.PICKUP, map(12, HashedStack.EMPTY), badBoots));
             expect(Cat.HASH);
+            state = restore(win, state, slots);
+
+            // E2. the right hashes in another order: another JVM's IdentityHashMap order
+            List<DataComponentType<?>> componentOrder = new ArrayList<>(good.components().addedComponents().keySet());
+            java.util.Collections.reverse(componentOrder);
+            Map<DataComponentType<?>, Integer> reordered = new LinkedHashMap<>();
+            for (DataComponentType<?> type : componentOrder) reordered.put(type, good.components().addedComponents().get(type));
+            HashedStack reorderedBoots = new HashedStack.ActualItem(good.item(), good.count(), new HashedPatchMap(reordered, good.components().removedComponents()));
+            add(OUT, "container_click", click(win, state, 12, 0, ContainerInput.PICKUP, map(12, HashedStack.EMPTY), reorderedBoots));
+            expect(Cat.COMPONENT_ORDER);
             state = restore(win, state, slots);
 
             // F. right click takes half of the carrots

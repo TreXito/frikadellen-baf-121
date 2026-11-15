@@ -5957,21 +5957,13 @@ async fn handle_window_interaction(
                                 return;
                             }
                             info!("[Auction] Co-op AH: clicking item at slot {}", i);
-                            let item_to_carry = slots[i].clone();
                             tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
                             click_window_slot(bot, &state.last_window_id, window_id, i as i16)
                                 .await;
                             tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
                             info!("[Auction] Co-op AH: clicking slot 31 (price setter)");
                             *state.auction_step.write() = AuctionStep::PriceSign;
-                            click_window_slot_carrying(
-                                bot,
-                                &state.last_window_id,
-                                window_id,
-                                31,
-                                &item_to_carry,
-                            )
-                            .await;
+                            click_window_slot(bot, &state.last_window_id, window_id, 31).await;
                         } else {
                             warn!(
                                 "[Auction] Co-op AH: item \"{}\" not found, going idle",
@@ -6043,7 +6035,6 @@ async fn handle_window_interaction(
                                 "[Auction] ClickCreate→SelectBIN: clicking item at slot {}",
                                 i
                             );
-                            let item_to_carry = slots[i].clone();
                             tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
                             click_window_slot(bot, &state.last_window_id, window_id, i as i16)
                                 .await;
@@ -6052,14 +6043,7 @@ async fn handle_window_interaction(
                                 "[Auction] ClickCreate→SelectBIN: clicking slot 31 (price setter)"
                             );
                             *state.auction_step.write() = AuctionStep::PriceSign;
-                            click_window_slot_carrying(
-                                bot,
-                                &state.last_window_id,
-                                window_id,
-                                31,
-                                &item_to_carry,
-                            )
-                            .await;
+                            click_window_slot(bot, &state.last_window_id, window_id, 31).await;
                         } else {
                             warn!("[Auction] ClickCreate→SelectBIN: item \"{}\" not found, going idle", item_name);
                             send_raw_close(bot, window_id, &state.handlers);
@@ -6132,7 +6116,6 @@ async fn handle_window_interaction(
                                 return;
                             }
                             info!("[Auction] Clicking item at slot {}", i);
-                            let item_to_carry = slots[i].clone();
                             tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
                             click_window_slot(bot, &state.last_window_id, window_id, i as i16)
                                 .await;
@@ -6140,14 +6123,7 @@ async fn handle_window_interaction(
                             tokio::time::sleep(tokio::time::Duration::from_millis(300)).await;
                             info!("[Auction] Clicking slot 31 (price setter)");
                             *state.auction_step.write() = AuctionStep::PriceSign;
-                            click_window_slot_carrying(
-                                bot,
-                                &state.last_window_id,
-                                window_id,
-                                31,
-                                &item_to_carry,
-                            )
-                            .await;
+                            click_window_slot(bot, &state.last_window_id, window_id, 31).await;
                         } else {
                             warn!("[Auction] Item \"{}\" not found in Create BIN Auction window, going idle", item_name);
                             send_raw_close(bot, window_id, &state.handlers);
@@ -8389,6 +8365,13 @@ fn count_empty_player_slots(bot: &Client) -> usize {
 /// queued the click *behind* an `apply_deferred` boundary, while
 /// `send_raw_close` wrote directly to TCP — causing the close to reach the
 /// server before the click, silently discarding Claim All / Collect actions.
+///
+/// The cursor and slot in the prediction always come from the live, server
+/// confirmed inventory. Never pass in an item the bot believes it holds: in
+/// Create BIN Auction, Hypixel moves the clicked item into slot 13 and clears
+/// the cursor before the price setter is clicked, and the old "carrying" click
+/// reported that item as carried on every listing, which no vanilla client
+/// can send.
 async fn click_window_slot(
     bot: &Client,
     last_window_id: &Arc<RwLock<u8>>,
@@ -9296,77 +9279,6 @@ async fn clear_auction_preview_slot(
         click_window_slot(bot, &state.last_window_id, window_id, 13).await;
         tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
     }
-}
-
-/// Click a window slot while reporting the item currently on the cursor.
-/// Used when the cursor already holds an item from a previous pick-up click,
-/// so the server receives the correct `carried_item` and processes the interaction
-/// (e.g. placing the item in the auction item-slot to trigger the price sign).
-///
-/// Uses raw TCP (matching `click_window_slot` and `send_raw_close`) so that
-/// click → close ordering is preserved on the wire.
-async fn click_window_slot_carrying(
-    bot: &Client,
-    last_window_id: &Arc<RwLock<u8>>,
-    window_id: u8,
-    slot: i16,
-    carried: &azalea_inventory::ItemStack,
-) {
-    // Same stale-window guard as click_window_slot.
-    if window_id != 0 && *last_window_id.read() != window_id {
-        warn!(
-            "Blocked stale window click (carrying): attempted slot {} in window {} but current window is {}",
-            slot, window_id, *last_window_id.read()
-        );
-        return;
-    }
-    use azalea_protocol::packets::game::s_container_click::ServerboundContainerClick;
-    if !click_gate(window_id, slot) {
-        return;
-    }
-
-    let state_id = if *LEGACY_CLICK_SHAPE {
-        0
-    } else {
-        live_container_state(bot, slot)
-            .map(|(id, _, _)| id)
-            .unwrap_or(0)
-    };
-    let carried_item = match bot
-        .with_registry_holder(|reg| vanilla_stack::hashed_stack(carried, reg))
-    {
-        Ok(item) => item,
-        Err(error) => {
-            error!("Cannot build carried-item click without the active registry holder: {error}");
-            return;
-        }
-    };
-
-    let packet = ServerboundContainerClick {
-        container_id: window_id as i32,
-        state_id,
-        slot_num: slot,
-        button_num: 0,
-        click_type: ClickType::Pickup,
-        changed_slots: Default::default(),
-        carried_item,
-    };
-
-    if let Err(error) = bot.with_raw_connection_mut(|mut raw_conn| {
-        if let Err(e) = raw_conn.write(packet) {
-            error!(
-                "raw click (carrying) write failed (window {} slot {}): {e}",
-                window_id, slot
-            );
-        }
-    }) {
-        error!("Cannot send carried-item click without an active connection: {error}");
-        return;
-    }
-    info!(
-        "Raw-clicked slot {} in window {} (carrying item)",
-        slot, window_id
-    );
 }
 
 /// Shared startup workflow: cancel old orders, claim sold items, then emit StartupComplete.
