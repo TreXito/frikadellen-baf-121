@@ -29,6 +29,7 @@ use crate::{
     connection::RawConnection,
     cookies::ServerCookies,
     interact::BlockStatePredictionHandler,
+    inventory::ClickPrediction,
     local_player::{Experience, Hunger, PermissionLevel, TabList, TabListResource, WorldHolder},
     mining,
     movement::LastSentLookDirection,
@@ -58,6 +59,7 @@ pub struct JoinedClientBundle {
     // note that WorldHolder isn't here because it's set slightly before we fully join the world
     pub physics_state: ClientMovementState,
     pub inventory: Inventory,
+    pub click_prediction: ClickPrediction,
     pub tab_list: TabList,
     pub block_state_prediction_handler: BlockStatePredictionHandler,
     pub queued_server_block_updates: QueuedServerBlockUpdates,
