@@ -28,6 +28,110 @@ use crate::{
 #[deprecated = "moved to `azalea_entity::inventory::Inventory`."]
 pub type Inventory = azalea_entity::inventory::Inventory;
 
+/// The click results a vanilla client is still showing for the open menu.
+///
+/// Vanilla applies a container click to its own menu before it sends the
+/// packet, and keeps that guess until the server overwrites the slot
+/// (`container_set_slot`, `container_set_content`) or the cursor
+/// (`set_cursor_item`, `container_set_content`), or a new menu replaces it.
+/// [`Inv`] holds only what the server sent. This holds the guesses on top of
+/// it, so a second click before the server answers reports what vanilla would
+/// report, and nothing else in the client sees items that have not moved.
+#[derive(Clone, Component, Debug, Default)]
+pub struct ClickPrediction {
+    /// Predicted contents of open-menu slots, by menu index, that the server
+    /// has not overwritten since.
+    pub slots: std::collections::HashMap<u16, ItemStack>,
+    /// Predicted cursor. `None` means the server's [`Inv::carried`] stands.
+    pub carried: Option<ItemStack>,
+}
+
+impl ClickPrediction {
+    /// The menu and cursor a vanilla client would show: the server's state
+    /// with the pending guesses on top.
+    pub fn view(&self, inventory: &Inv) -> Inv {
+        let mut view = inventory.clone();
+        let menu = view.menu_mut();
+        for (&slot, item) in &self.slots {
+            if let Some(slot_mut) = menu.slot_mut(slot as usize) {
+                *slot_mut = item.clone();
+            }
+        }
+        if let Some(carried) = &self.carried {
+            view.carried = carried.clone();
+        }
+        view
+    }
+
+    /// Drop every guess. `carried` is the cursor of the menu that is now
+    /// active: `Some(ItemStack::Empty)` for a menu vanilla just created,
+    /// `None` when the server's cursor is the truth again.
+    pub fn reset(&mut self, carried: Option<ItemStack>) {
+        self.slots.clear();
+        self.carried = carried;
+    }
+
+    /// The server set one slot of the open menu.
+    pub fn server_set_slot(&mut self, slot: u16) {
+        self.slots.remove(&slot);
+    }
+
+    /// The server set the cursor.
+    pub fn server_set_carried(&mut self) {
+        self.carried = None;
+    }
+
+    /// The server changed the player's own inventory, which the open menu
+    /// shows in its player section. Drop the guesses there; [`Inv`] does not
+    /// map those updates slot by slot either.
+    pub fn server_set_player_slots(&mut self, player_slots: std::ops::RangeInclusive<usize>) {
+        self.slots
+            .retain(|&slot, _| !player_slots.contains(&(slot as usize)));
+    }
+}
+
+/// What a click a vanilla client predicted puts in the packet.
+#[derive(Clone, Debug)]
+pub struct PredictedClick {
+    pub state_id: u32,
+    /// Slots whose content changed, with the content after the click, in menu
+    /// order.
+    pub changed_slots: Vec<(u16, ItemStack)>,
+    /// The cursor after the click.
+    pub carried: ItemStack,
+}
+
+/// Apply a click the way vanilla's `MultiPlayerGameMode.handleContainerInput`
+/// does before it sends the packet: simulate it on what the client currently
+/// shows (server state plus pending guesses), keep the result as the new
+/// guess, and return the changed slots and the cursor.
+pub fn predict_click(
+    inventory: &Inv,
+    prediction: &mut ClickPrediction,
+    operation: &ClickOperation,
+    player_abilities: &PlayerAbilities,
+) -> PredictedClick {
+    let mut view = prediction.view(inventory);
+    let before = view.menu().slots();
+    view.simulate_click(operation, player_abilities);
+    let after = view.menu().slots();
+
+    let mut changed_slots = Vec::new();
+    for (index, (old, new)) in before.iter().zip(after.iter()).enumerate() {
+        if old != new {
+            changed_slots.push((index as u16, new.clone()));
+            prediction.slots.insert(index as u16, new.clone());
+        }
+    }
+    prediction.carried = Some(view.carried.clone());
+
+    PredictedClick {
+        state_id: inventory.state_id,
+        changed_slots,
+        carried: view.carried,
+    }
+}
+
 pub struct InventoryPlugin;
 impl Plugin for InventoryPlugin {
     fn build(&self, app: &mut App) {
@@ -68,8 +172,15 @@ pub struct MenuOpenedEvent {
     pub menu_type: MenuKind,
     pub title: FormattedText,
 }
-fn handle_menu_opened_trigger(event: On<MenuOpenedEvent>, mut query: Query<&mut Inv>) {
-    let mut inventory = query.get_mut(event.entity).unwrap();
+fn handle_menu_opened_trigger(
+    event: On<MenuOpenedEvent>,
+    mut query: Query<(&mut Inv, Option<&mut ClickPrediction>)>,
+) {
+    let (mut inventory, prediction) = query.get_mut(event.entity).unwrap();
+    // vanilla builds a fresh menu, and a fresh menu's cursor is empty
+    if let Some(mut prediction) = prediction {
+        prediction.reset(Some(ItemStack::Empty));
+    }
     inventory.id = event.window_id;
     // a new vanilla menu starts at state id 0; the server's set_slot and
     // set_content packets move it from there
@@ -130,9 +241,13 @@ pub struct ClientsideCloseContainerEvent {
 }
 pub fn handle_client_side_close_container_trigger(
     event: On<ClientsideCloseContainerEvent>,
-    mut query: Query<&mut Inv>,
+    mut query: Query<(&mut Inv, Option<&mut ClickPrediction>)>,
 ) {
-    let mut inventory = query.get_mut(event.entity).unwrap();
+    let (mut inventory, prediction) = query.get_mut(event.entity).unwrap();
+    // vanilla switches back to the inventory menu, whose cursor is empty
+    if let Some(mut prediction) = prediction {
+        prediction.reset(Some(ItemStack::Empty));
+    }
 
     // copy the Player part of the container_menu to the inventory_menu
     if let Some(inventory_menu) = inventory.container_menu.take() {

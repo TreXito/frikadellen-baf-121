@@ -8499,6 +8499,70 @@ fn live_container_state(bot: &Client, slot: i16) -> Option<ClickState> {
     })
 }
 
+/// The changed slots and cursor a vanilla client sends for a left click on
+/// `slot` of `window_id`.
+///
+/// For the open menu this is vanilla's own prediction: the click is simulated
+/// on what the client shows, which is the server's state plus earlier clicks
+/// the server has not answered yet, and the result is remembered for the next
+/// click. So a second click on a grace-period bed before Hypixel resyncs
+/// reports the bed going back into slot 31, the way a real client does,
+/// instead of a second "slot 31 emptied, bed on the cursor".
+///
+/// A click on a window that is not open yet (the skip pre-click into Confirm
+/// Purchase) has no vanilla equivalent. It keeps the single-pickup shape built
+/// from the server's state of the open menu, and predicts nothing.
+///
+/// Returns `None` before the inventory exists (before login), which falls
+/// back to the legacy packet shape. The ECS guard is released on return, so
+/// the caller can lock the world and the connection afterwards.
+fn predicted_left_click(
+    bot: &Client,
+    window_id: u8,
+    slot: i16,
+) -> Option<azalea_client::inventory::PredictedClick> {
+    use azalea::entity::inventory::Inventory;
+    use azalea_client::inventory::{predict_click, ClickPrediction, PredictedClick};
+    use azalea_inventory::operations::{ClickOperation, PickupClick};
+    use azalea_inventory::ItemStack;
+
+    bot.query_self::<(&Inventory, Option<&mut ClickPrediction>), _>(|(inventory, prediction)| {
+        match prediction {
+            Some(mut prediction) if inventory.id == window_id as i32 => predict_click(
+                inventory,
+                &mut prediction,
+                &ClickOperation::Pickup(PickupClick::Left {
+                    slot: Some(slot as u16),
+                }),
+                &Default::default(),
+            ),
+            _ => {
+                let clicked = inventory
+                    .menu()
+                    .slots()
+                    .get(slot as usize)
+                    .cloned()
+                    .unwrap_or(ItemStack::Empty);
+                let pickup = matches!(inventory.carried, ItemStack::Empty) && clicked.is_present();
+                PredictedClick {
+                    state_id: inventory.state_id,
+                    changed_slots: if pickup {
+                        vec![(slot as u16, ItemStack::Empty)]
+                    } else {
+                        Vec::new()
+                    },
+                    carried: if pickup {
+                        clicked
+                    } else {
+                        inventory.carried.clone()
+                    },
+                }
+            }
+        }
+    })
+    .ok()
+}
+
 /// Monotonic milliseconds since process start.
 fn mono_ms() -> u64 {
     static START: Lazy<std::time::Instant> = Lazy::new(std::time::Instant::now);
@@ -8602,8 +8666,10 @@ fn click_gate(window_id: u8, slot: i16) -> bool {
 /// the `state_id` the server last sent us, the stack actually on the cursor, and
 /// the slot change a vanilla client would have predicted. A real client applies
 /// the click locally *before* sending it, so a left click on a Hypixel menu
-/// button always reports "that slot became empty and its item is on my cursor";
-/// the server cancels the move and resyncs, which is what a human produces.
+/// button reports "that slot became empty and its item is on my cursor"; the
+/// server cancels the move and resyncs, which is what a human produces. Until
+/// that resync arrives the client keeps its guess, so the next click on the
+/// same slot puts the item back ([`predicted_left_click`]).
 /// Sending `state_id: 0` with an empty `changed_slots` map on every click of
 /// every session is a packet no Minecraft client can emit.
 ///
@@ -8622,16 +8688,16 @@ fn send_raw_click(bot: &Client, window_id: u8, slot: i16) -> bool {
         return false;
     }
 
-    let snapshot = if *LEGACY_CLICK_SHAPE {
+    let prediction = if *LEGACY_CLICK_SHAPE {
         None
     } else {
-        live_container_state(bot, slot)
+        predicted_left_click(bot, window_id, slot)
     };
     // Echoed into the packet and logged, so a stale azalea-tracked state_id is
     // visible in the log instead of being an invisible assumption.
-    let echoed_state_id = snapshot.as_ref().map(|(id, _, _)| *id).unwrap_or(0);
+    let echoed_state_id = prediction.as_ref().map(|p| p.state_id).unwrap_or(0);
 
-    let packet = match snapshot {
+    let packet = match prediction {
         None => ServerboundContainerClick {
             container_id: window_id as i32,
             state_id: 0,
@@ -8641,32 +8707,18 @@ fn send_raw_click(bot: &Client, window_id: u8, slot: i16) -> bool {
             changed_slots: Default::default(),
             carried_item: HashedStack(None),
         },
-        Some((state_id, carried, clicked)) => match bot.with_registry_holder(|reg| {
-            use azalea_inventory::ItemStack;
-            // Vanilla prediction for Pickup with an empty cursor: the clicked
-            // stack moves onto the cursor and the slot becomes empty.
-            let pickup = matches!(carried, ItemStack::Empty) && clicked.is_present();
-            ServerboundContainerClick {
-                container_id: window_id as i32,
-                state_id,
-                slot_num: slot,
-                button_num: 0,
-                click_type: ClickType::Pickup,
-                changed_slots: if pickup {
-                    [(
-                        slot as u16,
-                        vanilla_stack::hashed_stack(&ItemStack::Empty, reg),
-                    )]
-                    .into_iter()
-                    .collect()
-                } else {
-                    Default::default()
-                },
-                carried_item: vanilla_stack::hashed_stack(
-                    if pickup { &clicked } else { &carried },
-                    reg,
-                ),
-            }
+        Some(click) => match bot.with_registry_holder(|reg| ServerboundContainerClick {
+            container_id: window_id as i32,
+            state_id: click.state_id,
+            slot_num: slot,
+            button_num: 0,
+            click_type: ClickType::Pickup,
+            changed_slots: click
+                .changed_slots
+                .iter()
+                .map(|(index, item)| (*index, vanilla_stack::hashed_stack(item, reg)))
+                .collect(),
+            carried_item: vanilla_stack::hashed_stack(&click.carried, reg),
         }) {
             Ok(packet) => packet,
             Err(error) => {
@@ -9111,6 +9163,15 @@ fn send_raw_close(bot: &Client, window_id: u8, handlers: &BotEventHandlers) {
     }) {
         error!("Cannot send raw container close without an active connection: {error}");
     }
+    // Vanilla drops the closed menu and its unanswered click guesses with it,
+    // and the inventory menu it returns to has an empty cursor. azalea does
+    // not see this close, so reset the guesses here.
+    let _ =
+        bot.query_self::<Option<&mut azalea_client::inventory::ClickPrediction>, _>(|prediction| {
+            if let Some(mut prediction) = prediction {
+                prediction.reset(Some(azalea_inventory::ItemStack::Empty));
+            }
+        });
     handlers.clear_window_tracking();
     debug!("Raw-closed window {}", window_id);
 }

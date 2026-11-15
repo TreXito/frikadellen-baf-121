@@ -37,7 +37,9 @@ use crate::{
     cookies::{RequestCookieEvent, StoreCookieEvent},
     disconnect::DisconnectEvent,
     interact::BlockStatePredictionHandler,
-    inventory::{ClientsideCloseContainerEvent, MenuOpenedEvent, SetContainerContentEvent},
+    inventory::{
+        ClickPrediction, ClientsideCloseContainerEvent, MenuOpenedEvent, SetContainerContentEvent,
+    },
     local_player::{Experience, Hunger, PreviousGameMode, TabList, TabListResource, WorldHolder},
     movement::{KnockbackData, KnockbackEvent},
     packet::{
@@ -205,6 +207,9 @@ pub fn process_packet(ecs: &mut World, player: Entity, packet: &ClientboundGameP
         ]
     );
 }
+
+/// The server's view of the inventory plus the client's pending click guesses.
+type InvPrediction = (&'static mut Inventory, Option<&'static mut ClickPrediction>);
 
 pub struct GamePacketHandler<'a> {
     pub ecs: &'a mut World,
@@ -394,6 +399,15 @@ impl GamePacketHandler<'_> {
 
     pub fn set_cursor_item(&mut self, p: &ClientboundSetCursorItem) {
         debug!("Got set cursor item packet {p:?}");
+
+        // vanilla `handleSetCursorItem`: `player.containerMenu.setCarried(contents)`
+        as_system::<Query<InvPrediction>>(self.ecs, |mut query| {
+            let (mut inventory, prediction) = query.get_mut(self.player).unwrap();
+            inventory.carried = p.contents.clone();
+            if let Some(mut prediction) = prediction {
+                prediction.server_set_carried();
+            }
+        });
     }
 
     pub fn update_tags(&mut self, _p: &ClientboundUpdateTags) {
@@ -1131,8 +1145,8 @@ impl GamePacketHandler<'_> {
     pub fn container_set_content(&mut self, p: &ClientboundContainerSetContent) {
         debug!("Got container set content packet {p:?}");
 
-        as_system::<(Commands, Query<&mut Inventory>)>(self.ecs, |(mut commands, mut query)| {
-            let mut inventory = query.get_mut(self.player).unwrap();
+        as_system::<(Commands, Query<InvPrediction>)>(self.ecs, |(mut commands, mut query)| {
+            let (mut inventory, prediction) = query.get_mut(self.player).unwrap();
 
             // vanilla `AbstractContainerMenu.initializeContents`: the open menu
             // takes the packet's state id and carried item along with the
@@ -1141,6 +1155,15 @@ impl GamePacketHandler<'_> {
             if p.container_id == inventory.id {
                 inventory.state_id = p.state_id;
                 inventory.carried = p.carried_item.clone();
+                // every slot and the cursor are the server's again
+                if let Some(mut prediction) = prediction {
+                    prediction.reset(None);
+                }
+            } else if p.container_id == 0
+                && let Some(mut prediction) = prediction
+            {
+                let player_slots = inventory.menu().player_slots_range();
+                prediction.server_set_player_slots(player_slots);
             }
 
             // container id 0 is always the player's inventory
@@ -1177,8 +1200,20 @@ impl GamePacketHandler<'_> {
     pub fn container_set_slot(&mut self, p: &ClientboundContainerSetSlot) {
         debug!("Got container set slot packet {p:?}");
 
-        as_system::<Query<&mut Inventory>>(self.ecs, |mut query| {
-            let mut inventory = query.get_mut(self.player).unwrap();
+        as_system::<Query<InvPrediction>>(self.ecs, |mut query| {
+            let (mut inventory, mut prediction) = query.get_mut(self.player).unwrap();
+
+            // a server write replaces the client's guess for what it touches
+            if let Some(prediction) = prediction.as_mut() {
+                if p.container_id == -1 {
+                    prediction.server_set_carried();
+                } else if p.container_id == inventory.id {
+                    prediction.server_set_slot(p.slot);
+                } else if p.container_id == 0 || p.container_id == -2 {
+                    let player_slots = inventory.menu().player_slots_range();
+                    prediction.server_set_player_slots(player_slots);
+                }
+            }
 
             if p.container_id == -1 {
                 // -1 means carried item
