@@ -119,6 +119,17 @@ const CONFIRM_PRECLICK_MISS_MS: u64 = 250;
 /// Poll interval while waiting for the server to close the confirm window.
 const CONFIRM_POLL_MS: u64 = 5;
 
+/// Whether the Confirm Purchase handler should send its one reactive click
+/// after a skip pre-click. A window that is still open past the miss deadline
+/// is not proof the pre-click was dropped: on 2026-11-15 20:12:01 a 60M buy got
+/// "Putting coins in escrow..." 55 ms after the view opened, Hypixel kept the
+/// confirm window open past 250 ms, and the reactive click ran a second escrow
+/// on the same auction ("You don't have enough coins to afford this bid!").
+/// The escrow message is the proof the pre-click landed.
+fn reactive_confirm_due(already_sent: bool, escrow_seen: bool, past_miss_deadline: bool) -> bool {
+    !already_sent && !escrow_seen && past_miss_deadline
+}
+
 /// The container id Hypixel will give the next window. Hypixel numbers
 /// containers 1..=100 and wraps 100 -> 1 (measured on 79 bot logs, 37 of 37
 /// wraps), so predicting `id + 1` up to 255 sends a click for container 101,
@@ -762,6 +773,7 @@ impl BotClient {
             pending_purchase_at_ms: Arc::new(RwLock::new(None)),
             bed_timing_active: Arc::new(AtomicBool::new(false)),
             skip_click_sent: Arc::new(AtomicBool::new(false)),
+            escrow_seen: Arc::new(AtomicBool::new(false)),
             fast_buy_clicked: Arc::new(AtomicBool::new(false)),
             slot_data_notify: Arc::new(tokio::sync::Notify::new()),
             window_open_notify: Arc::new(tokio::sync::Notify::new()),
@@ -1514,6 +1526,12 @@ pub struct BotClientState {
     /// Set when a skip-click (pre-click on predicted Confirm Purchase window) is sent.
     /// The Confirm Purchase handler checks this to avoid sending a duplicate reactive click.
     pub skip_click_sent: Arc<AtomicBool>,
+    /// Set when "Putting coins in escrow..." arrives for the current purchase:
+    /// a confirm click has landed and Hypixel is running the transaction. The
+    /// Confirm Purchase handler must not send another confirm after this, even if
+    /// the window is still open, or Hypixel runs a second escrow on the same
+    /// auction. Cleared at the start of each purchase.
+    pub escrow_seen: Arc<AtomicBool>,
     /// Set when the fast-path purchase task (spawned in execute_command, triggered
     /// by the ECS observer's window_open_notify) has already sent the buy-click
     /// and skip-click.  The Event::Packet handle_window_interaction checks this
@@ -1689,6 +1707,7 @@ impl Default for BotClientState {
             pending_purchase_at_ms: Arc::new(RwLock::new(None)),
             bed_timing_active: Arc::new(AtomicBool::new(false)),
             skip_click_sent: Arc::new(AtomicBool::new(false)),
+            escrow_seen: Arc::new(AtomicBool::new(false)),
             fast_buy_clicked: Arc::new(AtomicBool::new(false)),
             slot_data_notify: Arc::new(tokio::sync::Notify::new()),
             window_open_notify: Arc::new(tokio::sync::Notify::new()),
@@ -2888,6 +2907,7 @@ async fn event_handler(bot: Client, event: Event, state: BotClientState) -> Resu
                 }
             } else if clean_message.contains("Putting coins in escrow") {
                 // "Putting coins in escrow..." — purchase accepted by server.
+                state.escrow_seen.store(true, Ordering::Relaxed);
                 // Buy speed is measured from when the BIN Auction View opened
                 // (act-on-open speed), falling back to the /viewauction send time
                 // if the view-open marker is somehow missing.
@@ -4118,6 +4138,7 @@ async fn execute_command(bot: &Client, command: &QueuedCommand, state: &BotClien
 
             // Reset fast-buy flag before setting state to Purchasing.
             state.fast_buy_clicked.store(false, Ordering::Relaxed);
+            state.escrow_seen.store(false, Ordering::Relaxed);
 
             // Set state to purchasing
             *state.bot_state.write() = BotState::Purchasing;
@@ -4595,6 +4616,7 @@ async fn handle_window_interaction(
         *state.pending_purchase_at_ms.write() = None;
         *state.last_buy_via_bed.write() = None;
         state.fast_buy_clicked.store(false, Ordering::Relaxed);
+        state.escrow_seen.store(false, Ordering::Relaxed);
         bot_state = BotState::Purchasing;
     }
 
@@ -5045,9 +5067,14 @@ async fn handle_window_interaction(
                 while state.handlers.current_window_id() == Some(window_id)
                     && tokio::time::Instant::now() < settle_deadline
                 {
-                    if !reactive_click_sent && tokio::time::Instant::now() >= preclick_miss_at {
-                        // The pre-click never landed (the server would have closed
-                        // the window by now). Send the one reactive click.
+                    if reactive_confirm_due(
+                        reactive_click_sent,
+                        state.escrow_seen.load(Ordering::Relaxed),
+                        tokio::time::Instant::now() >= preclick_miss_at,
+                    ) {
+                        // The pre-click never landed: no escrow message and the
+                        // server would have closed the window by now. Send the one
+                        // reactive click.
                         warn!(
                             "[AH] Skip pre-click did not land within {}ms — sending the one confirm click",
                             CONFIRM_PRECLICK_MISS_MS
@@ -9638,6 +9665,19 @@ fn extract_viewauction_uuid(msg: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn no_reactive_confirm_once_escrow_started() {
+        // 20:12:01 case: pre-click landed, escrow seen, window still open at 250 ms.
+        assert!(!super::reactive_confirm_due(false, true, true));
+    }
+
+    #[test]
+    fn reactive_confirm_when_pre_click_was_dropped() {
+        assert!(super::reactive_confirm_due(false, false, true));
+        assert!(!super::reactive_confirm_due(false, false, false));
+        assert!(!super::reactive_confirm_due(true, false, true));
+    }
 
     fn lore_lines(lines: &[&str]) -> Vec<String> {
         lines.iter().map(|line| line.to_string()).collect()
