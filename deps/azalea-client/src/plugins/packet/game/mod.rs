@@ -1134,6 +1134,15 @@ impl GamePacketHandler<'_> {
         as_system::<(Commands, Query<&mut Inventory>)>(self.ecs, |(mut commands, mut query)| {
             let mut inventory = query.get_mut(self.player).unwrap();
 
+            // vanilla `AbstractContainerMenu.initializeContents`: the open menu
+            // takes the packet's state id and carried item along with the
+            // items. Without this the next click carries the state id of the
+            // last set_slot and the server answers with a full resync.
+            if p.container_id == inventory.id {
+                inventory.state_id = p.state_id;
+                inventory.carried = p.carried_item.clone();
+            }
+
             // container id 0 is always the player's inventory
             if p.container_id == 0 {
                 // this is just so it has the same type as the `else` block
@@ -1187,6 +1196,11 @@ impl GamePacketHandler<'_> {
                     // but that's not really necessary
                     if let Some(slot) = inventory.inventory_menu.slot_mut(p.slot.into()) {
                         *slot = p.item_stack.clone();
+                    }
+                    // `inventoryMenu.setItem(slot, stateId, item)`: the state id
+                    // is the open menu's only while no container is open
+                    if inventory.id == 0 {
+                        inventory.state_id = p.state_id;
                     }
                 } else if p.container_id == inventory.id
                     && (p.container_id != 0 || !is_creative_mode_and_inventory_closed)

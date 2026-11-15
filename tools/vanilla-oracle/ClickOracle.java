@@ -4,6 +4,7 @@
 //
 //   java ClickOracle <dump.bin> [--all]     check a recording
 //   java ClickOracle --selftest [out.bin]   prove the checker on a synthetic session
+//   java ClickOracle --core-registries <out.bin> [dump.bin]   vanilla core registry data for azalea-client
 //
 // Nothing here is a reimplementation of the hashing or the codecs: registries
 // are rebuilt with RegistryDataCollector + KnownPacksManager exactly like
@@ -1229,7 +1230,7 @@ public final class ClickOracle {
 
     public static void main(String[] args) throws Exception {
         if (args.length == 0) {
-            System.err.println("usage: ClickOracle <dump.bin> [--all] | --selftest [out.bin]");
+            System.err.println("usage: ClickOracle <dump.bin> [--all] | --selftest [out.bin] | --core-registries <out.bin> [dump.bin]");
             System.exit(64);
         }
         java.io.PrintStream stdout = System.out;
@@ -1238,12 +1239,126 @@ public final class ClickOracle {
         if (args[0].equals("--selftest")) {
             System.exit(SelfTest.run(args.length > 1 ? Path.of(args[1]) : null));
         }
+        if (args[0].equals("--core-registries")) {
+            if (args.length < 2) {
+                System.err.println("usage: ClickOracle --core-registries <out.bin> [dump.bin to compare with]");
+                System.exit(64);
+            }
+            System.exit(CoreRegistries.run(Path.of(args[1]), args.length > 2 ? Path.of(args[2]) : null));
+        }
         boolean all = Arrays.asList(args).contains("--all");
         List<Rec> recs = readDump(Files.readAllBytes(Path.of(args[0])));
         ClickOracle oracle = new ClickOracle(all);
         oracle.run(recs);
         oracle.summary();
         System.exit(0); // registry loading leaves executor threads behind
+    }
+
+    // ---------------------------------------------------------------- core registries
+
+    /**
+     * The registry contents a vanilla 26.3 server sends to a client that knows
+     * no data packs: {@code RegistrySynchronization.packRegistries} with an
+     * empty known set, over the registries a vanilla client loads from its
+     * built-in {@code minecraft:core} pack.
+     *
+     * <p>A client that answers {@code select_known_packs} with
+     * {@code [minecraft:core:26.3]}, like vanilla does, receives these entries
+     * without data and has to supply them itself. azalea-client embeds this
+     * file for exactly that.
+     *
+     * <p>File: repeated {@code u32 LE length | ClientboundRegistryDataPacket body}
+     * (registry id, then the entry list, no packet id).
+     */
+    static final class CoreRegistries {
+        static RegistryAccess.Frozen load(KnownPacksManager km) throws Exception {
+            km.trySelectingPacks(List.of(KnownPack.vanilla("core")));
+            RegistryDataCollector collector = new RegistryDataCollector();
+            try (CloseableResourceManager rm = km.createResourceManager()) {
+                Map<ResourceKey<?>, Map<Identifier, Integer>> indexes = new HashMap<>();
+                for (RegistryDataLoader.RegistryData<?> data : RegistryDataLoader.SYNCHRONIZED_REGISTRIES) {
+                    ResourceKey<? extends Registry<?>> key = (ResourceKey) data.key();
+                    List<Identifier> ids = SelfTest.listIds(rm, key);
+                    Map<Identifier, Integer> index = new HashMap<>();
+                    List<RegistrySynchronization.PackedRegistryEntry> entries = new ArrayList<>();
+                    for (Identifier id : ids) {
+                        index.put(id, entries.size());
+                        entries.add(new RegistrySynchronization.PackedRegistryEntry(id, Optional.empty()));
+                    }
+                    indexes.put(key, index);
+                    collector.appendContents(key, entries);
+                }
+                collector.appendTags(SelfTest.buildTags(rm, indexes));
+                return collector.collectGameRegistries(rm, ClientRegistryLayer.createRegistryAccess().compositeAccess(), false);
+            }
+        }
+
+        static int run(Path out, Path dump) throws Exception {
+            KnownPacksManager km = new KnownPacksManager();
+            java.lang.reflect.Field f = KnownPacksManager.class.getDeclaredField("knownPackToId");
+            f.setAccessible(true);
+            System.out.println("vanilla client knows packs: " + ((Map<?, ?>) f.get(km)).keySet());
+            RegistryAccess.Frozen regs = load(km);
+            com.mojang.serialization.DynamicOps<net.minecraft.nbt.Tag> ops = regs.createSerializationContext(net.minecraft.nbt.NbtOps.INSTANCE);
+            Map<ResourceKey<? extends Registry<?>>, List<RegistrySynchronization.PackedRegistryEntry>> packed = new LinkedHashMap<>();
+            RegistrySynchronization.packRegistries(ops, regs, Set.of(), packed::put);
+
+            ByteArrayOutputStream file = new ByteArrayOutputStream();
+            int total = 0;
+            for (var e : packed.entrySet()) {
+                ByteBuf buf = Unpooled.buffer();
+                ClientboundRegistryDataPacket.STREAM_CODEC.encode(new net.minecraft.network.FriendlyByteBuf(buf),
+                        new ClientboundRegistryDataPacket(e.getKey(), e.getValue()));
+                byte[] bytes = new byte[buf.readableBytes()];
+                buf.readBytes(bytes);
+                file.write(ByteBuffer.allocate(4).order(java.nio.ByteOrder.LITTLE_ENDIAN).putInt(bytes.length).array());
+                file.write(bytes);
+                total += e.getValue().size();
+                System.out.println("  " + e.getKey().identifier() + ": " + e.getValue().size() + " entries, " + bytes.length + " bytes");
+            }
+            Files.write(out, file.toByteArray());
+            System.out.println("wrote " + out + " (" + packed.size() + " registries, " + total + " entries, " + file.size() + " bytes)");
+            return dump == null ? 0 : compare(packed, dump);
+        }
+
+        /** Every entry the server sent with data must equal ours byte for byte. */
+        static int compare(Map<ResourceKey<? extends Registry<?>>, List<RegistrySynchronization.PackedRegistryEntry>> packed, Path dump) throws Exception {
+            Map<String, Map<Identifier, Optional<net.minecraft.nbt.Tag>>> ours = new HashMap<>();
+            packed.forEach((key, entries) -> {
+                Map<Identifier, Optional<net.minecraft.nbt.Tag>> m = new HashMap<>();
+                for (var en : entries) m.put(en.id(), en.data());
+                ours.put(key.identifier().toString(), m);
+            });
+            int same = 0, differ = 0, omitted = 0, serverOnly = 0;
+            Map<String, Integer> differByRegistry = new TreeMap<>();
+            for (Rec r : readDump(Files.readAllBytes(dump))) {
+                if (r.kind != IN_CONFIG || !r.name.equals("registry_data")) continue;
+                ByteBuf b = Unpooled.wrappedBuffer(r.raw);
+                ClientboundRegistryDataPacket d = (ClientboundRegistryDataPacket) ConfigurationProtocols.CLIENTBOUND.codec().decode(b);
+                String reg = d.registry().identifier().toString();
+                Map<Identifier, Optional<net.minecraft.nbt.Tag>> m = ours.get(reg);
+                for (var en : d.entries()) {
+                    Optional<net.minecraft.nbt.Tag> v = m == null ? null : m.get(en.id());
+                    if (v == null) {
+                        serverOnly++;
+                        System.out.println("  server-only entry " + reg + " " + en.id() + (en.data().isPresent() ? " (with data)" : " (NO DATA, a client cannot fill it)"));
+                    } else if (en.data().isEmpty()) {
+                        omitted++;
+                    } else if (en.data().equals(v)) {
+                        same++;
+                    } else {
+                        differ++;
+                        differByRegistry.merge(reg, 1, Integer::sum);
+                        String show = System.getenv("ORACLE_SHOW_REGISTRY");
+                        if (show != null ? reg.equals(show) : differ <= 10) System.out.println("  DIFFERS " + reg + " " + en.id() + "\n    server: " + en.data().get() + "\n    ours:   " + v.get());
+                    }
+                }
+            }
+            differByRegistry.forEach((reg, n) -> System.out.println("  " + reg + ": " + n + " entries encoded differently by the server"));
+            System.out.println("compared with " + dump + ": " + same + " identical, " + differ + " different, "
+                    + omitted + " sent without data, " + serverOnly + " server-only");
+            return differ == 0 && same + omitted > 0 ? 0 : 1;
+        }
     }
 
     // ---------------------------------------------------------------- self test

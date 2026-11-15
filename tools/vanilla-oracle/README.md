@@ -82,6 +82,26 @@ Hypixel-style Bazaar items, one deliberate fault per category), writes it in
 the dump format, runs the checker on it and fails unless every record lands in
 its expected category. CI runs it on every change under `tools/vanilla-oracle`.
 
+## Vanilla core registries
+
+A vanilla 26.3 client answers Hypixel's `select_known_packs` offer with
+`minecraft:core:26.3`, and the server then sends the core registry entries
+without data. azalea-client does the same and fills those entries from
+`deps/azalea-client/src/plugins/vanilla_core_26_3_registries.bin`, generated
+here with Mojang's own `RegistrySynchronization.packRegistries`:
+
+```bash
+tools/vanilla-oracle/run.sh --core-registries \
+  deps/azalea-client/src/plugins/vanilla_core_26_3_registries.bin [dump.bin]
+```
+
+With a dump it also compares every entry Hypixel sent with data against the
+vanilla encoding. Hypixel encodes some numbers differently (floats for doubles,
+int lists for int arrays), so expect differences there. Entries the server
+sends without data that the core pack does not have are flagged `NO DATA`.
+Regenerate the file whenever the Minecraft version changes, together with
+`CORE_VERSION` in `known_packs.rs`.
+
 ## Dump format
 
 Little-endian. The file starts with `BAFPKT1\n`. Each record is

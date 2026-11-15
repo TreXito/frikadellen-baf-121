@@ -17,6 +17,7 @@ use crate::{
     connection::RawConnection,
     cookies::{RequestCookieEvent, StoreCookieEvent},
     disconnect::DisconnectEvent,
+    known_packs,
     local_player::WorldHolder,
     packet::game::{KeepAliveEvent, ResourcePackEvent},
 };
@@ -70,6 +71,18 @@ pub struct ConfigPacketHandler<'a> {
 }
 impl ConfigPacketHandler<'_> {
     pub fn registry_data(&mut self, p: &ClientboundRegistryData) {
+        // entries from a pack we selected come without data; vanilla loads
+        // them from its jar, we load them from the embedded core pack
+        let mut entries = p.entries.clone();
+        let missing = known_packs::fill_from_core(&p.registry_id, &mut entries);
+        if !missing.is_empty() {
+            warn!(
+                "{} sent {} entries without data that the vanilla core pack does not have: {missing:?}",
+                p.registry_id,
+                missing.len()
+            );
+        }
+
         as_system::<Query<&WorldHolder>>(self.ecs, |mut query| {
             let world_holder = query.get_mut(self.player).unwrap();
             let mut world = world_holder.shared.write();
@@ -77,9 +90,8 @@ impl ConfigPacketHandler<'_> {
             // add the new registry data
             world.registries.append(
                 p.registry_id.clone(),
-                p.entries
-                    .iter()
-                    .cloned()
+                entries
+                    .into_iter()
                     .map(|(ident, tag)| (ident, tag.map(|t| t.into())))
                     .collect(),
             )
@@ -215,13 +227,15 @@ impl ConfigPacketHandler<'_> {
     pub fn select_known_packs(&mut self, p: &ClientboundSelectKnownPacks) {
         debug!("Got select known packs packet {p:?}");
 
+        // answer like vanilla's KnownPacksManager: every offered pack we can
+        // fill registry data from, in the offered order
+        let known_packs = known_packs::select(&p.known_packs);
+        debug!("Selecting known packs {known_packs:?}");
+
         as_system::<Commands>(self.ecs, |mut commands| {
-            // resource pack management isn't implemented
             commands.trigger(SendConfigPacketEvent::new(
                 self.player,
-                ServerboundSelectKnownPacks {
-                    known_packs: vec![],
-                },
+                ServerboundSelectKnownPacks { known_packs },
             ));
         });
     }

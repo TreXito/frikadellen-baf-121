@@ -3,6 +3,7 @@
 #
 #   tools/vanilla-oracle/run.sh <dump.bin> [--all]
 #   tools/vanilla-oracle/run.sh --selftest [out.bin]
+#   tools/vanilla-oracle/run.sh --core-registries <out.bin> [dump.bin]   regenerate the embedded vanilla core registries
 #
 # Needs Java 25 (JAVA_HOME or java on PATH), curl and about 1 GB of RAM.
 # Downloads the official 26.3 client.jar and server.jar once (sha1-checked),

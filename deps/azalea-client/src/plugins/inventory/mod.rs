@@ -71,6 +71,9 @@ pub struct MenuOpenedEvent {
 fn handle_menu_opened_trigger(event: On<MenuOpenedEvent>, mut query: Query<&mut Inv>) {
     let mut inventory = query.get_mut(event.entity).unwrap();
     inventory.id = event.window_id;
+    // a new vanilla menu starts at state id 0; the server's set_slot and
+    // set_content packets move it from there
+    inventory.state_id = 0;
     inventory.container_menu = Some(Menu::from_kind(event.menu_type));
     inventory.container_menu_title = Some(event.title.clone());
 }
