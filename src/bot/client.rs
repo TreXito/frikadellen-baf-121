@@ -3228,7 +3228,13 @@ async fn event_handler(bot: Client, event: Event, state: BotClientState) -> Resu
                 // but slot 31 already shows gold_nugget (not a bed).  Keep clicking every
                 // 100 ms until the Confirm Purchase window opens — matches
                 // AutoBuy.initBedSpam() which clicks whenever slotName === "gold_nugget".
-                if *state.bot_state.read() == BotState::Purchasing {
+                //
+                // Not while the bed-timing loop runs: its own bed clicks draw this
+                // message, and it already clicks slot 31 the moment gold_nugget
+                // shows. A second clicker on the same slot sends a second buy click.
+                if *state.bot_state.read() == BotState::Purchasing
+                    && !state.bed_timing_active.load(Ordering::Relaxed)
+                {
                     let already_active =
                         state.grace_period_spam_active.swap(true, Ordering::Relaxed);
                     if !already_active {
@@ -4865,20 +4871,38 @@ async fn handle_window_interaction(
                             return;
                         }
 
-                        let current_kind = {
-                            let menu = bot.menu().expect("client inventory unavailable");
-                            let slots = menu.slots();
-                            slots
-                                .get(31)
-                                .map(|s| {
-                                    if s.is_empty() {
-                                        "air".to_string()
-                                    } else {
-                                        s.kind().to_string().to_lowercase()
-                                    }
-                                })
-                                .unwrap_or_else(|| "air".to_string())
-                        };
+                        // One snapshot of the open container id and its slot 31.
+                        // azalea swaps the menu the moment OpenScreen arrives,
+                        // before this handler's own window tracking catches up,
+                        // so slot 31 alone cannot tell "auction view emptied"
+                        // from "a different window is open now".
+                        let (open_id, current_kind) = open_menu_slot_kind(bot, 31)
+                            .unwrap_or((window_id as i32, "air".to_string()));
+
+                        match bed_window_change(open_id, window_id) {
+                            Some(BedWindowChange::Replaced) => {
+                                // A bed click landed after the grace period and the
+                                // server opened Confirm Purchase straight away. That
+                                // window is the buy: leave it, and the bot state, to
+                                // the Confirm Purchase handler. Closing window 9 here
+                                // made Hypixel close Confirm Purchase and lost the
+                                // flip.
+                                info!(
+                                    "[AH] Bed timing: window {} opened over {} — handing off to Confirm Purchase",
+                                    open_id, window_id
+                                );
+                                state.bed_timing_active.store(false, Ordering::Relaxed);
+                                return;
+                            }
+                            Some(BedWindowChange::Closed) => {
+                                // The server closed it. Nothing to close back.
+                                info!("[AH] Bed timing: server closed window {}", window_id);
+                                state.bed_timing_active.store(false, Ordering::Relaxed);
+                                *state.bot_state.write() = BotState::Idle;
+                                return;
+                            }
+                            None => {}
+                        }
 
                         if current_kind == "air" || current_kind.contains("air") {
                             info!("[AH] Bed timing: window closed");
@@ -8526,6 +8550,52 @@ fn live_container_state(bot: &Client, slot: i16) -> Option<ClickState> {
     })
 }
 
+/// The id of the container the client has open (0 = none) and the lowercased
+/// item kind in `slot` of that container ("air" when empty), read from one ECS
+/// snapshot so the two always belong to the same window.
+///
+/// Returns `None` before the inventory exists (before login).
+fn open_menu_slot_kind(bot: &Client, slot: usize) -> Option<(i32, String)> {
+    use azalea::entity::inventory::Inventory;
+    bot.component::<Inventory>().ok().map(|inv| {
+        let kind = inv
+            .menu()
+            .slots()
+            .get(slot)
+            .map(|s| {
+                if s.is_empty() {
+                    "air".to_string()
+                } else {
+                    s.kind().to_string().to_lowercase()
+                }
+            })
+            .unwrap_or_else(|| "air".to_string());
+        (inv.id, kind)
+    })
+}
+
+/// How the open container moved away from the auction view the bed-timing
+/// loop is clicking in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BedWindowChange {
+    /// The server opened another window over it: a bed click that landed
+    /// after the grace period opened Confirm Purchase.
+    Replaced,
+    /// The server closed it and no container is open.
+    Closed,
+}
+
+/// `None` while `open_id` is still the auction view `bed_window`.
+fn bed_window_change(open_id: i32, bed_window: u8) -> Option<BedWindowChange> {
+    if open_id == bed_window as i32 {
+        None
+    } else if open_id == 0 {
+        Some(BedWindowChange::Closed)
+    } else {
+        Some(BedWindowChange::Replaced)
+    }
+}
+
 /// The changed slots and cursor a vanilla client sends for a left click on
 /// `slot` of `window_id`.
 ///
@@ -9763,6 +9833,32 @@ mod tests {
         assert_eq!(super::next_container_id(100), 1);
         // Defensive: anything above 100 also restarts at 1.
         assert_eq!(super::next_container_id(255), 1);
+    }
+
+    /// Live 2026-11-16 02:03:22: the third bed click on window 9 opened
+    /// Confirm Purchase as window 10. Slot 31 of that menu is an empty
+    /// inventory slot, which the old loop read as "window closed": it sent a
+    /// close for 9, Hypixel closed Confirm Purchase, and the flip was lost.
+    #[test]
+    fn bed_loop_hands_off_when_confirm_purchase_opens() {
+        assert_eq!(super::bed_window_change(9, 9), None);
+        assert_eq!(
+            super::bed_window_change(10, 9),
+            Some(super::BedWindowChange::Replaced)
+        );
+        // Hypixel's id wrap: 100 -> 1.
+        assert_eq!(
+            super::bed_window_change(1, 100),
+            Some(super::BedWindowChange::Replaced)
+        );
+    }
+
+    #[test]
+    fn bed_loop_sends_no_close_after_a_server_close() {
+        assert_eq!(
+            super::bed_window_change(0, 9),
+            Some(super::BedWindowChange::Closed)
+        );
     }
     use super::*;
     use azalea::registry::builtin::ItemKind;
