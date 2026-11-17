@@ -73,6 +73,9 @@ const DAILY_LIMIT_RESET_BUFFER_SECS: u64 = 5;
 /// rather than a frozen connection. It auto-clears so the bot resumes on its own
 /// once the server is back — no manual intervention needed.
 const MAINTENANCE_COOLDOWN_SECS: i64 = 5 * 60;
+/// Hard ceiling on one maintenance offline wait. The status page normally ends
+/// it much sooner (see `hypixel_status::reconnect_decision`).
+const MAINTENANCE_MAX_OFFLINE_SECS: u64 = 12 * 60 * 60;
 
 /// No GUI window opening for this long is treated as a suspected stall. The bot
 /// opens windows constantly in normal operation (bazaar order management, flip
@@ -151,6 +154,92 @@ fn current_skyblock_area(lines: &[String]) -> Option<String> {
         .find(|l| l.contains('⏣'))
         .map(|l| l.replace('⏣', "").trim().to_string())
         .filter(|s| !s.is_empty())
+}
+
+/// The sidebar says the bot is home: its own island, or any island while
+/// visitfriend is active (a friend's island shows "⏣ <name>'s Island").
+fn sidebar_shows_home(lines: &[String]) -> bool {
+    lines.iter().any(|l| l.contains("Your Island"))
+        || (frikadellen_baf::visitfriend::active_friend().is_some()
+            && current_skyblock_area(lines)
+                .map(|a| a.contains("Island"))
+                .unwrap_or(false))
+}
+
+/// How the island guard tries to get home this round.
+#[derive(Debug, PartialEq, Eq)]
+enum IslandRoute<'a> {
+    /// Inside SkyBlock (in this area): a plain /is.
+    IslandCommand(&'a str),
+    /// Outside SkyBlock, or the last /is did not land: /lobby → /play sb.
+    PlaySkyblock,
+}
+
+/// `area` is the sidebar's ⏣ area, `None` outside SkyBlock. `island_miss`: the
+/// previous round's /is from that area did not reach the island, so the sidebar
+/// may be stale (limbo keeps the last one) and a real rejoin is needed.
+fn island_guard_route(area: Option<&str>, island_miss: bool) -> IslandRoute<'_> {
+    match area {
+        Some(a) if !island_miss => IslandRoute::IslandCommand(a),
+        _ => IslandRoute::PlaySkyblock,
+    }
+}
+
+/// Outcome of one /lobby → /play sb attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SkyblockTransfer {
+    /// The sidebar shows a SkyBlock area.
+    Arrived,
+    /// Hypixel answered with the maintenance notice.
+    Maintenance,
+    /// The bot left Idle (a flip or workflow started), attempt abandoned.
+    Interrupted,
+    /// No SkyBlock sidebar within the timeout.
+    Stalled,
+}
+
+/// Seconds to wait for the SkyBlock sidebar after /play sb. Hypixel normally
+/// moves the player within a few seconds; a stalled config phase never does.
+const TRANSFER_ARRIVAL_TIMEOUT_SECS: u64 = 25;
+/// Consecutive stalled /play sb attempts before restarting for a fresh login.
+const TRANSFER_STALL_RESTART_AFTER: u32 = 2;
+
+/// Send /lobby, then /play sb, and wait for the SkyBlock sidebar. Never sends
+/// /is: the caller does that only after `Arrived`.
+async fn transfer_to_skyblock(
+    bot: &BotClient,
+    queue: &frikadellen_baf::state::CommandQueue,
+) -> SkyblockTransfer {
+    use frikadellen_baf::types::{BotState, CommandPriority, CommandType};
+    for (cmd, settle_secs) in [("/lobby", 5u64), ("/play sb", 0)] {
+        if skyblock_in_maintenance() {
+            return SkyblockTransfer::Maintenance;
+        }
+        if bot.state() != BotState::Idle {
+            return SkyblockTransfer::Interrupted;
+        }
+        queue.enqueue(
+            CommandType::SendChat {
+                message: cmd.to_string(),
+            },
+            CommandPriority::High,
+            false,
+        );
+        sleep(Duration::from_secs(settle_secs)).await;
+    }
+    for _ in 0..TRANSFER_ARRIVAL_TIMEOUT_SECS {
+        sleep(Duration::from_secs(1)).await;
+        if skyblock_in_maintenance() {
+            return SkyblockTransfer::Maintenance;
+        }
+        if current_skyblock_area(&bot.get_scoreboard_lines()).is_some() {
+            return SkyblockTransfer::Arrived;
+        }
+        if bot.state() != BotState::Idle {
+            return SkyblockTransfer::Interrupted;
+        }
+    }
+    SkyblockTransfer::Stalled
 }
 
 /// Calculate Hypixel AH fee based on price tier (matches TypeScript calculateAuctionHouseFee).
@@ -937,8 +1026,13 @@ fn rest_break_marker_path() -> std::path::PathBuf {
 /// offline (no Hypixel, no COFL) until the deadline instead of lingering
 /// in-process, where the ECS client / AFK handler / reconnect loop could drift
 /// it back into the lobby.
-fn write_rest_break_marker(ign: &str, until_unix: u64) {
-    let v = serde_json::json!({ "ign": ign, "until": until_unix });
+/// `maintenance` marks a SkyBlock-maintenance break: the next start waits on the
+/// status page instead of a fixed timer, and `until` is only the hard cap.
+fn write_rest_break_marker(ign: &str, until_unix: u64, maintenance: bool) {
+    let mut v = serde_json::json!({ "ign": ign, "until": until_unix });
+    if maintenance {
+        v["reason"] = serde_json::json!("maintenance");
+    }
     if let Err(e) = std::fs::write(rest_break_marker_path(), v.to_string()) {
         tracing::warn!("[Humanization] Failed to write rest-break marker: {}", e);
     }
@@ -958,6 +1052,20 @@ fn pending_rest_break_secs(ign: &str) -> Option<u64> {
     let until = v.get("until").and_then(|x| x.as_u64())?;
     let now = unix_now();
     (until > now).then(|| until - now)
+}
+
+/// True when the pending break marker for `ign` is a SkyBlock-maintenance break.
+fn pending_break_is_maintenance(ign: &str) -> bool {
+    let Ok(contents) = std::fs::read_to_string(rest_break_marker_path()) else {
+        return false;
+    };
+    serde_json::from_str::<serde_json::Value>(&contents)
+        .ok()
+        .map(|v| {
+            v.get("ign").and_then(|x| x.as_str()) == Some(ign)
+                && v.get("reason").and_then(|x| x.as_str()) == Some("maintenance")
+        })
+        .unwrap_or(false)
 }
 
 /// Shared rest-break teardown: pause flip intake and the command queue, persist
@@ -981,6 +1089,7 @@ async fn take_rest_break_and_restart(
     flip_tracker_path: &std::path::Path,
     session_times_path: &std::path::Path,
     total_secs: u64,
+    maintenance: bool,
 ) -> ! {
     // A rest break must leave the account genuinely offline for the whole
     // duration. Dropping the connection in-process and sleeping proved
@@ -1005,12 +1114,63 @@ async fn take_rest_break_and_restart(
     // Persist the break deadline, then restart. The next process start stays
     // offline until this time and sends the "break over" webhook.
     let until = unix_now() + break_secs;
-    write_rest_break_marker(ign, until);
-    info!(
-        "[Humanization] Rest break ({:.1}m) — saved session {}s, restarting offline until break ends",
-        break_secs as f64 / 60.0, total_secs
-    );
+    write_rest_break_marker(ign, until, maintenance);
+    if maintenance {
+        info!(
+            "[Maintenance] Going offline — saved session {}s, restarting to wait on the status page",
+            total_secs
+        );
+    } else {
+        info!(
+            "[Humanization] Rest break ({:.1}m) — saved session {}s, restarting offline until break ends",
+            break_secs as f64 / 60.0, total_secs
+        );
+    }
     restart_process()
+}
+
+/// Stay offline until the status page says SkyBlock is back, then return why.
+///
+/// Runs on the fresh process after a maintenance break, before any Minecraft
+/// connection. Only plain HTTPS polls of status.hypixel.net go out, every 2-3
+/// minutes. `cap_secs` is a hard ceiling from the marker. See
+/// `hypixel_status::reconnect_decision` for the rules.
+async fn wait_out_maintenance(cap_secs: u64) -> &'static str {
+    use frikadellen_baf::hypixel_status::{
+        fetch_skyblock_status, reconnect_decision, SkyblockStatus,
+    };
+    use rand::Rng;
+
+    info!("[Maintenance] Offline until SkyBlock is back — polling status.hypixel.net");
+    let started = std::time::Instant::now();
+    let mut saw_down = false;
+    let mut last: Option<SkyblockStatus> = None;
+    loop {
+        let status = fetch_skyblock_status().await;
+        saw_down |= matches!(status, SkyblockStatus::Down { .. });
+        let offline_secs = started.elapsed().as_secs();
+        if last.as_ref() != Some(&status) {
+            info!(
+                "[Maintenance] Status page: {:?} (offline {}m)",
+                status,
+                offline_secs / 60
+            );
+        }
+        if let Some(reason) = reconnect_decision(&status, saw_down, offline_secs, unix_now()) {
+            info!("[Maintenance] Reconnecting — {}", reason.describe());
+            return reason.describe();
+        }
+        if offline_secs >= cap_secs {
+            info!("[Maintenance] Offline cap reached — reconnecting");
+            return "offline cap reached";
+        }
+        last = Some(status);
+        let pause = rand::rng().random_range(120..=180u64);
+        tokio::time::sleep(Duration::from_secs(
+            pause.min(cap_secs.saturating_sub(offline_secs).max(1)),
+        ))
+        .await;
+    }
 }
 
 /// True when a rest-break marker exists for this account, i.e. the previous
@@ -1294,6 +1454,8 @@ async fn main() -> Result<()> {
     // exists to prevent. Here we only read how long is left (before deleting
     // the marker) and clear the marker.
     let pending_break_secs = pending_rest_break_secs(&ingame_name);
+    let pending_maintenance =
+        pending_break_secs.is_some() && pending_break_is_maintenance(&ingame_name);
     clear_rest_break_marker();
 
     info!(
@@ -1379,6 +1541,9 @@ async fn main() -> Result<()> {
     // Consumed by the always-on break executor spawned near the humanization
     // scheduler, so an on-demand break works even with humanization disabled.
     let (rest_break_tx, mut rest_break_rx) = tokio::sync::mpsc::unbounded_channel::<u64>();
+    // Hypixel's "SkyBlock is currently undergoing maintenance" notice, from the
+    // chat handler to the maintenance executor, which takes the bot offline.
+    let (maintenance_tx, mut maintenance_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
 
     // Broadcast channel for chat messages → web panel clients.
     let (chat_tx, _chat_rx) = broadcast::channel::<String>(256);
@@ -2114,7 +2279,13 @@ async fn main() -> Result<()> {
     // whole break. The flip websocket may be up during the wait, but nothing
     // consumes its events yet — the backlog is drained below so no stale flip
     // from before the break is ever acted on.
-    if let Some(remaining) = pending_break_secs {
+    if let (true, Some(cap)) = (pending_maintenance, pending_break_secs) {
+        let reason = wait_out_maintenance(cap).await;
+        if let Some(url) = config.active_webhook_url() {
+            frikadellen_baf::webhook::send_webhook_maintenance_over(&ingame_name, reason, url)
+                .await;
+        }
+    } else if let Some(remaining) = pending_break_secs {
         info!(
             "[Humanization] Resuming rest break — staying offline for {:.1}m before connecting",
             remaining as f64 / 60.0
@@ -2354,6 +2525,7 @@ async fn main() -> Result<()> {
     let cofl_connection_id_events = cofl_connection_id.clone();
     let cofl_premium_events = cofl_premium.clone();
     let chat_tx_events = chat_tx.clone();
+    let maintenance_tx_events = maintenance_tx.clone();
     let enable_bazaar_flips_events = enable_bazaar_flips.clone();
     let enable_ah_flips_events = enable_ah_flips.clone();
     let profit_tracker_events = profit_tracker.clone();
@@ -2428,20 +2600,22 @@ async fn main() -> Result<()> {
                         std::process::exit(1);
                     }
 
-                    // SkyBlock maintenance / downtime. When Hypixel is restarting
-                    // SkyBlock, a join attempt is answered with a "maintenance"
-                    // line — the server is temporarily down. Note it so the island
-                    // guard stops bouncing off `/play sb` and the stall guard treats
-                    // the quiet as expected. The window auto-clears, so the bot
-                    // resumes on its own once SkyBlock is back.
-                    if clean.to_lowercase().contains("maintenance") && note_maintenance() {
-                        warn!(
-                                "[Maintenance] SkyBlock appears to be down for maintenance — pausing rejoin for {}m",
-                                MAINTENANCE_COOLDOWN_SECS / 60
-                            );
-                        let baf_msg = "§f[§4BAF§f]: §eSkyBlock is under maintenance — pausing rejoin until it's back up".to_string();
+                    // SkyBlock maintenance. While Hypixel has SkyBlock closed, a
+                    // join attempt is answered with "SkyBlock is currently
+                    // undergoing maintenance, find out more at
+                    // https://status.hypixel.net". Players chatting about it in
+                    // the lobby do not count. The flag pauses the island and stall
+                    // guards at once; the executor then takes the bot fully
+                    // offline and the next start waits on the status page, instead
+                    // of re-sending /play sb every few minutes for hours.
+                    if frikadellen_baf::hypixel_status::is_maintenance_notice(&clean)
+                        && note_maintenance()
+                    {
+                        warn!("[Maintenance] Hypixel says SkyBlock is under maintenance — going offline until it is back");
+                        let baf_msg = "§f[§4BAF§f]: §eSkyBlock is under maintenance — going offline until it's back up".to_string();
                         print_mc_chat(&baf_msg);
                         let _ = chat_tx_events.send(baf_msg);
+                        let _ = maintenance_tx_events.send(());
                     }
 
                     // Friend-island visit refused. After we click the "Visit
@@ -6220,9 +6394,17 @@ async fn main() -> Result<()> {
     // connection latency (refreshed every 60s; also updated by `/hypixel ping`).
     frikadellen_baf::hypixel_ping::spawn_background_refresher(std::time::Duration::from_secs(60));
 
-    // Island guard: if "Your Island" is not in the scoreboard, send
-    // /lobby → /play sb → /is to return to the island.
-    // Matching TypeScript AFKHandler.ts tryToTeleportToIsland() logic.
+    // Island guard: when the sidebar does not show the island, get home with the
+    // fewest commands that can work from where the bot actually is.
+    //  - Inside SkyBlock (sidebar shows a ⏣ area): one /is. No server hop.
+    //  - Outside SkyBlock (lobby, limbo), or a /is from "SkyBlock" that did not
+    //    land because the sidebar was stale: /lobby → /play sb, then /is only if
+    //    the sidebar shows SkyBlock afterwards. A /is typed in a lobby is an
+    //    "Unknown command" no player sends every few minutes.
+    //  - /play sb that never reaches SkyBlock (the config-phase stall seen after
+    //    Hypixel evacuations) is retried once, then the process restarts: a fresh
+    //    login is routed straight to SkyBlock, retries on the stuck link are not.
+    //  - Maintenance: the chat handler takes the bot offline, nothing here runs.
     {
         let bot_client_island = bot_client.clone();
         let command_queue_island = command_queue.clone();
@@ -6233,8 +6415,12 @@ async fn main() -> Result<()> {
             // Give the startup workflow time to complete before we start checking.
             sleep(Duration::from_secs(60)).await;
 
-            // Track consecutive rejoin attempts to add cooldown when kicked from SkyBlock.
+            // Consecutive guard rounds that did not end at home (drives backoff).
             let mut consecutive_rejoin_attempts: u32 = 0;
+            // A /is sent from inside SkyBlock that did not land on the island.
+            let mut island_miss = false;
+            // Consecutive /play sb attempts that never reached SkyBlock.
+            let mut transfer_stalls: u32 = 0;
 
             loop {
                 sleep(Duration::from_secs(10)).await;
@@ -6249,11 +6435,11 @@ async fn main() -> Result<()> {
                     continue;
                 }
 
-                // SkyBlock is down for maintenance — a `/play sb` right now would
-                // just bounce. Hold off (the flag auto-clears) instead of spamming
-                // the rejoin sequence into a closed server.
+                // SkyBlock is closed: the maintenance executor is taking the bot
+                // offline. Nothing to send.
                 if skyblock_in_maintenance() {
                     consecutive_rejoin_attempts = 0;
+                    transfer_stalls = 0;
                     continue;
                 }
 
@@ -6273,23 +6459,10 @@ async fn main() -> Result<()> {
                     continue;
                 }
 
-                // If "Your Island" is in the sidebar we are home — nothing to do.
-                if lines.iter().any(|l| l.contains("Your Island")) {
+                if sidebar_shows_home(&lines) {
                     consecutive_rejoin_attempts = 0;
-                    continue;
-                }
-
-                // When flipping on a friend's island, the sidebar shows the
-                // friend's island ("⏣ <name>'s Island"), not "Your Island". Treat
-                // being on ANY island as home so the guard doesn't yank the bot
-                // back to its own island. Only applies while visitfriend is active
-                // (configured and not disabled for this session).
-                if frikadellen_baf::visitfriend::active_friend().is_some()
-                    && current_skyblock_area(&lines)
-                        .map(|a| a.contains("Island"))
-                        .unwrap_or(false)
-                {
-                    consecutive_rejoin_attempts = 0;
+                    island_miss = false;
+                    transfer_stalls = 0;
                     continue;
                 }
 
@@ -6323,59 +6496,98 @@ async fn main() -> Result<()> {
                         consecutive_rejoin_attempts, backoff_secs
                     );
                     sleep(Duration::from_secs(backoff_secs)).await;
+                    // The world may have moved on during the backoff.
+                    if skyblock_in_maintenance()
+                        || bot_client_island.state() != BotState::Idle
+                        || sidebar_shows_home(&bot_client_island.get_scoreboard_lines())
+                    {
+                        continue;
+                    }
                 }
 
-                // Not on island — send the return sequence. Name the current area
-                // when we can read it (e.g. Hypixel evacuated us to the Hub on a
-                // server restart) so an irregular world change is visible rather
-                // than a bare "not on island".
-                let baf_msg = match current_skyblock_area(&lines) {
-                    Some(area) => format!(
-                        "§f[§4BAF§f]: §eIrregular world change — now in §f{}§e, returning to island...",
-                        area
-                    ),
-                    None => "§f[§4BAF§f]: §eNot detected on island — returning to island...".to_string(),
-                };
-                print_mc_chat(&baf_msg);
-                let _ = chat_tx_island.send(baf_msg);
-                info!("[AFKHandler] Off island — sending /lobby → /play sb → /is");
-
-                // Send commands with delays between them so each server
-                // transfer has time to complete before the next fires.
-                // Check bot state between steps: if the bot left Idle (e.g.
-                // a flip arrived), abort the sequence so we don't interfere.
-                command_queue_island.enqueue(
-                    CommandType::SendChat {
-                        message: "/lobby".to_string(),
-                    },
-                    CommandPriority::High,
-                    false,
-                );
-                sleep(Duration::from_secs(5)).await;
-
-                if bot_client_island.state() != BotState::Idle {
-                    continue;
+                let lines = bot_client_island.get_scoreboard_lines();
+                match island_guard_route(current_skyblock_area(&lines).as_deref(), island_miss) {
+                    IslandRoute::IslandCommand(area) => {
+                        // Name the area (e.g. Hypixel evacuated us to the Hub on
+                        // a server restart) so an irregular world change shows.
+                        let baf_msg = format!(
+                            "§f[§4BAF§f]: §eIrregular world change — now in §f{}§e, returning to island...",
+                            area
+                        );
+                        print_mc_chat(&baf_msg);
+                        let _ = chat_tx_island.send(baf_msg);
+                        info!(
+                            "[AFKHandler] In SkyBlock ({}) but off island — sending /is",
+                            area
+                        );
+                        command_queue_island.enqueue(
+                            CommandType::GoToIsland,
+                            CommandPriority::High,
+                            false,
+                        );
+                        sleep(Duration::from_secs(15)).await;
+                        island_miss =
+                            !sidebar_shows_home(&bot_client_island.get_scoreboard_lines())
+                                && bot_client_island.state() == BotState::Idle;
+                    }
+                    IslandRoute::PlaySkyblock => {
+                        island_miss = false;
+                        if transfer_stalls >= TRANSFER_STALL_RESTART_AFTER {
+                            let baf_msg = format!(
+                                "§f[§4BAF§f]: §c/play sb stalled {} times — restarting for a fresh login",
+                                transfer_stalls
+                            );
+                            print_mc_chat(&baf_msg);
+                            let _ = chat_tx_island.send(baf_msg);
+                            error!(
+                                "[AFKHandler] /play sb never reached SkyBlock {} times — restarting process",
+                                transfer_stalls
+                            );
+                            sleep(Duration::from_secs(2)).await;
+                            restart_process();
+                        }
+                        let baf_msg =
+                            "§f[§4BAF§f]: §eNot in SkyBlock — rejoining SkyBlock...".to_string();
+                        print_mc_chat(&baf_msg);
+                        let _ = chat_tx_island.send(baf_msg);
+                        info!("[AFKHandler] Not in SkyBlock — sending /lobby → /play sb");
+                        match transfer_to_skyblock(&bot_client_island, &command_queue_island).await
+                        {
+                            SkyblockTransfer::Arrived => {
+                                transfer_stalls = 0;
+                                let lines = bot_client_island.get_scoreboard_lines();
+                                if sidebar_shows_home(&lines) {
+                                    info!("[AFKHandler] /play sb landed on the island");
+                                    continue;
+                                }
+                                if bot_client_island.state() != BotState::Idle {
+                                    continue;
+                                }
+                                info!(
+                                    "[AFKHandler] /play sb reached SkyBlock ({}) — sending /is",
+                                    current_skyblock_area(&lines).unwrap_or_default()
+                                );
+                                command_queue_island.enqueue(
+                                    CommandType::GoToIsland,
+                                    CommandPriority::High,
+                                    false,
+                                );
+                                sleep(Duration::from_secs(15)).await;
+                            }
+                            SkyblockTransfer::Maintenance => {
+                                transfer_stalls = 0;
+                            }
+                            SkyblockTransfer::Interrupted => {}
+                            SkyblockTransfer::Stalled => {
+                                transfer_stalls += 1;
+                                warn!(
+                                    "[AFKHandler] /play sb did not reach SkyBlock ({}/{}) — not sending /is",
+                                    transfer_stalls, TRANSFER_STALL_RESTART_AFTER
+                                );
+                            }
+                        }
+                    }
                 }
-
-                command_queue_island.enqueue(
-                    CommandType::SendChat {
-                        message: "/play sb".to_string(),
-                    },
-                    CommandPriority::High,
-                    false,
-                );
-                sleep(Duration::from_secs(10)).await;
-
-                if bot_client_island.state() != BotState::Idle {
-                    continue;
-                }
-
-                // Go home: friend's island (/visit + slot 11) when visitfriend is
-                // active, else the bot's own island (/is).
-                command_queue_island.enqueue(CommandType::GoToIsland, CommandPriority::High, false);
-
-                // Wait for the island teleport to finish before checking again.
-                sleep(Duration::from_secs(15)).await;
             }
         });
     }
@@ -6463,6 +6675,8 @@ async fn main() -> Result<()> {
                 let _ = chat_tx_hb.send(baf_msg);
                 // /lobby → /play sb, then "go home" (friend's island via /visit +
                 // slot 11 when visitfriend is active, else /is).
+                // /is only when /play sb did not bounce off a maintenance notice:
+                // in a lobby it is an unknown command.
                 for (cmd, delay) in [("/lobby", 5u64), ("/play sb", 10)] {
                     command_queue_hb.enqueue(
                         CommandType::SendChat {
@@ -6473,8 +6687,12 @@ async fn main() -> Result<()> {
                     );
                     sleep(Duration::from_secs(delay)).await;
                 }
-                command_queue_hb.enqueue(CommandType::GoToIsland, CommandPriority::High, false);
-                sleep(Duration::from_secs(15)).await;
+                if !skyblock_in_maintenance()
+                    && current_skyblock_area(&bot_client_hb.get_scoreboard_lines()).is_some()
+                {
+                    command_queue_hb.enqueue(CommandType::GoToIsland, CommandPriority::High, false);
+                    sleep(Duration::from_secs(15)).await;
+                }
 
                 // Give a live session time to open a window (which resets the
                 // heartbeat) before the next check, so we don't escalate too fast.
@@ -6877,6 +7095,7 @@ async fn main() -> Result<()> {
                 &flip_tracker_path_human,
                 &session_times_path_human,
                 total_secs,
+                false,
             )
             .await;
         });
@@ -6945,6 +7164,57 @@ async fn main() -> Result<()> {
                     &flip_tracker_path_break,
                     &session_times_path_break,
                     total_secs,
+                    false,
+                )
+                .await;
+            }
+        });
+    }
+
+    // ── Maintenance offline ─────────────────────────────────────────────────
+    // On Hypixel's maintenance notice, leave the server the same way a rest
+    // break does: save state, write a marker, restart. The fresh process waits
+    // on status.hypixel.net with no Minecraft connection (see
+    // `wait_out_maintenance`) and only connects once SkyBlock is back.
+    {
+        let ign_maint = ingame_name.clone();
+        let webhook_url_maint = config.active_webhook_url().map(|s| s.to_string());
+        let session_times_path_maint = session_times_path.clone();
+        let prev_secs_maint = previous_session_secs;
+        let started_maint = std::time::Instant::now();
+        let macro_paused_maint = macro_paused.clone();
+        let flip_intake_paused_maint = flip_intake_paused.clone();
+        let command_queue_maint = command_queue.clone();
+        let profit_tracker_maint = profit_tracker.clone();
+        let profit_path_maint = profit_path.clone();
+        let flip_tracker_maint = flip_tracker.clone();
+        let flip_tracker_path_maint = flip_tracker_path.clone();
+        tokio::spawn(async move {
+            use rand::Rng;
+            // The restart path diverges, so this handles exactly one notice.
+            if maintenance_rx.recv().await.is_some() {
+                // Read the notice, then log off, like a person would. Also
+                // lets the chat line reach the panel before the restart.
+                let linger = rand::rng().random_range(5..=20u64);
+                sleep(Duration::from_secs(linger)).await;
+                if let Some(ref url) = webhook_url_maint {
+                    frikadellen_baf::webhook::send_webhook_maintenance_offline(&ign_maint, url)
+                        .await;
+                }
+                let total_secs = prev_secs_maint + started_maint.elapsed().as_secs();
+                take_rest_break_and_restart(
+                    &ign_maint,
+                    MAINTENANCE_MAX_OFFLINE_SECS,
+                    &macro_paused_maint,
+                    &flip_intake_paused_maint,
+                    &command_queue_maint,
+                    &profit_tracker_maint,
+                    &profit_path_maint,
+                    &flip_tracker_maint,
+                    &flip_tracker_path_maint,
+                    &session_times_path_maint,
+                    total_secs,
+                    true,
                 )
                 .await;
             }
@@ -7176,12 +7446,13 @@ async fn main() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        current_skyblock_area, is_ban_disconnect, is_direct_address, mark_activity,
-        note_maintenance, parse_bz_list_flip_detail, parse_cofl_bz_h_total_profit,
+        current_skyblock_area, is_ban_disconnect, is_direct_address, island_guard_route,
+        mark_activity, note_maintenance, parse_bz_list_flip_detail, parse_cofl_bz_h_total_profit,
         parse_cofl_profit_response, parse_island_visitor, parse_name_mention, parse_short_number,
         restore_flip_tracker, save_flip_tracker, secs_since_activity,
         should_drop_bazaar_command_during_ah_pause, should_enqueue_periodic_auction_claim,
-        skyblock_in_maintenance, FlipTrackerMap, MAX_TRACKED_FLIP_AGE_SECS,
+        sidebar_shows_home, skyblock_in_maintenance, FlipTrackerMap, IslandRoute,
+        MAX_TRACKED_FLIP_AGE_SECS,
     };
     use frikadellen_baf::types::{BotState, CommandType};
 
@@ -7196,6 +7467,33 @@ mod tests {
         // No area glyph → no area (fall back to the generic notice).
         let no_area = vec!["SKYBLOCK".to_string(), "Purse: 1,000".to_string()];
         assert_eq!(current_skyblock_area(&no_area), None);
+    }
+
+    #[test]
+    fn island_guard_sends_is_only_from_inside_skyblock() {
+        // In the Hub after an evacuation: a plain /is, no server hop.
+        assert_eq!(
+            island_guard_route(Some("Hub"), false),
+            IslandRoute::IslandCommand("Hub")
+        );
+        // Main lobby or limbo: no ⏣ area, so rejoin SkyBlock first.
+        assert_eq!(island_guard_route(None, false), IslandRoute::PlaySkyblock);
+        // The last /is from "Hub" did not land (stale sidebar): rejoin instead
+        // of sending /is again.
+        assert_eq!(
+            island_guard_route(Some("Hub"), true),
+            IslandRoute::PlaySkyblock
+        );
+    }
+
+    #[test]
+    fn home_is_the_own_island_sidebar() {
+        let island = vec!["SKYBLOCK".to_string(), " ⏣ Your Island".to_string()];
+        assert!(sidebar_shows_home(&island));
+        let hub = vec!["SKYBLOCK".to_string(), " ⏣ Hub".to_string()];
+        assert!(!sidebar_shows_home(&hub));
+        let lobby = vec!["Rank: Default".to_string(), "Achievements: 0".to_string()];
+        assert!(!sidebar_shows_home(&lobby));
     }
 
     #[test]

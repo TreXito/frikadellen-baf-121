@@ -11,6 +11,7 @@ pub mod config;
 pub mod gui;
 pub mod handlers;
 pub mod hypixel_ping;
+pub mod hypixel_status;
 pub mod inventory;
 pub mod logging;
 pub mod profit;

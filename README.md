@@ -309,6 +309,17 @@ humanization_max_break_minutes = 10
 
 When a break triggers, the bot disconnects from the server, waits a random duration within the configured range, and then reconnects. Discord webhook notifications are sent when breaks start and end.
 
+### SkyBlock maintenance
+
+When Hypixel answers a join with "SkyBlock is currently undergoing maintenance", the bot goes offline the same way a rest break does. While offline it polls [status.hypixel.net](https://status.hypixel.net) every 2-3 minutes over plain HTTPS, with no Minecraft connection, and reconnects:
+
+- as soon as the page, having listed SkyBlock as down, lists it as up again;
+- 15 minutes after a listed maintenance's scheduled end, if the page is late;
+- after 30 minutes if the page never lists the outage or cannot be read;
+- every 2 hours during a listed outage with no scheduled end.
+
+Restarting the bot by hand during the wait connects immediately. Webhooks are sent when it goes offline and when it reconnects.
+
 ---
 
 ## Stealth Session Pacing

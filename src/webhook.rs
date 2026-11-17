@@ -2046,6 +2046,37 @@ pub async fn send_webhook_rest_break_end(ingame_name: &str, webhook_url: &str) {
     post_embed(webhook_url, payload).await;
 }
 
+/// Send a webhook when the bot goes offline because SkyBlock is in maintenance.
+pub async fn send_webhook_maintenance_offline(ingame_name: &str, webhook_url: &str) {
+    let payload = serde_json::json!({
+        "embeds": [{
+            "title": "🛠️ SkyBlock Maintenance",
+            "description": "Hypixel says SkyBlock is under maintenance. Going offline and \
+                            watching status.hypixel.net, will reconnect when it is back.",
+            "color": 0xf39c12u32,
+            "footer": {
+                "text": format!("BAF • {}", ingame_name)
+            }
+        }]
+    });
+    post_embed(webhook_url, payload).await;
+}
+
+/// Send a webhook when a maintenance wait ends and the bot reconnects.
+pub async fn send_webhook_maintenance_over(ingame_name: &str, reason: &str, webhook_url: &str) {
+    let payload = serde_json::json!({
+        "embeds": [{
+            "title": "✅ Maintenance Over",
+            "description": format!("Reconnecting: {}.", reason),
+            "color": 0x2ecc71u32,
+            "footer": {
+                "text": format!("BAF • {}", ingame_name)
+            }
+        }]
+    });
+    post_embed(webhook_url, payload).await;
+}
+
 /// Send a webhook when a friend's island refuses the bot's visit (guest visits
 /// disabled). The `visitfriend` option is ignored for the rest of the session
 /// and the bot flips on its own island instead.
