@@ -145,15 +145,29 @@ fn secs_since_activity() -> i64 {
     }
 }
 
-/// Best-effort current SkyBlock area from the scoreboard (the line carrying the
-/// `⏣` area glyph, glyph stripped). Used to name the location in an irregular
-/// world-change notice. Returns `None` when the area line isn't present.
+/// The sidebar's location icon. Hypixel used `⏣` (U+23E3); it now sends a
+/// private-use codepoint that its resource pack draws as the same icon
+/// (U+E067, seen 2026-11-19 as " \u{e067} Village" / " \u{e067} Your Island").
+/// Matching only `⏣` made every area unreadable: after a "Game Update"
+/// evacuation to the Hub the island guard saw "not in SkyBlock", hopped
+/// /lobby -> /play sb, landed in the Hub again, and restarted the process.
+fn is_area_glyph(c: char) -> bool {
+    c == '⏣' || ('\u{E000}'..='\u{F8FF}').contains(&c)
+}
+
+/// Best-effort current SkyBlock area from the scoreboard: the line that starts
+/// with the area glyph (see [`is_area_glyph`]), glyph stripped. Returns `None`
+/// when no area line is present (main lobby, limbo).
 fn current_skyblock_area(lines: &[String]) -> Option<String> {
-    lines
-        .iter()
-        .find(|l| l.contains('⏣'))
-        .map(|l| l.replace('⏣', "").trim().to_string())
-        .filter(|s| !s.is_empty())
+    lines.iter().find_map(|l| {
+        let clean = frikadellen_baf::logging::remove_color_codes(l);
+        let mut chars = clean.trim_start().chars();
+        if !chars.next().is_some_and(is_area_glyph) {
+            return None;
+        }
+        let area = chars.as_str().trim();
+        (!area.is_empty()).then(|| area.to_string())
+    })
 }
 
 /// The sidebar says the bot is home: its own island, or any island while
@@ -7467,6 +7481,42 @@ mod tests {
         // No area glyph → no area (fall back to the generic notice).
         let no_area = vec!["SKYBLOCK".to_string(), "Purse: 1,000".to_string()];
         assert_eq!(current_skyblock_area(&no_area), None);
+    }
+
+    /// Byte-exact sidebar from the live bot, 2026-11-19 17:11 after Hypixel's
+    /// "Game Update" evacuation. The icon is U+E067, not ⏣.
+    #[test]
+    fn skyblock_area_with_resource_pack_glyph() {
+        let hub = vec![
+            "11/19/26 M24E".to_string(),
+            " Early Spring 22nd".to_string(),
+            " \u{e067} Village".to_string(),
+            "Purse: 368,955,949".to_string(),
+            "Objective ⬉".to_string(),
+        ];
+        assert_eq!(current_skyblock_area(&hub), Some("Village".to_string()));
+        assert_eq!(
+            island_guard_route(current_skyblock_area(&hub).as_deref(), false),
+            IslandRoute::IslandCommand("Village")
+        );
+        let island = vec![" \u{e067} Your Island".to_string()];
+        assert_eq!(
+            current_skyblock_area(&island),
+            Some("Your Island".to_string())
+        );
+        assert!(sidebar_shows_home(&island));
+        // Colour codes around the glyph do not hide it.
+        let coloured = vec![" §7\u{e067} §bHub".to_string()];
+        assert_eq!(current_skyblock_area(&coloured), Some("Hub".to_string()));
+        // The main lobby sidebar has no area line.
+        let lobby = vec![
+            "Rank: Default".to_string(),
+            "Lobby: 1".to_string(),
+            "www.hypixel.net".to_string(),
+        ];
+        assert_eq!(current_skyblock_area(&lobby), None);
+        // A bare glyph with no name is not an area.
+        assert_eq!(current_skyblock_area(&[" \u{e067} ".to_string()]), None);
     }
 
     #[test]
