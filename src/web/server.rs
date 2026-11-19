@@ -1875,10 +1875,24 @@ async fn fetch_player_uuid(username: &str) -> Option<String> {
     ))
 }
 
+/// Seconds left until `at_ms` as of `now_ms`, falling back to the snapshot's
+/// own seconds-left value when it carries no absolute stamp.
+fn secs_left_now(at_ms: Option<i64>, snapshot_secs: Option<i64>, now_ms: i64) -> Option<i64> {
+    match at_ms {
+        // Round up: 0.4 s left is still "1s", not "Expired".
+        Some(at) => Some((at - now_ms + 999).div_euclid(1000)),
+        None => snapshot_secs,
+    }
+}
+
 async fn get_auctions(State(s): State<WebSharedState>) -> impl IntoResponse {
     // Try locally cached "My Auctions" data first (extracted from in-game GUI).
     // This provides immediate, accurate data without external API calls.
     if let Some(cached_json) = s.bot_client.get_cached_my_auctions_json() {
+        // The cache is a snapshot from the last Manage Auctions look. Its
+        // absolute `ends_at_ms` / `buyable_at_ms` stamps turn into seconds
+        // left as of NOW, so a stale snapshot does not serve stale timers.
+        let now_ms = chrono::Utc::now().timestamp_millis();
         // Parse the cached array and convert to AuctionEntry format
         if let Ok(cached_arr) = serde_json::from_str::<Vec<serde_json::Value>>(&cached_json) {
             let entries: Vec<AuctionEntry> = cached_arr
@@ -1899,10 +1913,17 @@ async fn get_auctions(State(s): State<WebSharedState>) -> impl IntoResponse {
                     starting_bid: a.get("starting_bid").and_then(|v| v.as_i64()).unwrap_or(0),
                     bin: a.get("bin").and_then(|v| v.as_bool()).unwrap_or(false),
                     end: String::new(),
-                    time_remaining_seconds: a
-                        .get("time_remaining_seconds")
-                        .and_then(|v| v.as_i64()),
-                    buyable_in_seconds: a.get("buyable_in_seconds").and_then(|v| v.as_i64()),
+                    time_remaining_seconds: secs_left_now(
+                        a.get("ends_at_ms").and_then(|v| v.as_i64()),
+                        a.get("time_remaining_seconds").and_then(|v| v.as_i64()),
+                        now_ms,
+                    ),
+                    buyable_in_seconds: secs_left_now(
+                        a.get("buyable_at_ms").and_then(|v| v.as_i64()),
+                        a.get("buyable_in_seconds").and_then(|v| v.as_i64()),
+                        now_ms,
+                    )
+                    .filter(|&secs| secs > 0),
                     lore: a.get("lore").and_then(|v| v.as_array()).map(|arr| {
                         arr.iter()
                             .filter_map(|l| l.as_str().map(|s| s.to_string()))
@@ -2630,6 +2651,23 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("baf-tls-{}-{}", name, std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
+    }
+
+    #[test]
+    fn auction_seconds_left_are_computed_at_request_time() {
+        let now = 1_000_000_000_000;
+        // Snapshot said 3600 s, taken 10 min ago: 3000 s left now.
+        assert_eq!(
+            secs_left_now(Some(now + 3_000_000), Some(3600), now),
+            Some(3000)
+        );
+        // Round up so a sub-second remainder is not "Expired".
+        assert_eq!(secs_left_now(Some(now + 400), Some(1), now), Some(1));
+        assert_eq!(secs_left_now(Some(now), Some(1), now), Some(0));
+        assert!(secs_left_now(Some(now - 5_000), Some(1), now).unwrap() < 0);
+        // No stamp: keep the snapshot value (null stays unknown).
+        assert_eq!(secs_left_now(None, Some(42), now), Some(42));
+        assert_eq!(secs_left_now(None, None, now), None);
     }
 
     #[test]

@@ -1194,6 +1194,35 @@ function formatAuctionTime(a) {
     return formatTimeRemaining(a.time_remaining_seconds);
 }
 
+/**
+ * Live "Time Left": each cell carries absolute deadlines on the browser's own
+ * clock (fetch time + seconds left, so server/browser clock skew cancels out)
+ * and a 1 s ticker re-renders it. Before this the column stayed frozen at the
+ * snapshot from the bot's last Manage Auctions look.
+ */
+function auctionTimeFromDeadlines(endsAt, buyableAt, now) {
+    const left = at => (at === null ? null : Math.ceil((at - now) / 1000));
+    const buyable = left(buyableAt);
+    return {
+        time_remaining_seconds: left(endsAt),
+        buyable_in_seconds: buyable !== null && buyable > 0 ? buyable : null,
+    };
+}
+
+function tickAuctionTimers() {
+    const now = Date.now();
+    document.querySelectorAll('#auction-container td.auction-time').forEach(td => {
+        const endsAt = td.dataset.endsAt ? Number(td.dataset.endsAt) : null;
+        const buyableAt = td.dataset.buyableAt ? Number(td.dataset.buyableAt) : null;
+        if (endsAt === null && buyableAt === null) return;
+        const a = auctionTimeFromDeadlines(endsAt, buyableAt, now);
+        td.textContent = formatAuctionTime(a);
+        td.classList.toggle('urgent', typeof a.time_remaining_seconds === 'number'
+            && a.time_remaining_seconds < 3600);
+    });
+}
+setInterval(tickAuctionTimers, 1000);
+
 function renderAuctions(auctions) {
     const container = $('auction-container');
     if (auctions.length === 0) {
@@ -1204,6 +1233,7 @@ function renderAuctions(auctions) {
     table.className = 'auction-table';
     table.innerHTML = '<thead><tr><th></th><th>Item</th><th>Price</th><th>Time Left</th><th></th></tr></thead>';
     const tbody = document.createElement('tbody');
+    const fetchedAt = Date.now();
     auctions.forEach(a => {
         const tr = document.createElement('tr');
         tr.style.position = 'relative';
@@ -1230,6 +1260,13 @@ function renderAuctions(auctions) {
         cancelBtn.textContent = 'Cancel';
         cancelBtn.addEventListener('click', () => cancelAuction(a.item_name, a.starting_bid || 0));
         tr.lastElementChild.appendChild(cancelBtn);
+        const timeCell = tr.querySelector('td.auction-time');
+        if (typeof a.time_remaining_seconds === 'number') {
+            timeCell.dataset.endsAt = fetchedAt + a.time_remaining_seconds * 1000;
+        }
+        if (typeof a.buyable_in_seconds === 'number') {
+            timeCell.dataset.buyableAt = fetchedAt + a.buyable_in_seconds * 1000;
+        }
         // Add lore tooltip if available
         if (a.lore && a.lore.length > 0) {
             const tip = document.createElement('div');
