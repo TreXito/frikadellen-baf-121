@@ -3206,6 +3206,20 @@ async fn event_handler(bot: Client, event: Event, state: BotClientState) -> Resu
                     // `only_claim_own_auctions` tell our sold auctions apart from
                     // a co-op member's in the shared Manage Auctions window.
                     crate::auction_ownership::note_own_listing(&item, bid as i64);
+                    // Remember when it went up: a listing still in its grace
+                    // period shows no "Ends in:" line, so this is the only way
+                    // to know its end time until the next Manage Auctions look.
+                    let listed_name = clean_message
+                        .split("BIN Auction started for ")
+                        .nth(1)
+                        .and_then(|s| s.strip_suffix('!'))
+                        .unwrap_or(&item);
+                    note_listing_time(
+                        listed_name,
+                        bid as i64,
+                        dur,
+                        chrono::Utc::now().timestamp_millis(),
+                    );
                 }
                 // Listing succeeded — clear any stale auction-limit flag and
                 // reset the stuck-item retry counter so the next SellToAuction
@@ -8025,8 +8039,14 @@ fn build_cached_my_auctions_json(slots: &[azalea_inventory::ItemStack], state: &
         } else {
             None
         };
-        let time_remaining_json = match time_remaining_secs {
-            Some(secs) => serde_json::json!(secs),
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        let listed_end_ms = price
+            .filter(|_| grace_secs.is_some())
+            .and_then(|p| listing_end_ms(&display_name, p));
+        let (ends_at_ms, buyable_at_ms) =
+            auction_deadlines(now_ms, time_remaining_secs, grace_secs, listed_end_ms);
+        let time_remaining_json = match ends_at_ms {
+            Some(end) => serde_json::json!((end - now_ms) / 1000),
             None if status == "active" => serde_json::Value::Null,
             None => serde_json::json!(0),
         };
@@ -8100,6 +8120,8 @@ fn build_cached_my_auctions_json(slots: &[azalea_inventory::ItemStack], state: &
             "lore": lore_colored,
             "time_remaining_seconds": time_remaining_json,
             "buyable_in_seconds": grace_secs,
+            "ends_at_ms": ends_at_ms,
+            "buyable_at_ms": buyable_at_ms,
         });
 
         // Add colored item name (with §-codes) for rarity-colored tooltip title
@@ -8159,11 +8181,58 @@ fn extract_price_from_lore(lore: &[String]) -> Option<i64> {
     None
 }
 
+/// When each of our BINs went up, keyed by [`listing_key`]: (listed_at_ms,
+/// duration_hours). Lets the Manage Auctions snapshot give a listing that is
+/// still in its grace period (no "Ends in:" line yet) a real end time.
+static LISTING_TIMES: Lazy<parking_lot::Mutex<HashMap<String, (i64, u64)>>> =
+    Lazy::new(|| parking_lot::Mutex::new(HashMap::new()));
+
+fn listing_key(item_name: &str, price: i64) -> String {
+    format!(
+        "{}|{}",
+        remove_mc_colors(item_name).trim().to_lowercase(),
+        price
+    )
+}
+
+fn note_listing_time(item_name: &str, price: i64, duration_hours: u64, now_ms: i64) {
+    let mut map = LISTING_TIMES.lock();
+    map.retain(|_, (at, hours)| *at + (*hours as i64) * 3_600_000 > now_ms);
+    map.insert(listing_key(item_name, price), (now_ms, duration_hours));
+}
+
+/// End time (unix ms) of a listing we saw go up, if we did.
+fn listing_end_ms(item_name: &str, price: i64) -> Option<i64> {
+    LISTING_TIMES
+        .lock()
+        .get(&listing_key(item_name, price))
+        .map(|(at, hours)| at + (*hours as i64) * 3_600_000)
+}
+
+/// Absolute unix-ms times for one Manage Auctions entry, stamped at snapshot
+/// time so the web panel can count down between snapshots instead of showing
+/// the values frozen at the last look. Returns (ends_at_ms, buyable_at_ms).
+/// `listed_end_ms` is the fallback end for a grace-period listing whose lore
+/// has no "Ends in:" line yet.
+fn auction_deadlines(
+    now_ms: i64,
+    time_remaining_secs: Option<i64>,
+    grace_secs: Option<i64>,
+    listed_end_ms: Option<i64>,
+) -> (Option<i64>, Option<i64>) {
+    let ends_at = time_remaining_secs
+        .map(|s| now_ms + s * 1000)
+        .or(listed_end_ms.filter(|_| grace_secs.is_some()));
+    (ends_at, grace_secs.map(|g| now_ms + g * 1000))
+}
+
 /// True when a lowercased, color-stripped lore blob shows Hypixel's post-listing
 /// grace period ("Can be bought in 20s"), during which the auction exists but
 /// nobody may buy it yet.
 fn is_grace_period_lore(combined_lower: &str) -> bool {
     combined_lower.contains("can be bought in")
+        // Hypixel's current wording (2026-11): "Can buy in: 18s".
+        || combined_lower.contains("can buy in")
         || combined_lower.contains("buyable in")
         || combined_lower.contains("purchasable in")
 }
@@ -8183,6 +8252,7 @@ fn extract_grace_seconds_from_lore(lore: &[String]) -> Option<i64> {
             .find("bought in")
             .or_else(|| clean.find("buyable in"))
             .or_else(|| clean.find("purchasable in"))
+            .or_else(|| clean.find("can buy in"))
             .map(|i| &clean[i..])
             .unwrap_or(&clean);
         if let Some(secs) = parse_bed_remaining_secs_from_text(tail) {
@@ -10038,6 +10108,102 @@ mod tests {
             ]),
             None
         );
+    }
+
+    /// Byte-exact lore from the live bot, 2026-11-19 18:39, right after
+    /// "BIN Auction started for Copper Talisman!". Hypixel now words the grace
+    /// period "Can buy in: 18s"; that used to log "UNPARSABLE time".
+    fn live_grace_lore(countdown: &str) -> Vec<String> {
+        [
+            "Accessory Power: +3",
+            "",
+            "Garden Visitors are 4% more likely to",
+            "be RARE or higher.",
+            "",
+            "Works while in Accessory Bag!",
+            "COMMON ACCESSORY",
+            "-----------------",
+            "Seller: thomsonkills",
+            "Buy it now: 15,625,000 coins",
+            "",
+            "This is your own auction!",
+            "",
+            countdown,
+            "",
+            "Click to inspect!",
+        ]
+        .iter()
+        .map(|l| l.to_string())
+        .collect()
+    }
+
+    #[test]
+    fn test_can_buy_in_is_the_grace_period() {
+        let lore = live_grace_lore("Can buy in: 18s");
+        let combined = lore.join("\n").to_lowercase();
+        assert!(is_grace_period_lore(&combined));
+        assert_eq!(extract_grace_seconds_from_lore(&lore), Some(18));
+        assert_eq!(
+            extract_grace_seconds_from_lore(&live_grace_lore("Can buy in: 05s")),
+            Some(5)
+        );
+        // The price line must not be read as the countdown.
+        assert_eq!(extract_price_from_lore(&lore), Some(15_625_000));
+        assert_eq!(extract_time_remaining_from_lore(&lore), None);
+        // Coloured variant.
+        assert_eq!(
+            extract_grace_seconds_from_lore(&["§cCan buy in: §e12s".to_string()]),
+            Some(12)
+        );
+        // "Buy it now" alone is not a grace period.
+        assert!(!is_grace_period_lore("buy it now: 15,625,000 coins"));
+    }
+
+    #[test]
+    fn test_auction_deadlines_are_absolute() {
+        let now = 1_000_000_000_000;
+        // Ordinary listing: end from "Ends in", no grace.
+        assert_eq!(
+            auction_deadlines(now, Some(3600), None, None),
+            (Some(now + 3_600_000), None)
+        );
+        // Grace listing with no "Ends in": end comes from our own listing record.
+        let listed_end = now + 6 * 3_600_000 - 2_000;
+        assert_eq!(
+            auction_deadlines(now, None, Some(18), Some(listed_end)),
+            (Some(listed_end), Some(now + 18_000))
+        );
+        // Grace listing we never saw go up: end stays unknown.
+        assert_eq!(
+            auction_deadlines(now, None, Some(18), None),
+            (None, Some(now + 18_000))
+        );
+        // A parsed "Ends in" wins over the listing record.
+        assert_eq!(
+            auction_deadlines(now, Some(60), Some(5), Some(listed_end)),
+            (Some(now + 60_000), Some(now + 5_000))
+        );
+        // The listing record is only a grace-period fallback.
+        assert_eq!(
+            auction_deadlines(now, None, None, Some(listed_end)),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn test_listing_time_matches_the_manage_auctions_entry() {
+        let t0 = 2_000_000_000_000;
+        // Chat name (colour-stripped) vs. the coloured GUI display name.
+        note_listing_time("[Lvl 100] Snowman TEST", 35_469_823, 6, t0);
+        assert_eq!(
+            listing_end_ms("§6[Lvl 100] Snowman TEST", 35_469_823),
+            Some(t0 + 6 * 3_600_000)
+        );
+        // Same item at another price is another listing.
+        assert_eq!(listing_end_ms("[Lvl 100] Snowman TEST", 35_000_000), None);
+        // Records past their end are pruned on the next insert.
+        note_listing_time("Other Item TEST", 1, 1, t0 + 7 * 3_600_000);
+        assert_eq!(listing_end_ms("[Lvl 100] Snowman TEST", 35_469_823), None);
     }
 
     #[test]
