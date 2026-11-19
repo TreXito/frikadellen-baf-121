@@ -247,6 +247,10 @@ body{position:relative}
 .auction-table td:first-child{border-radius:10px 0 0 10px}
 .auction-table td:last-child{border-radius:0 10px 10px 0;text-align:right}
 .auction-table td:hover .tooltip{display:block}
+/* Every glass card is its own stacking context (isolation keeps the backdrop on ::before),
+   so a tooltip's z-index only counts inside its card and later cards paint over it.
+   Lift the card whose item is hovered above its neighbours (still under the sticky header). */
+.card:has(:hover > .tooltip){z-index:20}
 .auction-icon{width:30px;height:30px;image-rendering:pixelated;vertical-align:middle;filter:drop-shadow(0 2px 3px rgba(0,0,0,.4))}
 .auction-bid{font-weight:600;font-family:var(--mono);font-size:.82rem;color:var(--heading)}
 .coins::after{content:"";display:inline-block;width:.6em;height:.6em;margin-left:.4em;border-radius:50%;vertical-align:.02em;
@@ -1424,8 +1428,8 @@ function renderInventory(inv) {
                 img.alt = stripMC(name);
                 img.loading = 'lazy';
                 img.onerror = function() {
-                    this.style.display = 'none';
-                    this.parentElement.textContent = stripMC(name).substring(0, 8);
+                    // swap only the icon for a short name; the slot keeps its tooltip and count
+                    this.replaceWith(document.createTextNode(stripMC(name).substring(0, 8)));
                 };
                 div.appendChild(img);
             } else {
@@ -1612,9 +1616,11 @@ function positionTooltip(tip, e) {
     if (left + tw > vw - pad) left = e.clientX - tw - pad;
     // If tooltip goes off bottom edge, show above cursor
     if (top + th > vh - pad) top = e.clientY - th - pad;
-    // Clamp to viewport
+    // Clamp to viewport, and keep clear of the sticky header (it sits above the cards)
+    const hdr = document.querySelector('.header');
+    const minTop = Math.max(pad, hdr ? hdr.getBoundingClientRect().bottom + 8 : pad);
     if (left < pad) left = pad;
-    if (top < pad) top = pad;
+    if (top < minTop) top = minTop;
     tip.style.left = left + 'px';
     tip.style.top = top + 'px';
 }
@@ -1760,7 +1766,7 @@ function renderGameView(data){
                 img.src=iconUrl;
                 img.alt=stripMC(name);
                 img.loading='lazy';
-                img.onerror=function(){this.style.display='none';this.parentElement.textContent=stripMC(name).substring(0,8)};
+                img.onerror=function(){this.replaceWith(document.createTextNode(stripMC(name).substring(0,8)))};
                 div.appendChild(img);
             }else{
                 const label=document.createElement('span');
