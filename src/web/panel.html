@@ -2195,6 +2195,8 @@ const CONFIG_SCHEMA = [
      help:'Minimum gap between queued Hypixel interactions, so they cannot overlap.'},
     {key:'enable_console_input', group:'system', type:'bool', label:'Accept console input',
      help:'Turn off when running headless or as a service.'},
+    {key:'packet_dump', group:'system', type:'bool', label:'Record packet dumps', advanced:true,
+     help:'Writes logs/packets-<UTC time>.bin on every start for tools/vanilla-oracle: configuration phases, container traffic, clicks, keepalives and pings, never chat. Observes only. Keeps the newest 2 GB of dumps. Takes effect after a restart.'},
     {key:'hypixel_api_key', group:'system', type:'text', label:'Hypixel API key', secret:true,
      help:'From developer.hypixel.net. Optional — Coflnet is used as a fallback for auction lookups.'},
     {key:'auto_cookie_prompted', group:'system', type:'bool', label:'Auto-cookie prompt answered', advanced:true,
