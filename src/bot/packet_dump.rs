@@ -1,18 +1,23 @@
-//! `BAF_PACKET_DUMP=<file>`: record the packets a vanilla-client oracle needs to
-//! re-check every click this bot sends.
+//! Record the packets a vanilla-client oracle needs to re-check every click
+//! and every configuration phase this bot goes through.
 //!
-//! Off unless the variable is set. It only observes: no packet is changed,
-//! delayed or added. Raw frames come from azalea's
+//! Off unless `packet_dump = true` in config.toml (a new
+//! `logs/packets-<UTC time>.bin` per start) or `BAF_PACKET_DUMP=<file>` is
+//! set. It only observes: no packet is changed, delayed or added. Raw frames come from azalea's
 //! [`PACKET_TAP`](azalea_client::connection::PACKET_TAP), so inbound items are
 //! the exact bytes Hypixel sent, before azalea decodes them.
 //!
 //! Recorded:
-//! - configuration: registry data, tags, known packs, enabled features, finish
+//! - configuration, inbound: every packet, so a phase that never finishes
+//!   shows what Hypixel sent last (resource pack pushes, pings, cookies)
 //! - game, inbound: login, respawn, reconfiguration start, tags, every
-//!   container open/close/content/slot packet, cursor and player inventory sets
+//!   container open/close/content/slot packet, cursor and player inventory
+//!   sets, keepalives, pings, cookies, resource pack push/pop, disconnect and
+//!   transfer
 //! - outbound: container clicks, button clicks, closes, sign updates, carried
-//!   slot changes, the configuration acks, and the login-time client
-//!   information, brand / custom payloads and resource pack replies
+//!   slot changes, the configuration acks, client information, brand / custom
+//!   payloads, resource pack replies, keepalives, pongs, ping requests and
+//!   cookie replies
 //!
 //! Chat is never recorded. `tools/vanilla-oracle` replays the file through
 //! Mojang's own 26.3 client code and reports every click whose bytes differ from
@@ -26,6 +31,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufWriter, Write};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -35,14 +41,6 @@ use parking_lot::Mutex;
 use tracing::{info, warn};
 
 pub(crate) const MAGIC: &[u8; 8] = b"BAFPKT1\n";
-
-const INBOUND_CONFIG: &[&str] = &[
-    "registry_data",
-    "update_tags",
-    "select_known_packs",
-    "update_enabled_features",
-    "finish_configuration",
-];
 
 const INBOUND_GAME: &[&str] = &[
     "login",
@@ -55,6 +53,15 @@ const INBOUND_GAME: &[&str] = &[
     "container_close",
     "set_cursor_item",
     "set_player_inventory",
+    "keep_alive",
+    "ping",
+    "pong_response",
+    "cookie_request",
+    "store_cookie",
+    "resource_pack_push",
+    "resource_pack_pop",
+    "disconnect",
+    "transfer",
 ];
 
 const OUTBOUND: &[&str] = &[
@@ -69,7 +76,17 @@ const OUTBOUND: &[&str] = &[
     "client_information",
     "custom_payload",
     "resource_pack",
+    "keep_alive",
+    "pong",
+    "ping_request",
+    "cookie_response",
+    "accept_code_of_conduct",
+    "custom_click_action",
 ];
+
+/// Name prefix and extension of the per-start files `packet_dump = true` writes.
+const AUTO_PREFIX: &str = "packets-";
+const AUTO_EXT: &str = ".bin";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
@@ -89,30 +106,55 @@ struct Dump {
 static DUMP: Mutex<Option<Dump>> = Mutex::new(None);
 static STOPPED: AtomicBool = AtomicBool::new(false);
 
-/// Start recording when `BAF_PACKET_DUMP` names a file. Call once, before the
-/// bot connects. `BAF_PACKET_DUMP_MAX_MB` caps the file (default 512 MB).
-pub fn init_from_env() {
-    let Ok(path) = std::env::var("BAF_PACKET_DUMP") else {
-        return;
-    };
-    let path = path.trim();
-    if path.is_empty() {
-        return;
-    }
-    let cap_mb = std::env::var("BAF_PACKET_DUMP_MAX_MB")
+fn env_mb(name: &str, default: u64) -> u64 {
+    std::env::var(name)
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
-        .unwrap_or(512);
+        .unwrap_or(default)
+}
 
-    let mut dump = match Dump::open(path, cap_mb * 1024 * 1024) {
+/// Start recording. Call once, before the bot connects.
+///
+/// `BAF_PACKET_DUMP=<file>` records to that file. Otherwise `enabled_in_config`
+/// (`packet_dump` in config.toml) records to a new `logs/packets-<UTC>.bin`,
+/// after deleting the oldest such files beyond `BAF_PACKET_DUMP_KEEP_MB`
+/// (default 2048 MB). `BAF_PACKET_DUMP_MAX_MB` caps one file (default 512 MB).
+pub fn init(enabled_in_config: bool) {
+    let cap_mb = env_mb("BAF_PACKET_DUMP_MAX_MB", 512);
+    let from_env = std::env::var("BAF_PACKET_DUMP")
+        .ok()
+        .map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty());
+    let path = match from_env {
+        Some(path) => PathBuf::from(path),
+        None if enabled_in_config => {
+            let dir = crate::logging::get_logs_dir();
+            if let Err(error) = std::fs::create_dir_all(&dir) {
+                warn!(
+                    "[PacketDump] Cannot create {}: {error}. Recording is off.",
+                    dir.display()
+                );
+                return;
+            }
+            let keep = env_mb("BAF_PACKET_DUMP_KEEP_MB", 2048) * 1024 * 1024;
+            for removed in prune_old_dumps(&dir, keep) {
+                info!("[PacketDump] Deleted old dump {}", removed.display());
+            }
+            dir.join(auto_file_name(chrono::Utc::now()))
+        }
+        None => return,
+    };
+    let shown = path.display();
+
+    let mut dump = match Dump::open(&path, cap_mb * 1024 * 1024) {
         Ok(dump) => dump,
         Err(error) => {
-            warn!("[PacketDump] Cannot open {path}: {error}. Recording is off.");
+            warn!("[PacketDump] Cannot open {shown}: {error}. Recording is off.");
             return;
         }
     };
     if !dump.record(Kind::SessionStart, "session_start", &[]) {
-        warn!("[PacketDump] {path} is already at its {cap_mb} MB cap. Recording is off.");
+        warn!("[PacketDump] {shown} is already at its {cap_mb} MB cap. Recording is off.");
         return;
     }
     *DUMP.lock() = Some(dump);
@@ -122,8 +164,53 @@ pub fn init_from_env() {
         return;
     }
     info!(
-        "[PacketDump] Recording container, click and registry packets to {path} (cap {cap_mb} MB). Packets are observed only, never changed."
+        "[PacketDump] Recording configuration, container and click packets to {shown} (cap {cap_mb} MB). Packets are observed only, never changed."
     );
+}
+
+fn auto_file_name(now: chrono::DateTime<chrono::Utc>) -> String {
+    format!("{AUTO_PREFIX}{}{AUTO_EXT}", now.format("%Y%m%d-%H%M%S"))
+}
+
+/// Delete the oldest `packets-*.bin` files in `dir` until the rest fit in
+/// `keep` bytes. Newest first by modification time, so the latest runs stay.
+/// Returns the deleted paths.
+fn prune_old_dumps(dir: &Path, keep: u64) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut dumps: Vec<(std::time::SystemTime, PathBuf, u64)> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let name = name.to_str()?;
+            if !name.starts_with(AUTO_PREFIX) || !name.ends_with(AUTO_EXT) {
+                return None;
+            }
+            let meta = entry.metadata().ok()?;
+            if !meta.is_file() {
+                return None;
+            }
+            let modified = meta.modified().unwrap_or(UNIX_EPOCH);
+            Some((modified, entry.path(), meta.len()))
+        })
+        .collect();
+    dumps.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.cmp(&a.1)));
+
+    let mut kept = 0u64;
+    let mut removed = Vec::new();
+    for (_, path, len) in dumps {
+        // Once one file does not fit, every older one goes too.
+        kept = kept.saturating_add(len);
+        if kept <= keep {
+            continue;
+        }
+        match std::fs::remove_file(&path) {
+            Ok(()) => removed.push(path),
+            Err(error) => warn!("[PacketDump] Cannot delete {}: {error}", path.display()),
+        }
+    }
+    removed
 }
 
 fn tap(inbound: bool, state: Option<ConnectionProtocol>, name: &'static str, raw: &[u8]) {
@@ -146,9 +233,7 @@ fn tap(inbound: bool, state: Option<ConnectionProtocol>, name: &'static str, raw
 
 fn classify(inbound: bool, state: Option<ConnectionProtocol>, name: &str) -> Option<Kind> {
     match (inbound, state) {
-        (true, Some(ConnectionProtocol::Configuration)) if INBOUND_CONFIG.contains(&name) => {
-            Some(Kind::InConfig)
-        }
+        (true, Some(ConnectionProtocol::Configuration)) => Some(Kind::InConfig),
         (true, Some(ConnectionProtocol::Game)) if INBOUND_GAME.contains(&name) => {
             Some(Kind::InGame)
         }
@@ -158,7 +243,7 @@ fn classify(inbound: bool, state: Option<ConnectionProtocol>, name: &str) -> Opt
 }
 
 impl Dump {
-    fn open(path: &str, cap: u64) -> std::io::Result<Self> {
+    fn open(path: &Path, cap: u64) -> std::io::Result<Self> {
         let file = OpenOptions::new().create(true).append(true).open(path)?;
         let existing = file.metadata()?.len();
         let mut out = BufWriter::new(file);
@@ -251,7 +336,7 @@ mod tests {
     #[test]
     fn records_round_trip_and_reopening_appends_without_a_second_header() {
         let path = temp_path("roundtrip");
-        let p = path.to_str().unwrap();
+        let p = path.as_path();
         {
             let mut dump = Dump::open(p, 1 << 20).unwrap();
             assert!(dump.record(Kind::SessionStart, "session_start", &[]));
@@ -276,7 +361,7 @@ mod tests {
     #[test]
     fn cap_stops_recording_before_the_file_grows_past_it() {
         let path = temp_path("cap");
-        let p = path.to_str().unwrap();
+        let p = path.as_path();
         let mut dump = Dump::open(p, 8 + 40).unwrap();
         assert!(dump.record(Kind::InGame, "open_screen", &[0; 10]));
         assert!(!dump.record(Kind::InGame, "open_screen", &[0; 10]));
@@ -306,5 +391,94 @@ mod tests {
         assert_eq!(classify(false, None, "move_player_pos"), None);
         // A config-only name arriving in game state is not mistaken for config.
         assert_eq!(classify(true, Some(Game), "registry_data"), None);
+    }
+
+    #[test]
+    fn every_configuration_packet_and_the_transfer_traffic_is_kept() {
+        use ConnectionProtocol::{Configuration, Game};
+        // A stalled phase must show everything Hypixel sent in it.
+        for name in [
+            "resource_pack_push",
+            "resource_pack_pop",
+            "ping",
+            "keep_alive",
+            "cookie_request",
+            "custom_payload",
+            "finish_configuration",
+        ] {
+            assert_eq!(
+                classify(true, Some(Configuration), name),
+                Some(Kind::InConfig),
+                "{name}"
+            );
+        }
+        for name in [
+            "keep_alive",
+            "pong_response",
+            "resource_pack_push",
+            "disconnect",
+            "transfer",
+        ] {
+            assert_eq!(
+                classify(true, Some(Game), name),
+                Some(Kind::InGame),
+                "{name}"
+            );
+        }
+        // Outbound carries no state: a game ping_request in a configuration
+        // phase is in the file, and the oracle flags it.
+        for name in ["keep_alive", "pong", "ping_request", "cookie_response"] {
+            assert_eq!(classify(false, None, name), Some(Kind::Out), "{name}");
+        }
+        // Still no chat, either way.
+        assert_eq!(classify(true, Some(Game), "system_chat"), None);
+        assert_eq!(classify(false, None, "chat"), None);
+        assert_eq!(classify(false, None, "chat_command_signed"), None);
+    }
+
+    #[test]
+    fn auto_file_name_sorts_by_start_time() {
+        use chrono::TimeZone;
+        let at = chrono::Utc.with_ymd_and_hms(2026, 11, 20, 7, 5, 9).unwrap();
+        assert_eq!(auto_file_name(at), "packets-20261120-070509.bin");
+    }
+
+    #[test]
+    fn prune_keeps_the_newest_dumps_and_ignores_other_files() {
+        let dir = temp_path("prune");
+        std::fs::create_dir_all(&dir).unwrap();
+        let base = SystemTime::now();
+        let write = |name: &str, len: usize, age_secs: u64| {
+            let path = dir.join(name);
+            std::fs::write(&path, vec![0u8; len]).unwrap();
+            let file = File::options().write(true).open(&path).unwrap();
+            file.set_modified(base - std::time::Duration::from_secs(age_secs))
+                .unwrap();
+        };
+        write("packets-3.bin", 40, 10);
+        write("packets-2.bin", 40, 20);
+        write("packets-1.bin", 40, 30);
+        write("latest.log", 500, 40);
+        write("packets-notes.txt", 500, 50);
+
+        let removed = prune_old_dumps(&dir, 100);
+        let mut left: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        let _ = std::fs::remove_dir_all(&dir);
+
+        assert_eq!(removed, vec![dir.join("packets-1.bin")]);
+        assert_eq!(
+            left,
+            vec![
+                "latest.log",
+                "packets-2.bin",
+                "packets-3.bin",
+                "packets-notes.txt"
+            ]
+        );
     }
 }

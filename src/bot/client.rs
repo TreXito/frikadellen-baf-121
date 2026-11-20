@@ -10,6 +10,7 @@ use azalea_protocol::packets::game::{
     s_interact::InteractionHand, s_set_carried_item::ServerboundSetCarriedItem,
     s_sign_update::ServerboundSignUpdate, s_use_item::ServerboundUseItem, ClientboundGamePacket,
 };
+use azalea_protocol::packets::ConnectionProtocol;
 use bevy_app::AppExit;
 use once_cell::sync::Lazy;
 use parking_lot::RwLock;
@@ -2787,8 +2788,21 @@ async fn event_handler(bot: Client, event: Event, state: BotClientState) -> Resu
                 tokio::spawn(async move {
                     // Let the connection settle into the play state first.
                     tokio::time::sleep(tokio::time::Duration::from_secs(15)).await;
+                    let mut watchdog = ConfigStallWatchdog::default();
                     while PINGER_GEN.load(Ordering::Acquire) == my_gen {
-                        send_ping_request(&bot_ping);
+                        let now = std::time::Instant::now();
+                        match watchdog.observe(connection_state(&bot_ping), now) {
+                            ConfigStall::InGame => send_ping_request(&bot_ping),
+                            ConfigStall::Waiting => {}
+                            ConfigStall::Stuck(stuck_for) => {
+                                error!(
+                                    "[ConfigWatchdog] Connection stuck in the configuration phase for {}s (Hypixel never sent finish_configuration). Restarting for a fresh login.",
+                                    stuck_for.as_secs()
+                                );
+                                tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+                                crate::utils::process::restart_process();
+                            }
+                        }
                         tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
                     }
                 });
@@ -3894,6 +3908,18 @@ async fn event_handler(bot: Client, event: Event, state: BotClientState) -> Resu
                         let packet = ServerboundSignUpdate { pos, slot, lines };
                         bot.write_packet(packet);
                     }
+                }
+
+                // Hypixel is moving the player to another server. Vanilla
+                // builds a fresh ClientPacketListener, and with it an empty
+                // Scoreboard, when configuration finishes, so the old
+                // server's sidebar never survives the move. Clear ours too:
+                // the island guard must not read the lobby board as current.
+                ClientboundGamePacket::StartConfiguration(_) => {
+                    state.scoreboard_scores.write().clear();
+                    *state.sidebar_objective.write() = None;
+                    state.scoreboard_teams.write().clear();
+                    info!("[Scoreboard] Configuration started (server transfer): sidebar cleared");
                 }
 
                 // ---- Scoreboard packets ----
@@ -8550,15 +8576,89 @@ fn send_chat_command(bot: &Client, content: &str) {
 /// handle across reconnects.
 static PINGER_GEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// Hypixel moves a player between its servers by sending the connection back
+/// into the configuration protocol (lobby to SkyBlock, island to hub). A
+/// vanilla client swaps to a configuration listener then and sends no game
+/// packet until `finish_configuration`. A game packet written in that window
+/// reaches the server under the configuration packet table, which no vanilla
+/// client can produce. Every raw write checks the state here first.
+fn raw_game_write_allowed(state: ConnectionProtocol, what: &str) -> bool {
+    if state == ConnectionProtocol::Game {
+        return true;
+    }
+    info!("[RawWrite] Not sending {what}: the connection is in {state:?}, not game");
+    false
+}
+
+/// The protocol state of the live connection, `None` without one.
+fn connection_state(bot: &Client) -> Option<ConnectionProtocol> {
+    let state = std::cell::Cell::new(None);
+    let _ = bot.with_raw_connection_mut(|raw_conn| state.set(Some(raw_conn.state)));
+    state.get()
+}
+
+/// A configuration phase that has not finished after this long never will:
+/// healthy Hypixel transfers finish within about 8 s, resource pack included,
+/// while the stalled ones observed (11-16 to 11-20) left the bot deaf until the
+/// island guard restarted it about 8 minutes later. A fresh login has reached
+/// SkyBlock every time.
+const CONFIG_STALL_LIMIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[derive(Debug, PartialEq, Eq)]
+enum ConfigStall {
+    /// In game: the pinger may send.
+    InGame,
+    /// Not in game, not yet past the limit (or no connection at all).
+    Waiting,
+    /// In configuration for at least [`CONFIG_STALL_LIMIT`].
+    Stuck(std::time::Duration),
+}
+
+#[derive(Default)]
+struct ConfigStallWatchdog {
+    config_since: Option<std::time::Instant>,
+}
+
+impl ConfigStallWatchdog {
+    fn observe(
+        &mut self,
+        state: Option<ConnectionProtocol>,
+        now: std::time::Instant,
+    ) -> ConfigStall {
+        match state {
+            Some(ConnectionProtocol::Game) => {
+                self.config_since = None;
+                ConfigStall::InGame
+            }
+            Some(ConnectionProtocol::Configuration) => {
+                let since = *self.config_since.get_or_insert(now);
+                let stuck_for = now.saturating_duration_since(since);
+                if stuck_for >= CONFIG_STALL_LIMIT {
+                    ConfigStall::Stuck(stuck_for)
+                } else {
+                    ConfigStall::Waiting
+                }
+            }
+            _ => {
+                self.config_since = None;
+                ConfigStall::Waiting
+            }
+        }
+    }
+}
+
 /// Send a vanilla F3+3 ping (`ServerboundPingRequest`) on the live connection,
 /// recording the token/send-time so the `PongResponse` handler can measure RTT.
 /// Bypasses the ECS queue via the raw connection for an accurate timestamp.
 fn send_ping_request(bot: &Client) {
     use azalea_protocol::packets::game::s_ping_request::ServerboundPingRequest;
-    let token = crate::hypixel_ping::ping_request_started();
-    let packet = ServerboundPingRequest { time: token };
     if let Err(error) = bot.with_raw_connection_mut(|mut raw_conn| {
-        if let Err(e) = raw_conn.write(packet) {
+        if !raw_game_write_allowed(raw_conn.state, "ping request") {
+            return;
+        }
+        // Start the RTT clock only for a ping that is actually sent.
+        let token = crate::hypixel_ping::ping_request_started();
+        if let Err(e) = raw_conn.write(ServerboundPingRequest { time: token }) {
             debug!("ping request write failed: {e}");
         }
     }) {
@@ -8578,6 +8678,9 @@ fn send_raw_chat_command(bot: &Client, content: &str) {
         command: command.to_string(),
     };
     if let Err(error) = bot.with_raw_connection_mut(|mut raw_conn| {
+        if !raw_game_write_allowed(raw_conn.state, "chat command") {
+            return;
+        }
         if let Err(e) = raw_conn.write(cmd_packet) {
             error!("raw chat command write failed: {e}");
         }
@@ -8894,7 +8997,12 @@ fn send_raw_click(bot: &Client, window_id: u8, slot: i16) -> bool {
             }
         },
     };
+    let in_game = std::cell::Cell::new(true);
     if let Err(error) = bot.with_raw_connection_mut(|mut raw_conn| {
+        if !raw_game_write_allowed(raw_conn.state, "click") {
+            in_game.set(false);
+            return;
+        }
         if let Err(e) = raw_conn.write(packet) {
             error!(
                 "raw click write failed (window {} slot {}): {e}",
@@ -8903,6 +9011,13 @@ fn send_raw_click(bot: &Client, window_id: u8, slot: i16) -> bool {
         }
     }) {
         error!("Cannot send raw click without an active connection: {error}");
+        return false;
+    }
+    if !in_game.get() {
+        warn!(
+            "Not clicking slot {} in window {}: the connection left game state",
+            slot, window_id
+        );
         return false;
     }
     // If azalea's tracked state_id is itself always 0, the echo is cosmetic and
@@ -9102,7 +9217,12 @@ fn send_raw_shift_click(bot: &Client, window_id: u8, slot: i16) {
             }
         },
     };
+    let in_game = std::cell::Cell::new(true);
     if let Err(error) = bot.with_raw_connection_mut(|mut raw_conn| {
+        if !raw_game_write_allowed(raw_conn.state, "shift-click") {
+            in_game.set(false);
+            return;
+        }
         if let Err(e) = raw_conn.write(packet) {
             error!(
                 "raw shift-click write failed (window {} slot {}): {e}",
@@ -9111,6 +9231,13 @@ fn send_raw_shift_click(bot: &Client, window_id: u8, slot: i16) {
         }
     }) {
         error!("Cannot send raw shift-click without an active connection: {error}");
+        return;
+    }
+    if !in_game.get() {
+        warn!(
+            "Not shift-clicking slot {} in window {}: the connection left game state",
+            slot, window_id
+        );
         return;
     }
     info!("Raw shift-clicked slot {} in window {}", slot, window_id);
@@ -9319,6 +9446,9 @@ fn send_raw_close(bot: &Client, window_id: u8, handlers: &BotEventHandlers) {
         return;
     }
     if let Err(error) = bot.with_raw_connection_mut(|mut raw_conn| {
+        if !raw_game_write_allowed(raw_conn.state, "container close") {
+            return;
+        }
         if let Err(e) = raw_conn.write(ServerboundContainerClose {
             container_id: window_id as i32,
         }) {
@@ -9805,6 +9935,65 @@ fn extract_viewauction_uuid(msg: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn config_watchdog_restarts_only_a_phase_stuck_past_the_limit() {
+        use super::{ConfigStall, ConfigStallWatchdog, CONFIG_STALL_LIMIT};
+        use azalea_protocol::packets::ConnectionProtocol::{Configuration, Game, Login};
+        use std::time::{Duration, Instant};
+        let t0 = Instant::now();
+        let at = |secs: u64| t0 + Duration::from_secs(secs);
+        let mut dog = ConfigStallWatchdog::default();
+
+        assert_eq!(dog.observe(Some(Game), at(0)), ConfigStall::InGame);
+        // A normal transfer: in configuration for a few seconds, then back.
+        assert_eq!(
+            dog.observe(Some(Configuration), at(3)),
+            ConfigStall::Waiting
+        );
+        assert_eq!(
+            dog.observe(Some(Configuration), at(9)),
+            ConfigStall::Waiting
+        );
+        assert_eq!(dog.observe(Some(Game), at(12)), ConfigStall::InGame);
+        // The clock restarts with each phase, it does not add them up.
+        assert_eq!(
+            dog.observe(Some(Configuration), at(30)),
+            ConfigStall::Waiting
+        );
+        assert_eq!(
+            dog.observe(Some(Configuration), at(59)),
+            ConfigStall::Waiting
+        );
+        assert_eq!(
+            dog.observe(Some(Configuration), at(60)),
+            ConfigStall::Stuck(CONFIG_STALL_LIMIT)
+        );
+        // No connection (disconnected) or another state resets the clock.
+        let mut dog = ConfigStallWatchdog::default();
+        assert_eq!(
+            dog.observe(Some(Configuration), at(0)),
+            ConfigStall::Waiting
+        );
+        assert_eq!(dog.observe(None, at(20)), ConfigStall::Waiting);
+        assert_eq!(
+            dog.observe(Some(Configuration), at(40)),
+            ConfigStall::Waiting
+        );
+        assert_eq!(dog.observe(Some(Login), at(50)), ConfigStall::Waiting);
+        assert_eq!(
+            dog.observe(Some(Configuration), at(79)),
+            ConfigStall::Waiting
+        );
+    }
+
+    #[test]
+    fn raw_game_writes_only_in_game_state() {
+        use azalea_protocol::packets::ConnectionProtocol::{Configuration, Game, Login};
+        assert!(super::raw_game_write_allowed(Game, "click"));
+        assert!(!super::raw_game_write_allowed(Configuration, "click"));
+        assert!(!super::raw_game_write_allowed(Login, "click"));
+    }
 
     #[test]
     fn no_reactive_confirm_once_escrow_started() {

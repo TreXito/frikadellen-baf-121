@@ -1256,9 +1256,6 @@ async fn main() -> Result<()> {
     print_startup_banner();
     info!("Starting Frikadellen BAF v{}", VERSION);
 
-    // Opt-in packet recording for the vanilla-client oracle (tools/vanilla-oracle).
-    frikadellen_baf::bot::packet_dump::init_from_env();
-
     // Check for outdated version (non-loader users).
     // Runs synchronously before the main loop so the warning appears at the very top of the log.
     check_version_outdated().await;
@@ -1266,6 +1263,10 @@ async fn main() -> Result<()> {
     // Load or create configuration
     let config_loader = Arc::new(ConfigLoader::new());
     let mut config = config_loader.load()?;
+
+    // Opt-in packet recording for the vanilla-client oracle (tools/vanilla-oracle).
+    // Before the bot connects, so the login configuration phase is in the file.
+    frikadellen_baf::bot::packet_dump::init(config.packet_dump);
 
     // A config that already has an ingame name is an existing install — never
     // re-run first-run onboarding prompts (e.g. auto-cookie) on it, even when a
