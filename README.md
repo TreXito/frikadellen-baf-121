@@ -369,6 +369,7 @@ The `config.toml` file is created automatically on first run. You can edit it wi
 | `web_gui_port` | integer | `8080` | Port for the web control panel |
 | `web_gui_password` | string | random | Password for the web panel. Generated on first run; cannot be empty |
 | `enable_console_input` | boolean | `true` | Allow typing commands in the terminal |
+| `packet_dump` | boolean | `false` | Record the packets `tools/vanilla-oracle` checks (configuration phases, container traffic, clicks, keepalives, pings; never chat) to `logs/packets-<UTC time>.bin` on every start, restarts included. Observes only. Keeps the newest 2 GB of dumps (`BAF_PACKET_DUMP_KEEP_MB`). Read at start |
 | `share_legendary_flips` | boolean | `true` | Share legendary/divine flips with the community |
 | `websocket_url` | string | `wss://sky.coflnet.com/modsocket` | Coflnet WebSocket URL. Correct for every region — Coflnet redirects you to your nearest server automatically, so never set a regional host (`us-sky.coflnet.com`) here (advanced — don't change unless you know what you're doing) |
 

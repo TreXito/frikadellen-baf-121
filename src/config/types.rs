@@ -274,6 +274,17 @@ pub struct Config {
     #[serde(default = "default_true")]
     pub enable_console_input: bool,
 
+    /// Record the packets `tools/vanilla-oracle` checks to
+    /// `logs/packets-<UTC start time>.bin` on every start, restarts included:
+    /// configuration phases, container traffic, clicks, keepalives and pings.
+    /// Chat is never recorded. It only observes: no packet is changed, delayed
+    /// or added. The newest files are kept up to `BAF_PACKET_DUMP_KEEP_MB`
+    /// (default 2048) in total, older ones are deleted at start.
+    /// `BAF_PACKET_DUMP=<file>` records to that file instead, even when this is
+    /// off. Default: false.
+    #[serde(default)]
+    pub packet_dump: bool,
+
     // ═══════════════════════════ Proxy ═════════════════════════════
     /// Route the game-adjacent connections through a SOCKS5 proxy: the
     /// Minecraft connection, the Mojang session server and the direct
@@ -665,6 +676,7 @@ impl Default for Config {
             auto_cookie_prompted: false,
             use_cofl_chat: true,
             enable_console_input: true,
+            packet_dump: false,
             // Proxy
             proxy_enabled: false,
             proxy_address: None,

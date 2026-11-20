@@ -72,9 +72,11 @@ import net.minecraft.network.chat.Component;
 import net.minecraft.network.codec.ByteBufCodecs;
 import net.minecraft.network.codec.StreamCodec;
 import net.minecraft.network.protocol.Packet;
+import net.minecraft.network.protocol.common.ClientboundKeepAlivePacket;
 import net.minecraft.network.protocol.common.ClientboundUpdateTagsPacket;
 import net.minecraft.network.protocol.common.ServerboundClientInformationPacket;
 import net.minecraft.network.protocol.common.ServerboundCustomPayloadPacket;
+import net.minecraft.network.protocol.common.ServerboundKeepAlivePacket;
 import net.minecraft.network.protocol.common.custom.BrandPayload;
 import net.minecraft.network.protocol.configuration.ClientboundFinishConfigurationPacket;
 import net.minecraft.network.protocol.configuration.ClientboundRegistryDataPacket;
@@ -92,10 +94,12 @@ import net.minecraft.network.protocol.game.ClientboundSetCursorItemPacket;
 import net.minecraft.network.protocol.game.ClientboundSetPlayerInventoryPacket;
 import net.minecraft.network.protocol.game.ClientboundStartConfigurationPacket;
 import net.minecraft.network.protocol.game.GameProtocols;
+import net.minecraft.network.protocol.game.ServerboundConfigurationAcknowledgedPacket;
 import net.minecraft.network.protocol.game.ServerboundContainerButtonClickPacket;
 import net.minecraft.network.protocol.game.ServerboundContainerClickPacket;
 import net.minecraft.network.protocol.game.ServerboundContainerClosePacket;
 import net.minecraft.network.protocol.game.ServerboundSetCarriedItemPacket;
+import net.minecraft.network.protocol.ping.ServerboundPingRequestPacket;
 import net.minecraft.resources.Identifier;
 import net.minecraft.resources.RegistryDataLoader;
 import net.minecraft.resources.RegistryOps;
@@ -178,7 +182,8 @@ public final class ClickOracle {
         COMPONENT_ORDER("same packet, an item's component hashes in another order; vanilla's order is IdentityHashMap order and differs between client JVMs, so this is not a difference"),
         DECODE("vanilla's codec rejects the packet"),
         UNSIMULATED("click type not simulated; item hashes still checked"),
-        LOGIN("login/configuration packet differs from vanilla");
+        LOGIN("login/configuration packet differs from vanilla"),
+        WRONG_STATE("game packet sent while the connection is in configuration; vanilla sends none until finish_configuration");
 
         final String meaning;
 
@@ -348,6 +353,8 @@ public final class ClickOracle {
     // configuration
     boolean inConfig;
     boolean reconfigurePending;
+    /** From the bot's configuration_acknowledged to the server's finish_configuration. */
+    boolean clientInConfig;
     RegistryDataCollector collector;
     KnownPacksManager knownPacks;
     List<KnownPack> serverPacks;
@@ -357,6 +364,8 @@ public final class ClickOracle {
     // game
     ProtocolInfo gameIn;
     ProtocolInfo gameOut;
+    /** The last game codec, kept through a reconfiguration only to name a game packet sent in it. */
+    ProtocolInfo lastGameOut;
     HashedPatchMap.HashGenerator hasher;
     RegistryOps<JsonElement> jsonOps;
     Menu inventory;
@@ -404,9 +413,11 @@ public final class ClickOracle {
         sessions++;
         inConfig = false;
         reconfigurePending = false;
+        clientInConfig = false;
         registries = null;
         gameIn = null;
         gameOut = null;
+        lastGameOut = null;
         inventory = null;
         open = null;
         inv = emptyInv();
@@ -484,6 +495,7 @@ public final class ClickOracle {
         }
         bindGame(regs);
         inConfig = false;
+        clientInConfig = false;
         if (inventory == null) inventory = new Menu(0, "inventory", "inventory", 0);
         System.out.println("   registries rebuilt the vanilla way (" + regs.listRegistryKeys().count() + " registries)");
     }
@@ -492,7 +504,7 @@ public final class ClickOracle {
         registries = regs;
         Function<ByteBuf, RegistryFriendlyByteBuf> decorator = RegistryFriendlyByteBuf.decorator(regs);
         gameIn = GameProtocols.CLIENTBOUND_TEMPLATE.bind(decorator);
-        gameOut = GameProtocols.SERVERBOUND_TEMPLATE.bind(decorator, new GameProtocols.Context() {
+        gameOut = lastGameOut = GameProtocols.SERVERBOUND_TEMPLATE.bind(decorator, new GameProtocols.Context() {
             @Override
             public boolean hasInfiniteMaterials() {
                 return false;
@@ -630,6 +642,8 @@ public final class ClickOracle {
         if (configName || inConfig || gameOut == null) {
             codecs.add(config);
             if (gameOut != null && !configName) codecs.add(gameOut.codec());
+            // Reconfiguring: a game packet here is wrong, but name it first.
+            else if (lastGameOut != null && !configName) codecs.add(lastGameOut.codec());
         } else {
             codecs.add(gameOut.codec());
             codecs.add(config);
@@ -659,6 +673,14 @@ public final class ClickOracle {
         if (p == null) {
             Finding f = finding(r, "out " + r.name);
             f.add(Cat.DECODE, lastError == null ? "no protocol state to decode it in" : lastError);
+            report(f);
+            return;
+        }
+        if (p instanceof ServerboundConfigurationAcknowledgedPacket) {
+            clientInConfig = true;
+        } else if ((inConfig || clientInConfig) && used != config) {
+            Finding f = finding(r, "out " + r.name);
+            f.add(Cat.WRONG_STATE, "only the game protocol has this packet; the connection is in configuration");
             report(f);
             return;
         }
@@ -1674,6 +1696,20 @@ public final class ClickOracle {
             // K. closing the window
             add(OUT, "container_close", gameOutBytes(new ServerboundContainerClosePacket(next)));
             expect(Cat.OK);
+
+            // L. a Hypixel server transfer: the connection goes back to
+            // configuration. Answering a keepalive there is vanilla; a game
+            // ping_request (BAF's RTT pinger) is not, vanilla sends no game
+            // packet until finish_configuration.
+            add(IN_GAME, "start_configuration", gameInBytes(ClientboundStartConfigurationPacket.INSTANCE));
+            add(OUT, "configuration_acknowledged", gameOutBytes(ServerboundConfigurationAcknowledgedPacket.INSTANCE));
+            expect(Cat.OK);
+            add(IN_CONFIG, "keep_alive", configIn(new ClientboundKeepAlivePacket(42L)));
+            add(OUT, "keep_alive", configOut(new ServerboundKeepAlivePacket(42L)));
+            expect(Cat.OK);
+            // Encoded with the game codec from before the transfer, as azalea does.
+            add(OUT, "ping_request", encode(gen.lastGameOut.codec(), new ServerboundPingRequestPacket(1_794_600_000L)));
+            expect(Cat.WRONG_STATE);
         }
 
         static <T> void copy(DataComponentPatch.Builder b, TypedDataComponent<T> c) {
