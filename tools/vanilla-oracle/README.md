@@ -68,6 +68,7 @@ per category. A summary with counts per category ends the report.
 | `UNSIMULATED` | click the oracle does not simulate (player inventory shift-click, some special slots); item hashes are still checked |
 | `LOGIN` | login or configuration packet that differs from vanilla: brand, known packs reply, a client_information resend vanilla would never send |
 | `WRONG_STATE` | a game-only packet sent while the connection is in configuration (between the bot's `configuration_acknowledged` and Hypixel's `finish_configuration`). Vanilla sends none there; the server reads it with the configuration packet table |
+| `AZALEA_DROP` | an inbound frame azalea could not decode and dropped (recorded as `undecodable`). The bot never saw it; the line names the vanilla packet. A dropped `finish_configuration` or `login` leaves a transfer stuck |
 
 How it decides what vanilla sends:
 

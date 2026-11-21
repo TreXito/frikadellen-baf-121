@@ -183,7 +183,8 @@ public final class ClickOracle {
         DECODE("vanilla's codec rejects the packet"),
         UNSIMULATED("click type not simulated; item hashes still checked"),
         LOGIN("login/configuration packet differs from vanilla"),
-        WRONG_STATE("game packet sent while the connection is in configuration; vanilla sends none until finish_configuration");
+        WRONG_STATE("game packet sent while the connection is in configuration; vanilla sends none until finish_configuration"),
+        AZALEA_DROP("inbound packet azalea could not decode and dropped; vanilla decodes and handles it");
 
         final String meaning;
 
@@ -466,10 +467,21 @@ public final class ClickOracle {
         gameOut = null;
     }
 
+    /** azalea's name for an inbound frame it could not decode and dropped. */
+    static final String UNDECODABLE = "undecodable";
+
+    void reportAzaleaDrop(Rec r, Packet<?> p) {
+        if (!r.name.equals(UNDECODABLE)) return;
+        Finding f = finding(r, "inbound " + p.type().id().getPath());
+        f.add(Cat.AZALEA_DROP, "the bot never saw this " + p.type().id() + " (" + r.raw.length + " bytes); vanilla handles it");
+        report(f);
+    }
+
     void configIn(Rec r) {
         if (!inConfig) enterConfig();
         Packet<?> p = decode(ConfigurationProtocols.CLIENTBOUND.codec(), r, "inbound");
         if (p == null) return;
+        reportAzaleaDrop(r, p);
         switch (p) {
             case ClientboundRegistryDataPacket d -> collector.appendContents(d.registry(), d.entries());
             case ClientboundUpdateTagsPacket t -> collector.appendTags(t.tags());
@@ -532,6 +544,7 @@ public final class ClickOracle {
         }
         Packet<?> p = decode(gameIn.codec(), r, "inbound");
         if (p == null) return;
+        reportAzaleaDrop(r, p);
         switch (p) {
             case ClientboundLoginPacket l -> resetPlayer();
             case ClientboundRespawnPacket rp -> resetPlayer();
@@ -1696,6 +1709,9 @@ public final class ClickOracle {
             // K. closing the window
             add(OUT, "container_close", gameOutBytes(new ServerboundContainerClosePacket(next)));
             expect(Cat.OK);
+            // A game packet azalea failed to decode.
+            add(IN_GAME, UNDECODABLE, gameInBytes(new ClientboundSetCursorItemPacket(ItemStack.EMPTY)));
+            expect(Cat.AZALEA_DROP);
 
             // L. a Hypixel server transfer: the connection goes back to
             // configuration. Answering a keepalive there is vanilla; a game
@@ -1707,6 +1723,9 @@ public final class ClickOracle {
             add(IN_CONFIG, "keep_alive", configIn(new ClientboundKeepAlivePacket(42L)));
             add(OUT, "keep_alive", configOut(new ServerboundKeepAlivePacket(42L)));
             expect(Cat.OK);
+            // A configuration packet azalea failed to decode: named, not lost.
+            add(IN_CONFIG, UNDECODABLE, configIn(new ClientboundKeepAlivePacket(43L)));
+            expect(Cat.AZALEA_DROP);
             // Encoded with the game codec from before the transfer, as azalea does.
             add(OUT, "ping_request", encode(gen.lastGameOut.codec(), new ServerboundPingRequestPacket(1_794_600_000L)));
             expect(Cat.WRONG_STATE);
