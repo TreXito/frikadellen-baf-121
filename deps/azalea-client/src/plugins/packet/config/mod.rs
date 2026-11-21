@@ -221,7 +221,14 @@ impl ConfigPacketHandler<'_> {
     }
 
     pub fn transfer(&mut self, p: &ClientboundTransfer) {
-        debug!("Got transfer packet {p:?}");
+        // Vanilla reconnects to the named host. azalea does not, so the
+        // server is left waiting.
+        warn!(
+            target: crate::connection::PROTOCOL_LOG_TARGET,
+            "Server sent a transfer to {}:{} in configuration; azalea does not follow it",
+            p.host,
+            p.port
+        );
     }
 
     pub fn select_known_packs(&mut self, p: &ClientboundSelectKnownPacks) {
@@ -255,7 +262,14 @@ impl ConfigPacketHandler<'_> {
         debug!("Got show dialog packet {p:?}");
     }
     pub fn code_of_conduct(&mut self, p: &ClientboundCodeOfConduct) {
-        debug!("Got code of conduct packet {p:?}");
+        // Vanilla shows the code of conduct and waits for the player to accept
+        // it; the server does not finish configuration before that. azalea
+        // never answers, so this phase cannot finish on its own.
+        warn!(
+            target: crate::connection::PROTOCOL_LOG_TARGET,
+            "Server sent a code of conduct in configuration ({} chars); it is not accepted, the transfer will wait",
+            p.code_of_conduct.len()
+        );
     }
     pub fn post_effects(&mut self, p: &ClientboundPostEffects) {
         debug!("Got post effects packet {p:?}");
