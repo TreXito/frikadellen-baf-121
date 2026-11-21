@@ -1645,7 +1645,15 @@ impl GamePacketHandler<'_> {
     }
     pub fn debug_sample(&mut self, _p: &ClientboundDebugSample) {}
     pub fn pong_response(&mut self, _p: &ClientboundPongResponse) {}
-    pub fn transfer(&mut self, _p: &ClientboundTransfer) {}
+    pub fn transfer(&mut self, p: &ClientboundTransfer) {
+        // Vanilla reconnects to the named host. azalea does not.
+        warn!(
+            target: crate::connection::PROTOCOL_LOG_TARGET,
+            "Server sent a transfer to {}:{}; azalea does not follow it",
+            p.host,
+            p.port
+        );
+    }
     pub fn move_minecart_along_track(&mut self, _p: &ClientboundMoveMinecartAlongTrack) {}
     pub fn set_held_slot(&mut self, p: &ClientboundSetHeldSlot) {
         debug!("Got set held slot packet {p:?}");

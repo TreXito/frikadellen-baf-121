@@ -10,6 +10,9 @@
 //! Recorded:
 //! - configuration, inbound: every packet, so a phase that never finishes
 //!   shows what Hypixel sent last (resource pack pushes, pings, cookies)
+//! - inbound frames azalea could not decode and dropped, named `undecodable`
+//!   (configuration: all of them; game: the first few per packet id), so the
+//!   oracle can say which packet the bot never saw
 //! - game, inbound: login, respawn, reconfiguration start, tags, every
 //!   container open/close/content/slot packet, cursor and player inventory
 //!   sets, keepalives, pings, cookies, resource pack push/pop, disconnect and
@@ -35,7 +38,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use azalea_client::connection::PACKET_TAP;
+use azalea_client::connection::{PACKET_TAP, UNDECODABLE};
 use azalea_protocol::packets::ConnectionProtocol;
 use parking_lot::Mutex;
 use tracing::{info, warn};
@@ -105,6 +108,22 @@ struct Dump {
 
 static DUMP: Mutex<Option<Dump>> = Mutex::new(None);
 static STOPPED: AtomicBool = AtomicBool::new(false);
+
+/// Undecodable game frames kept per packet id. azalea fails some harmlessly
+/// and repeatedly (an equipment slot it does not know); a few show which.
+const UNDECODABLE_GAME_PER_ID: u32 = 5;
+static UNDECODABLE_GAME_SEEN: Mutex<std::collections::BTreeMap<u8, u32>> =
+    Mutex::new(std::collections::BTreeMap::new());
+
+/// `false` once enough undecodable game frames with this first id byte are
+/// in the file.
+fn keep_undecodable_game_frame(raw: &[u8]) -> bool {
+    let id = raw.first().copied().unwrap_or(0);
+    let mut seen = UNDECODABLE_GAME_SEEN.lock();
+    let count = seen.entry(id).or_insert(0);
+    *count += 1;
+    *count <= UNDECODABLE_GAME_PER_ID
+}
 
 fn env_mb(name: &str, default: u64) -> u64 {
     std::env::var(name)
@@ -220,6 +239,9 @@ fn tap(inbound: bool, state: Option<ConnectionProtocol>, name: &'static str, raw
     let Some(kind) = classify(inbound, state, name) else {
         return;
     };
+    if kind == Kind::InGame && name == UNDECODABLE && !keep_undecodable_game_frame(raw) {
+        return;
+    }
     let mut guard = DUMP.lock();
     let Some(dump) = guard.as_mut() else {
         return;
@@ -234,7 +256,9 @@ fn tap(inbound: bool, state: Option<ConnectionProtocol>, name: &'static str, raw
 fn classify(inbound: bool, state: Option<ConnectionProtocol>, name: &str) -> Option<Kind> {
     match (inbound, state) {
         (true, Some(ConnectionProtocol::Configuration)) => Some(Kind::InConfig),
-        (true, Some(ConnectionProtocol::Game)) if INBOUND_GAME.contains(&name) => {
+        (true, Some(ConnectionProtocol::Game))
+            if name == UNDECODABLE || INBOUND_GAME.contains(&name) =>
+        {
             Some(Kind::InGame)
         }
         (false, _) if OUTBOUND.contains(&name) => Some(Kind::Out),
@@ -430,10 +454,27 @@ mod tests {
         for name in ["keep_alive", "pong", "ping_request", "cookie_response"] {
             assert_eq!(classify(false, None, name), Some(Kind::Out), "{name}");
         }
+        // Frames azalea dropped are kept in both states.
+        assert_eq!(
+            classify(true, Some(Configuration), UNDECODABLE),
+            Some(Kind::InConfig)
+        );
+        assert_eq!(classify(true, Some(Game), UNDECODABLE), Some(Kind::InGame));
         // Still no chat, either way.
         assert_eq!(classify(true, Some(Game), "system_chat"), None);
         assert_eq!(classify(false, None, "chat"), None);
         assert_eq!(classify(false, None, "chat_command_signed"), None);
+    }
+
+    #[test]
+    fn undecodable_game_frames_are_capped_per_packet_id() {
+        // Ids no other test uses, so the shared counter starts at zero.
+        let noisy = [0xF1u8, 1, 2];
+        for _ in 0..UNDECODABLE_GAME_PER_ID {
+            assert!(keep_undecodable_game_frame(&noisy));
+        }
+        assert!(!keep_undecodable_game_frame(&noisy));
+        assert!(keep_undecodable_game_frame(&[0xF2u8, 9]));
     }
 
     #[test]

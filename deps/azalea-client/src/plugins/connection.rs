@@ -29,7 +29,7 @@ use tokio::{
     net::tcp::OwnedWriteHalf,
     sync::mpsc::{self},
 };
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, info, trace, warn};
 
 use super::packet::{
     config::ReceiveConfigPacketEvent, game::ReceiveGamePacketEvent, login::ReceiveLoginPacketEvent,
@@ -47,6 +47,64 @@ pub type PacketTap = fn(bool, Option<ConnectionProtocol>, &'static str, &[u8]);
 
 /// Set once by the embedding application to receive every [`PacketTap`] call.
 pub static PACKET_TAP: OnceLock<PacketTap> = OnceLock::new();
+
+/// The name [`PACKET_TAP`] gets for an inbound game or configuration frame
+/// azalea could not decode. The frame is still dropped afterwards, as before.
+pub const UNDECODABLE: &str = "undecodable";
+
+/// Log target for protocol events an embedding application must see even when
+/// it mutes `azalea_client` (BAF does, for harmless decode noise).
+pub const PROTOCOL_LOG_TARGET: &str = "baf_protocol";
+
+/// The VarInt packet id at the start of a raw frame.
+fn raw_packet_id(raw_packet: &[u8]) -> Option<u32> {
+    let mut value = 0u32;
+    for (i, byte) in raw_packet.iter().take(5).enumerate() {
+        value |= u32::from(byte & 0x7f) << (7 * i);
+        if byte & 0x80 == 0 {
+            return Some(value);
+        }
+    }
+    None
+}
+
+/// A dropped configuration packet can leave a server transfer unfinished, so
+/// it is always logged. In game, azalea has known harmless failures (an
+/// equipment slot it does not know), so each packet id is logged once.
+fn report_undecodable(
+    state: ConnectionProtocol,
+    raw_packet: &[u8],
+    error: &impl std::fmt::Display,
+) {
+    if let Some(tap) = PACKET_TAP.get() {
+        tap(true, Some(state), UNDECODABLE, raw_packet);
+    }
+    static LOGGED_GAME_IDS: std::sync::Mutex<Vec<u32>> = std::sync::Mutex::new(Vec::new());
+    let id = raw_packet_id(raw_packet);
+    let id_text = id.map_or_else(|| "?".to_owned(), |id| format!("0x{id:02x}"));
+    if state == ConnectionProtocol::Configuration {
+        error!(
+            target: PROTOCOL_LOG_TARGET,
+            "Dropped an undecodable configuration packet (id {id_text}, {} bytes): {error}",
+            raw_packet.len()
+        );
+        return;
+    }
+    let first = match (id, LOGGED_GAME_IDS.lock()) {
+        (Some(id), Ok(mut logged)) if !logged.contains(&id) => {
+            logged.push(id);
+            true
+        }
+        _ => false,
+    };
+    if first {
+        warn!(
+            target: PROTOCOL_LOG_TARGET,
+            "Dropped an undecodable game packet (id {id_text}, {} bytes, logged once per id): {error}",
+            raw_packet.len()
+        );
+    }
+}
 
 pub struct ConnectionPlugin;
 impl Plugin for ConnectionPlugin {
@@ -310,7 +368,13 @@ pub fn handle_raw_packet(
             unreachable!()
         }
         ConnectionProtocol::Game => {
-            let packet = Arc::new(deserialize_packet::<ClientboundGamePacket>(stream)?);
+            let packet = match deserialize_packet::<ClientboundGamePacket>(stream) {
+                Ok(packet) => Arc::new(packet),
+                Err(error) => {
+                    report_undecodable(state, raw_packet, &error);
+                    return Err(error);
+                }
+            };
             trace!("Packet: {packet:?}");
             if let Some(tap) = PACKET_TAP.get() {
                 tap(true, Some(state), packet.name(), raw_packet);
@@ -332,7 +396,13 @@ pub fn handle_raw_packet(
                 .push(ReceiveLoginPacketEvent { entity, packet });
         }
         ConnectionProtocol::Configuration => {
-            let packet = Arc::new(deserialize_packet::<ClientboundConfigPacket>(stream)?);
+            let packet = match deserialize_packet::<ClientboundConfigPacket>(stream) {
+                Ok(packet) => Arc::new(packet),
+                Err(error) => {
+                    report_undecodable(state, raw_packet, &error);
+                    return Err(error);
+                }
+            };
             trace!("Packet: {packet:?}");
             if let Some(tap) = PACKET_TAP.get() {
                 tap(true, Some(state), packet.name(), raw_packet);

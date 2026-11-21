@@ -8554,6 +8554,12 @@ fn send_chat_command(bot: &Client, content: &str) {
         );
         content
     });
+    // azalea drops a game packet outside game state and logs it under its own
+    // (muted) target. Say so here: the caller believes the command went out.
+    if let Some(state) = connection_state(bot).filter(|s| *s != ConnectionProtocol::Game) {
+        info!("[Command] Not sending /{command}: the connection is in {state:?}, not game");
+        return;
+    }
     bot.write_packet(ServerboundChatCommand {
         command: command.to_string(),
     });
