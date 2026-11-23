@@ -49,6 +49,7 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
 import java.util.TreeMap;
+import java.util.UUID;
 import java.util.function.Function;
 import net.minecraft.SharedConstants;
 import net.minecraft.client.multiplayer.ClientRegistryLayer;
@@ -94,6 +95,7 @@ import net.minecraft.network.protocol.game.ClientboundSetCursorItemPacket;
 import net.minecraft.network.protocol.game.ClientboundSetPlayerInventoryPacket;
 import net.minecraft.network.protocol.game.ClientboundStartConfigurationPacket;
 import net.minecraft.network.protocol.game.GameProtocols;
+import net.minecraft.network.protocol.game.ServerboundChatSessionUpdatePacket;
 import net.minecraft.network.protocol.game.ServerboundConfigurationAcknowledgedPacket;
 import net.minecraft.network.protocol.game.ServerboundContainerButtonClickPacket;
 import net.minecraft.network.protocol.game.ServerboundContainerClickPacket;
@@ -184,7 +186,8 @@ public final class ClickOracle {
         UNSIMULATED("click type not simulated; item hashes still checked"),
         LOGIN("login/configuration packet differs from vanilla"),
         WRONG_STATE("game packet sent while the connection is in configuration; vanilla sends none until finish_configuration"),
-        AZALEA_DROP("inbound packet azalea could not decode and dropped; vanilla decodes and handles it");
+        AZALEA_DROP("inbound packet azalea could not decode and dropped; vanilla decodes and handles it"),
+        CHAT_SESSION("chat_session_update missing, extra or reused; vanilla sends a new one after every login that reports online mode");
 
         final String meaning;
 
@@ -376,6 +379,15 @@ public final class ClickOracle {
     ClientInformation lastInfo;
     long lastInfoMicros;
 
+    // chat session
+    /** Dumps from BAF before the per-login chat session fix hold no chat_session_update. */
+    boolean recordsChatSessions;
+    /** The online-mode login vanilla still owes a chat_session_update for, and its record. */
+    Rec chatSessionOwed;
+    int chatSessionOwedAt;
+    UUID lastChatSessionId;
+    Instant lastChatSessionKeyExpiry;
+
     ClickOracle(boolean printAll) {
         this.printAll = printAll;
     }
@@ -392,6 +404,7 @@ public final class ClickOracle {
 
     void run(List<Rec> all) {
         recs = all;
+        recordsChatSessions = all.stream().anyMatch(r -> r.kind == OUT && r.name.equals("chat_session_update"));
         for (at = 0; at < all.size(); at++) {
             Rec r = all.get(at);
             try {
@@ -408,9 +421,14 @@ public final class ClickOracle {
                 report(f);
             }
         }
+        if (!all.isEmpty()) settleChatSession(all.get(all.size() - 1).micros);
     }
 
     void startSession() {
+        if (at > 0) settleChatSession(recs.get(at - 1).micros);
+        chatSessionOwed = null;
+        lastChatSessionId = null;
+        lastChatSessionKeyExpiry = null;
         sessions++;
         inConfig = false;
         reconfigurePending = false;
@@ -546,9 +564,17 @@ public final class ClickOracle {
         if (p == null) return;
         reportAzaleaDrop(r, p);
         switch (p) {
-            case ClientboundLoginPacket l -> resetPlayer();
+            case ClientboundLoginPacket l -> {
+                resetPlayer();
+                loginChatSession(r, l);
+            }
             case ClientboundRespawnPacket rp -> resetPlayer();
-            case ClientboundStartConfigurationPacket s -> reconfigurePending = true;
+            case ClientboundStartConfigurationPacket s -> {
+                reconfigurePending = true;
+                // Vanilla's game listener stops ticking here, so a session it
+                // had not sent yet for this login is never sent.
+                if (chatSessionOwed != null && r.micros - chatSessionOwed.micros < 1_000_000) chatSessionOwed = null;
+            }
             case ClientboundUpdateTagsPacket t -> t.tags().forEach((key, payload) -> applyTags(registries, key, payload));
             case ClientboundOpenScreenPacket o -> {
                 String type = String.valueOf(BuiltInRegistries.MENU.getKey(o.getType()));
@@ -702,6 +728,7 @@ public final class ClickOracle {
             case ServerboundSelectKnownPacks k -> knownPacksReply(r, k, used);
             case ServerboundClientInformationPacket ci -> clientInformation(r, ci, used);
             case ServerboundCustomPayloadPacket cp -> customPayload(r, cp, used);
+            case ServerboundChatSessionUpdatePacket cs -> chatSessionUpdate(r, cs, used);
             case ServerboundContainerClosePacket c -> {
                 Finding f = finding(r, "out container_close " + c.getContainerId());
                 if (c.getContainerId() != current().id) {
@@ -817,6 +844,56 @@ public final class ClickOracle {
         } else {
             System.out.println("   custom_payload " + p.payload().type().id() + " (" + r.raw.length + " bytes)");
         }
+        roundTrip(f, r, p, codec);
+        report(f);
+    }
+
+    // ---------------------------------------------------------------- chat session
+
+    /**
+     * ClientPacketListener.handleLogin drops the chat session on every game
+     * login and, when the login reports online mode, sends a new one (a new
+     * random session id, the cached profile key) on its next tick.
+     */
+    void loginChatSession(Rec r, ClientboundLoginPacket l) {
+        if (!recordsChatSessions) {
+            once("no-chat-session", "this dump holds no chat_session_update (BAF before the per-login chat session fix); chat sessions are not checked");
+            return;
+        }
+        reportChatSessionOwed();
+        if (l.onlineMode()) {
+            chatSessionOwed = r;
+            chatSessionOwedAt = at;
+        }
+    }
+
+    void reportChatSessionOwed() {
+        if (chatSessionOwed == null) return;
+        Finding f = new Finding(chatSessionOwedAt, chatSessionOwed.micros, "in login (online mode)");
+        f.add(Cat.CHAT_SESSION, "no chat_session_update for this login; vanilla sends a new one after every login that reports online mode");
+        report(f);
+        chatSessionOwed = null;
+    }
+
+    /** A login right before a session or dump ends may not have had its tick yet. */
+    void settleChatSession(long lastMicros) {
+        if (chatSessionOwed != null && lastMicros - chatSessionOwed.micros >= 5_000_000) reportChatSessionOwed();
+        chatSessionOwed = null;
+    }
+
+    void chatSessionUpdate(Rec r, ServerboundChatSessionUpdatePacket p, StreamCodec codec) {
+        UUID id = p.chatSession().sessionId();
+        Instant expiry = p.chatSession().profilePublicKey().expiresAt();
+        Finding f = finding(r, "out chat_session_update " + id);
+        if (chatSessionOwed == null && expiry.equals(lastChatSessionKeyExpiry)) {
+            // A refreshed profile key is the one other reason vanilla sends one.
+            f.add(Cat.CHAT_SESSION, "no online-mode login since the last chat_session_update and the same profile key; vanilla sends none here");
+        } else if (id.equals(lastChatSessionId)) {
+            f.add(Cat.CHAT_SESSION, "reuses session id " + id + "; vanilla creates a new random one for every session");
+        }
+        chatSessionOwed = null;
+        lastChatSessionId = id;
+        lastChatSessionKeyExpiry = expiry;
         roundTrip(f, r, p, codec);
         report(f);
     }
@@ -1713,6 +1790,23 @@ public final class ClickOracle {
             add(IN_GAME, UNDECODABLE, gameInBytes(new ClientboundSetCursorItemPacket(ItemStack.EMPTY)));
             expect(Cat.AZALEA_DROP);
 
+            // M. chat sessions. Vanilla sends a new one after every login that
+            // reports online mode (Hypixel: after every server transfer); azalea
+            // used to send one per connection.
+            gen.notedOnce.add("no-chat-session"); // the generator itself is not checking
+            net.minecraft.world.entity.player.ProfilePublicKey.Data key = profileKey();
+            add(IN_GAME, "login", gameInBytes(login(true)));
+            add(OUT, "chat_session_update", chatSession(new UUID(1, 1), key));
+            expect(Cat.OK);
+            add(IN_GAME, "login", gameInBytes(login(true)));
+            expect(Cat.CHAT_SESSION); // nothing sent for this login
+            add(IN_GAME, "login", gameInBytes(login(true)));
+            add(OUT, "chat_session_update", chatSession(new UUID(1, 1), key));
+            expect(Cat.CHAT_SESSION); // the previous session id again
+            add(IN_GAME, "login", gameInBytes(login(false)));
+            add(OUT, "chat_session_update", chatSession(new UUID(1, 3), key));
+            expect(Cat.CHAT_SESSION); // offline-mode login, same key: vanilla sends none
+
             // L. a Hypixel server transfer: the connection goes back to
             // configuration. Answering a keepalive there is vanilla; a game
             // ping_request (BAF's RTT pinger) is not, vanilla sends no game
@@ -1729,6 +1823,28 @@ public final class ClickOracle {
             // Encoded with the game codec from before the transfer, as azalea does.
             add(OUT, "ping_request", encode(gen.lastGameOut.codec(), new ServerboundPingRequestPacket(1_794_600_000L)));
             expect(Cat.WRONG_STATE);
+        }
+
+        ClientboundLoginPacket login(boolean onlineMode) {
+            net.minecraft.core.Holder<net.minecraft.world.level.dimension.DimensionType> overworld = gen.registries
+                    .lookupOrThrow(Registries.DIMENSION_TYPE)
+                    .getOrThrow(net.minecraft.world.level.dimension.BuiltinDimensionTypes.OVERWORLD);
+            var spawn = new net.minecraft.network.protocol.game.CommonPlayerSpawnInfo(overworld,
+                    net.minecraft.world.level.Level.OVERWORLD, 0L, net.minecraft.world.level.GameType.SURVIVAL,
+                    Optional.empty(), false, false, Optional.empty(), 0, 63);
+            return new ClientboundLoginPacket(1, false, Set.of(net.minecraft.world.level.Level.OVERWORLD),
+                    20, 12, 12, false, true, false, spawn, onlineMode, true);
+        }
+
+        static net.minecraft.world.entity.player.ProfilePublicKey.Data profileKey() throws Exception {
+            java.security.KeyPairGenerator rsa = java.security.KeyPairGenerator.getInstance("RSA");
+            rsa.initialize(1024);
+            return new net.minecraft.world.entity.player.ProfilePublicKey.Data(
+                    Instant.ofEpochMilli(1_794_800_000_000L), rsa.generateKeyPair().getPublic(), new byte[512]);
+        }
+
+        byte[] chatSession(UUID id, net.minecraft.world.entity.player.ProfilePublicKey.Data key) {
+            return gameOutBytes(new ServerboundChatSessionUpdatePacket(new net.minecraft.network.chat.RemoteChatSession.Data(id, key)));
         }
 
         static <T> void copy(DataComponentPatch.Builder b, TypedDataComponent<T> c) {

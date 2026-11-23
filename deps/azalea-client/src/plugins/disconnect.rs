@@ -72,6 +72,12 @@ pub struct RemoveOnDisconnectBundle {
     /// Resend our chat signing certs next time.
     #[cfg(feature = "online-mode")]
     pub chat_signing_session: chat_signing::ChatSigningSession,
+    /// A session owed to this connection's login is not owed to the next
+    /// connection; its own login packet decides.
+    #[cfg(feature = "online-mode")]
+    pub needs_chat_session: chat_signing::NeedsChatSession,
+    #[cfg(feature = "online-mode")]
+    pub queued_certs: chat_signing::QueuedCertsToSend,
     /// They're not authenticated anymore if they disconnected.
     pub is_authenticated: IsAuthenticated,
     // send ServerboundPlayerLoaded next time we join.

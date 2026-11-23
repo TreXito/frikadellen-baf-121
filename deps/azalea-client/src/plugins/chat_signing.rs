@@ -58,19 +58,29 @@ pub struct ChatSigningSession {
 
 pub fn poll_request_certs_task(
     mut commands: Commands,
-    mut query: Query<(Entity, &mut RequestCertsTask, &Account)>,
+    mut query: Query<(
+        Entity,
+        &mut RequestCertsTask,
+        &Account,
+        Has<ChatSigningSession>,
+        Has<InGameState>,
+    )>,
 ) {
-    for (entity, mut auth_task, account) in query.iter_mut() {
+    for (entity, mut auth_task, account, has_session, in_game) in query.iter_mut() {
         if let Some(poll_res) = future::block_on(future::poll_once(&mut auth_task.0)) {
             debug!("Finished requesting certs");
             commands.entity(entity).remove::<RequestCertsTask>();
 
             match poll_res {
                 Ok(certs) => {
-                    commands.entity(entity).insert(QueuedCertsToSend {
-                        certs: certs.clone(),
-                    });
                     account.set_certs(certs);
+                    // A login that is waiting (NeedsChatSession) picks the key
+                    // up from the account. A refreshed key replaces a live
+                    // session, like vanilla's setKeyPair, but only in game
+                    // state: during configuration the next login sends it.
+                    if has_session && in_game {
+                        commands.entity(entity).insert(NeedsChatSession);
+                    }
                 }
                 Err(err) => {
                     error!("Error requesting certs: {err:?}. Retrying in an hour.");
@@ -92,38 +102,44 @@ pub fn request_certs_if_needed(
             Entity,
             &Account,
             Option<&OnlyRefreshCertsAfter>,
-            Option<&ChatSigningSession>,
+            Has<ChatSigningSession>,
+            Has<NeedsChatSession>,
         ),
         (
             Without<RequestCertsTask>,
+            Without<QueuedCertsToSend>,
             With<InGameState>,
             With<IsAuthenticated>,
         ),
     >,
 ) {
-    for (entity, account, only_refresh_certs_after, chat_signing_session) in query.iter_mut() {
+    for (entity, account, only_refresh_certs_after, has_session, needs_session) in query.iter_mut()
+    {
         if let Some(only_refresh_certs_after) = only_refresh_certs_after
             && only_refresh_certs_after.refresh_at > Instant::now()
         {
             continue;
         }
 
-        let certs = account.certs();
-        let should_refresh = if let Some(certs) = certs {
-            // certs were already requested and we're waiting for them to refresh
-
-            // but maybe they weren't sent yet, in which case we still want to send the
-            // certs
-            if chat_signing_session.is_none() {
-                true
-            } else {
-                Utc::now() > certs.expires_at
+        // vanilla's ProfileKeyPairManager hands out its cached key pair until
+        // the key's refreshedAfter time
+        let fresh_certs = account
+            .certs()
+            .filter(|certs| Utc::now() < certs.refresh_after);
+        match (needs_session, has_session, fresh_certs) {
+            // a new session (one per game login) reuses a key that is not due
+            // a refresh, without asking Mojang again
+            (true, _, Some(certs)) => {
+                commands.entity(entity).insert(QueuedCertsToSend { certs });
+                continue;
             }
-        } else {
-            true
-        };
+            // nothing owed, or the live session's key is still fresh
+            (false, false, _) | (false, true, Some(_)) => continue,
+            // no key yet, or the live session's key is due a refresh
+            (true, _, None) | (false, true, None) => {}
+        }
 
-        if should_refresh && let Some(access_token) = account.access_token() {
+        if let Some(access_token) = account.access_token() {
             let task_pool = IoTaskPool::get();
 
             debug!("Started task to fetch certs");
@@ -138,6 +154,41 @@ pub fn request_certs_if_needed(
     }
 }
 
+/// Present while this client owes the server a fresh
+/// [`ServerboundChatSessionUpdate`].
+///
+/// Vanilla's `ClientPacketListener.handleLogin` drops its chat session on every
+/// game login and, when the login reports online mode, sends a new one (new
+/// random session id, cached profile key) on its next tick. Hypixel sends a
+/// game login after every server transfer, so a client that keeps one session
+/// per connection skips a packet every vanilla client sends there.
+#[derive(Component)]
+pub struct NeedsChatSession;
+
+/// Called for every game login packet, like vanilla's `handleLogin`: the old
+/// session is gone, and an online-mode server gets a new one.
+pub fn restart_session_on_login(ecs: &mut World, player: Entity, online_mode: bool) {
+    let Ok(mut entity) = ecs.get_entity_mut(player) else {
+        return;
+    };
+    entity.remove::<(ChatSigningSession, QueuedCertsToSend)>();
+    if online_mode {
+        entity.insert(NeedsChatSession);
+    } else {
+        entity.remove::<NeedsChatSession>();
+    }
+}
+
+/// Called on `start_configuration`. Vanilla's game listener stops ticking
+/// there, so a session it had not sent yet is never sent for that login.
+/// Without this, a session still owed would go out after the next
+/// `finish_configuration`, before that connection's own login packet.
+pub fn forget_owed_session(ecs: &mut World, player: Entity) {
+    if let Ok(mut entity) = ecs.get_entity_mut(player) {
+        entity.remove::<(NeedsChatSession, QueuedCertsToSend)>();
+    }
+}
+
 /// A component that's present on players that should send their chat signing
 /// certificates as soon as possible.
 ///
@@ -149,7 +200,7 @@ pub struct QueuedCertsToSend {
 
 pub fn handle_queued_certs_to_send(
     mut commands: Commands,
-    query: Query<(Entity, &QueuedCertsToSend), With<IsAuthenticated>>,
+    query: Query<(Entity, &QueuedCertsToSend), (With<IsAuthenticated>, With<InGameState>)>,
 ) {
     for (entity, queued_certs) in &query {
         let certs = &queued_certs.certs;
@@ -173,7 +224,7 @@ pub fn handle_queued_certs_to_send(
         ));
         commands
             .entity(entity)
-            .remove::<QueuedCertsToSend>()
+            .remove::<(QueuedCertsToSend, NeedsChatSession)>()
             .insert(ChatSigningSession {
                 session_id,
                 messages_sent: 0,

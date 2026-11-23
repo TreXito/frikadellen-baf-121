@@ -19,8 +19,9 @@
 //!   transfer
 //! - outbound: container clicks, button clicks, closes, sign updates, carried
 //!   slot changes, the configuration acks, client information, brand / custom
-//!   payloads, resource pack replies, keepalives, pongs, ping requests and
-//!   cookie replies
+//!   payloads, resource pack replies, keepalives, pongs, ping requests,
+//!   cookie replies and chat session updates (the profile public key the
+//!   server already shares with every player, no message)
 //!
 //! Chat is never recorded. `tools/vanilla-oracle` replays the file through
 //! Mojang's own 26.3 client code and reports every click whose bytes differ from
@@ -85,6 +86,7 @@ const OUTBOUND: &[&str] = &[
     "cookie_response",
     "accept_code_of_conduct",
     "custom_click_action",
+    "chat_session_update",
 ];
 
 /// Name prefix and extension of the per-start files `packet_dump = true` writes.
@@ -454,6 +456,12 @@ mod tests {
         for name in ["keep_alive", "pong", "ping_request", "cookie_response"] {
             assert_eq!(classify(false, None, name), Some(Kind::Out), "{name}");
         }
+        // Vanilla sends a fresh chat session after every online-mode login;
+        // the oracle counts them per login.
+        assert_eq!(
+            classify(false, None, "chat_session_update"),
+            Some(Kind::Out)
+        );
         // Frames azalea dropped are kept in both states.
         assert_eq!(
             classify(true, Some(Configuration), UNDECODABLE),

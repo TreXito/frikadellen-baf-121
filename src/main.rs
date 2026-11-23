@@ -5887,7 +5887,7 @@ async fn main() -> Result<()> {
                             live
                         )),
                         None => print_mc_chat(
-                            "§f[§4BAF§f]: §eLive game ping not measured yet §7(F3+3 pinger warms up ~15s after login) — showing edge probe only",
+                            "§f[§4BAF§f]: §eLive game ping not measured §7(it runs only while adaptive bed timing is on, from ~15s after login) — showing edge probe only",
                         ),
                     }
                     // SLP edge probe for comparison — explicitly labelled so it is
