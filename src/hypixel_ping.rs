@@ -55,6 +55,12 @@ pub fn latest_live_ping_ms() -> Option<u64> {
     }
 }
 
+/// Forget the live-connection RTT, so [`best_ping_ms`] falls back to the SLP
+/// figure. Called while the in-game ping is off (adaptive bed timing disabled).
+pub fn clear_live_ping() {
+    LATEST_LIVE_PING_MS.store(0, Ordering::Relaxed);
+}
+
 /// Best available RTT for timing decisions: the live-connection figure when we
 /// have one, else the SLP fallback. This is what bed timing should lead by.
 pub fn best_ping_ms() -> Option<u64> {
@@ -256,5 +262,16 @@ mod tests {
     fn targets_minecraft_26_3_protocol() {
         assert_eq!(azalea_protocol::packets::VERSION_NAME, "26.3");
         assert_eq!(azalea_protocol::packets::PROTOCOL_VERSION, 777);
+    }
+
+    #[test]
+    fn a_cleared_live_ping_falls_back_to_the_slp_figure() {
+        use std::sync::atomic::Ordering;
+        super::LATEST_PING_MS.store(42, Ordering::Relaxed);
+        super::LATEST_LIVE_PING_MS.store(7, Ordering::Relaxed);
+        assert_eq!(super::best_ping_ms(), Some(7));
+        super::clear_live_ping();
+        assert_eq!(super::latest_live_ping_ms(), None);
+        assert_eq!(super::best_ping_ms(), Some(42));
     }
 }

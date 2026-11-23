@@ -219,6 +219,12 @@ impl GamePacketHandler<'_> {
     pub fn login(&mut self, p: &ClientboundLogin) {
         debug!("Got login packet");
 
+        // Like vanilla's handleLogin: drop the chat session, and owe an
+        // online-mode server a fresh one. Hypixel logs us in again after every
+        // server transfer.
+        #[cfg(feature = "online-mode")]
+        crate::chat_signing::restart_session_on_login(self.ecs, self.player, p.online_mode);
+
         as_system::<(
             Commands,
             Query<
@@ -1506,6 +1512,9 @@ impl GamePacketHandler<'_> {
 
     pub fn start_configuration(&mut self, _p: &ClientboundStartConfiguration) {
         debug!("Got start configuration packet");
+
+        #[cfg(feature = "online-mode")]
+        crate::chat_signing::forget_owed_session(self.ecs, self.player);
 
         as_system::<(Commands, Query<(&mut RawConnection, &mut WorldHolder)>)>(
             self.ecs,

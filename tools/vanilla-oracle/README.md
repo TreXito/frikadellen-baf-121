@@ -69,6 +69,7 @@ per category. A summary with counts per category ends the report.
 | `LOGIN` | login or configuration packet that differs from vanilla: brand, known packs reply, a client_information resend vanilla would never send |
 | `WRONG_STATE` | a game-only packet sent while the connection is in configuration (between the bot's `configuration_acknowledged` and Hypixel's `finish_configuration`). Vanilla sends none there; the server reads it with the configuration packet table |
 | `AZALEA_DROP` | an inbound frame azalea could not decode and dropped (recorded as `undecodable`). The bot never saw it; the line names the vanilla packet. A dropped `finish_configuration` or `login` leaves a transfer stuck |
+| `CHAT_SESSION` | vanilla sends a new `chat_session_update` (new random session id) after every game login that reports online mode, which on Hypixel is every server transfer. Flags a login with none, a reused session id, or one with no login before it and the same profile key. Skipped for dumps that hold no `chat_session_update` at all (BAF before it recorded them) |
 
 How it decides what vanilla sends:
 

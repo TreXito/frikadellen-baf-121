@@ -2779,9 +2779,11 @@ async fn event_handler(bot: Client, event: Event, state: BotClientState) -> Resu
                 });
             }
 
-            // Spawn the live-RTT pinger for this login. Sends a vanilla F3+3 ping
-            // every few seconds so `hypixel_ping::LATEST_LIVE_PING_MS` reflects the
-            // true game-connection RTT (proxy hop included) for bed timing.
+            // Spawn the per-login loop: the configuration-stall watchdog and,
+            // only while ping-adaptive bed timing is on, the live-RTT ping.
+            // Vanilla sends a game ping_request only while the F3 network charts
+            // are open, and then every tick. One every 3 s is a rhythm no
+            // vanilla client makes, so it is off unless the operator opted in.
             {
                 let my_gen = PINGER_GEN.fetch_add(1, Ordering::AcqRel) + 1;
                 let bot_ping = bot.clone();
@@ -2792,7 +2794,15 @@ async fn event_handler(bot: Client, event: Event, state: BotClientState) -> Resu
                     while PINGER_GEN.load(Ordering::Acquire) == my_gen {
                         let now = std::time::Instant::now();
                         match watchdog.observe(connection_state(&bot_ping), now) {
-                            ConfigStall::InGame => send_ping_request(&bot_ping),
+                            ConfigStall::InGame => {
+                                if crate::hypixel_ping::adaptive_bed_enabled() {
+                                    send_ping_request(&bot_ping);
+                                } else {
+                                    // A figure nothing refreshes must not steer
+                                    // bed timing once adaptive timing is back on.
+                                    crate::hypixel_ping::clear_live_ping();
+                                }
+                            }
                             ConfigStall::Waiting => {}
                             ConfigStall::Stuck(stuck_for) => {
                                 error!(
