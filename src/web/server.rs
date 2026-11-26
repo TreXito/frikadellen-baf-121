@@ -750,7 +750,7 @@ async fn send_https_redirect(stream: &mut tokio::net::TcpStream) {
     let _ = stream.flush().await;
 }
 
-pub async fn start_web_server(state: WebSharedState, port: u16) {
+pub async fn start_web_server(state: WebSharedState, bind: &str, port: u16) {
     let use_tls = !plain_http_requested();
     WEB_TLS_ACTIVE.store(use_tls, Ordering::Relaxed);
 
@@ -817,7 +817,12 @@ pub async fn start_web_server(state: WebSharedState, port: u16) {
         ))
         .with_state(state);
 
-    let addr = format!("0.0.0.0:{}", port);
+    // Bracket bare IPv6 addresses so "::1" becomes "[::1]:port".
+    let addr = if bind.contains(':') && !bind.starts_with('[') {
+        format!("[{}]:{}", bind, port)
+    } else {
+        format!("{}:{}", bind, port)
+    };
     let scheme = if use_tls { "https" } else { "http" };
     if has_password {
         info!(

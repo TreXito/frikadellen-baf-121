@@ -320,7 +320,10 @@ impl BotEventHandlers {
     /// "Price: 1,234,567 coins"
     /// "Cost: 1.2M coins"
     pub fn parse_price_from_lore(lore: &[String]) -> Option<f64> {
-        let price_regex = Regex::new(r"(?:Price|Cost):\s*([0-9,\.]+)\s*([KMB])?\s*coins?").unwrap();
+        static PRICE_RE: Lazy<Regex> = Lazy::new(|| {
+            Regex::new(r"(?:Price|Cost):\s*([0-9,\.]+)\s*([KMB])?\s*coins?").expect("valid regex")
+        });
+        let price_regex = &*PRICE_RE;
 
         for line in lore {
             let clean = Self::remove_color_codes(line);
@@ -356,7 +359,9 @@ impl BotEventHandlers {
     /// "Instant-Buy: 1,234.5"
     /// "Instant-Sell: 5,678.9"
     pub fn parse_bazaar_sign_price(sign_lines: &[String]) -> Option<f64> {
-        let price_regex = Regex::new(r"Instant-(?:Buy|Sell):\s*([0-9,\.]+)").unwrap();
+        static SIGN_PRICE_RE: Lazy<Regex> =
+            Lazy::new(|| Regex::new(r"Instant-(?:Buy|Sell):\s*([0-9,\.]+)").expect("valid regex"));
+        let price_regex = &*SIGN_PRICE_RE;
 
         for line in sign_lines {
             let clean = Self::remove_color_codes(line);

@@ -10,7 +10,9 @@
 ///
 /// Preserves exact slot numbers, timing delays, and packet logic from TypeScript.
 use anyhow::{anyhow, Result};
+use once_cell::sync::Lazy;
 use parking_lot::RwLock;
+use regex::Regex;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::time::sleep;
@@ -19,6 +21,18 @@ use tracing::{debug, error, info, warn};
 use crate::gui::{WindowHandler, WindowSlot};
 use crate::types::{BazaarFlipRecommendation, BotState};
 use crate::utils::to_title_case;
+
+// Compiled once instead of on every parsed chat message.
+static NEW_FORMAT_ORDER_RE: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r"(?i)Recommending\s+(?:sell|buy)\s+order:\s+(\d+)x\s+(.+?)\s+at\s+([\d.]+[KkMm]?)\s+per\s+unit",
+    )
+    .expect("valid regex")
+});
+static OLD_FORMAT_ORDER_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"(\d+)x\s+([^\s]+(?:\s+[^\s]+)*?)\s+for").expect("valid regex"));
+static OLD_FORMAT_PRICE_RE: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r"for\s+([\d.]+[KkMm]?)\(").expect("valid regex"));
 
 /// Configuration constants
 #[allow(dead_code)]
@@ -248,15 +262,14 @@ impl BazaarFlipHandler {
 
         if is_new_format {
             // New format: "Recommending sell order: 2x Enchanted Coal Block at 30.1K per unit(1)"
-            let re_order = regex::Regex::new(
-                r"(?i)Recommending\s+(?:sell|buy)\s+order:\s+(\d+)x\s+(.+?)\s+at\s+([\d.]+[KkMm]?)\s+per\s+unit"
-            ).unwrap();
-            let order_match = re_order.captures(&clean_message).ok_or_else(|| {
-                anyhow!(
-                    "Failed to parse bazaar flip recommendation from chat message: {}",
-                    clean_message
-                )
-            })?;
+            let order_match = NEW_FORMAT_ORDER_RE
+                .captures(&clean_message)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "Failed to parse bazaar flip recommendation from chat message: {}",
+                        clean_message
+                    )
+                })?;
 
             let amount = order_match[1].parse::<u64>()?;
             let item_name = order_match[2].trim().to_string();
@@ -292,8 +305,7 @@ impl BazaarFlipHandler {
 
         // Old format: "Recommending an order of 4x Cindershade for 1.06M(1)"
         // Extract amount and item name: "4x Cindershade"
-        let re_order = regex::Regex::new(r"(\d+)x\s+([^\s]+(?:\s+[^\s]+)*?)\s+for").unwrap();
-        let order_match = re_order
+        let order_match = OLD_FORMAT_ORDER_RE
             .captures(&clean_message)
             .ok_or_else(|| anyhow!("Failed to parse order from message"))?;
 
@@ -301,8 +313,7 @@ impl BazaarFlipHandler {
         let item_name = order_match[2].trim().to_string();
 
         // Extract price: "1.06M"
-        let re_price = regex::Regex::new(r"for\s+([\d.]+[KkMm]?)\(").unwrap();
-        let price_match = re_price
+        let price_match = OLD_FORMAT_PRICE_RE
             .captures(&clean_message)
             .ok_or_else(|| anyhow!("Failed to parse price from message"))?;
 
@@ -413,8 +424,7 @@ impl BazaarFlipHandler {
                     return Ok(());
                 }
                 Err(e) => {
-                    last_error = Some(e);
-                    let error_message = last_error.as_ref().unwrap().to_string();
+                    let error_message = e.to_string();
 
                     let is_timeout_error = error_message.contains("timed out");
                     let is_retryable_error =
@@ -429,6 +439,7 @@ impl BazaarFlipHandler {
                         let backoff_delay = RETRY_BACKOFF_BASE_MS * 2_u64.pow(attempt as u32 - 1);
                         info!("Will retry after {}ms delay...", backoff_delay);
                         *bot_state.write() = BotState::Idle;
+                        last_error = Some(e);
                         sleep(Duration::from_millis(backoff_delay)).await;
                     } else {
                         if !is_retryable_error {
@@ -440,7 +451,7 @@ impl BazaarFlipHandler {
                             );
                         }
                         *bot_state.write() = BotState::Idle;
-                        return Err(last_error.unwrap());
+                        return Err(e);
                     }
                 }
             }

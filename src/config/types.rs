@@ -333,6 +333,13 @@ pub struct Config {
     #[serde(default = "default_web_gui_port")]
     pub web_gui_port: u16,
 
+    /// Address the web control panel listens on. `0.0.0.0` (the default) makes
+    /// it reachable from other machines, which is what a VPS setup needs. Set
+    /// `127.0.0.1` to only allow this machine (reach a VPS through an SSH
+    /// tunnel instead: `ssh -L 8080:127.0.0.1:8080 user@vps`).
+    #[serde(default = "default_web_gui_bind")]
+    pub web_gui_bind: String,
+
     /// Password required to open the web control panel. A strong random one is
     /// generated the first time this file is written, so a panel is never
     /// reachable without a password. Change it to whatever you like — but it
@@ -520,6 +527,10 @@ fn default_web_gui_port() -> u16 {
     8080
 }
 
+fn default_web_gui_bind() -> String {
+    "0.0.0.0".to_string()
+}
+
 /// Generate a random panel password.
 ///
 /// The alphabet deliberately drops the characters people mis-transcribe
@@ -684,6 +695,7 @@ impl Default for Config {
             account_proxies: HashMap::new(),
             // Web control panel
             web_gui_port: default_web_gui_port(),
+            web_gui_bind: default_web_gui_bind(),
             web_gui_password: None,
             web_tls_cert_path: None,
             web_tls_key_path: None,
@@ -1228,6 +1240,18 @@ mod tests {
         // panel on its self-signed one.
         assert_eq!(config.web_tls_cert_path.as_deref(), Some("/etc/cert.pem"));
         assert_eq!(config.web_tls_key_path.as_deref(), Some("/etc/key.pem"));
+    }
+
+    #[test]
+    fn web_gui_bind_defaults_to_all_interfaces_and_can_be_restricted() {
+        // Old configs have no web_gui_bind and must keep listening everywhere,
+        // otherwise VPS users would suddenly lose their panel.
+        let config: Config = toml::from_str("").expect("empty config should parse");
+        assert_eq!(config.web_gui_bind, "0.0.0.0");
+
+        let config: Config =
+            toml::from_str(r#"web_gui_bind = "127.0.0.1""#).expect("config should parse");
+        assert_eq!(config.web_gui_bind, "127.0.0.1");
     }
 
     #[test]

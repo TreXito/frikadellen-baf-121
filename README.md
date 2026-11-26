@@ -367,6 +367,7 @@ The `config.toml` file is created automatically on first run. You can edit it wi
 | `ingame_name` | string | — | Minecraft username(s), comma-separated for multi-account |
 | `multi_switch_time` | float | `0` | Hours between account switches (0 = disabled) |
 | `web_gui_port` | integer | `8080` | Port for the web control panel |
+| `web_gui_bind` | string | `"0.0.0.0"` | Address the panel listens on. `0.0.0.0` = reachable from other machines (needed for a VPS). `127.0.0.1` = this machine only; reach it remotely with `ssh -L 8080:127.0.0.1:8080 user@vps` |
 | `web_gui_password` | string | random | Password for the web panel. Generated on first run; cannot be empty |
 | `enable_console_input` | boolean | `true` | Allow typing commands in the terminal |
 | `packet_dump` | boolean | `false` | Record the packets `tools/vanilla-oracle` checks (configuration phases, container traffic, clicks, keepalives, pings; never chat) to `logs/packets-<UTC time>.bin` on every start, restarts included. Observes only. Keeps the newest 2 GB of dumps (`BAF_PACKET_DUMP_KEEP_MB`). Read at start |
@@ -484,8 +485,8 @@ The compiled binary will be at `target/release/frikadellen_baf`.
 A convenience script is included in the repo:
 
 ```bash
-chmod +x frikadellen-baf-121
-./frikadellen-baf-121
+chmod +x run.sh
+./run.sh
 ```
 
 It checks for an existing binary, builds from source if needed, and runs the bot.

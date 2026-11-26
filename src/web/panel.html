@@ -2164,6 +2164,8 @@ const CONFIG_SCHEMA = [
     // ── Web panel ──
     {key:'web_gui_port', group:'panel', type:'number', label:'Panel port', min:1, max:65535,
      help:'Takes effect after a restart.'},
+    {key:'web_gui_bind', group:'panel', type:'text', label:'Panel listen address', ph:'0.0.0.0',
+     help:'0.0.0.0 = reachable from other machines (needed to open the panel on a VPS by its IP). 127.0.0.1 = this machine only; reach a VPS with an SSH tunnel instead. Takes effect after a restart.'},
     {key:'web_gui_password', group:'panel', type:'text', label:'Panel password', secret:true, writeOnly:true,
      ph:'unchanged — type here only to set a new one',
      help:'Leave empty to keep the current password. The bot prints it to its console on every start. Generated randomly on first run; it cannot be emptied, because this panel controls the bot.'},
